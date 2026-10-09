@@ -105,7 +105,7 @@ function fakeAgentCtx(recorded) {
   return agentCtx;
 }
 
-function makeCtx() {
+function makeCtx(extraServices = {}) {
   const recorded = {
     effects: [],
     tools: [],
@@ -149,6 +149,8 @@ function makeCtx() {
       return { ok: true, value: { archivedSessionIds: [sessionId] } };
     },
   };
+  /** 用例自己塞进来的宿主服务（`permissionPresets` 之类）；没给就当宿主没这个服务。 */
+  const extras = { ...extraServices };
   const sctxBase = {
     effect(fn, label) {
       recorded.effects.push({ label: label ?? 'scoped', dispose: fn() });
@@ -156,9 +158,9 @@ function makeCtx() {
     },
     get: (name) => {
       if (name === 'agentPresets') return fakePresets;
-      if (name === 'sessions') return fakeSessions;
+      if (name === 'sessions') return extras.sessions ?? fakeSessions;
       if (name === 'workspaceRegistry') return fakeWorkspace;
-      return undefined;
+      return extras[name] ?? undefined;
     },
   };
   const ctx = {
@@ -182,7 +184,7 @@ function makeCtx() {
         return () => {};
       },
     },
-    get: () => undefined,
+    get: (name) => extras[name] ?? undefined,
     on(name, handler) {
       recorded.onEvents.push({ name, handler });
       return () => {};
@@ -1066,6 +1068,85 @@ async function runAsyncChecks() {
     hub.models.set('group:55555', 'vision', null);
     const names = (hub.chatCommands?.describe?.().commands ?? []).concat(COMMAND_SPECS.map((spec) => spec.name));
     assert.ok(names.includes('model') && names.includes('vmodel'), `命令表里没有 /model 或 /vmodel：${names.join(',')}`);
+  });
+
+  await checkAsync('/perm 改到的是本次激活那个会话（m33779 真机 bug），且权限只对这一次激活有效', async () => {
+    // 真机 bug：`.perm` 找的是**无后缀** id，而真正在跑的会话每次激活都带 `.a<时间戳><随机>`
+    //（`964ddcf`），于是 `sessions.get()` 永远查不到 → 命令只会回"找不到它，改不了权限"。
+    // 这里把宿主的会话库做成"只认带后缀的 id"，谁去问无后缀 id 一律 null——修好之后还能成功，
+    // 就说明它要的根本不是那个 id。
+    const permCalls = [];
+    const asked = [];
+    const sessionsSvc = {
+      get: (id) => {
+        asked.push(String(id));
+        return String(id).includes('.a') ? { id } : null;
+      },
+      rename: async () => ({ ok: true, value: { title: 'x', seq: 1 } }),
+    };
+    const presetsSvc = {
+      catalog: () => ({
+        options: [
+          { value: 'read-only', label: '只读' },
+          { value: 'workspace-write', label: '工作区写入' },
+        ],
+      }),
+      set: (session, value) => permCalls.push({ id: String(session?.id ?? ''), value: String(value) }),
+      current: (session) => permCalls.filter((row) => row.id === String(session?.id ?? '')).at(-1)?.value ?? 'read-only',
+    };
+    const permCtx = makeCtx({ permissionPresets: presetsSvc, sessions: sessionsSvc });
+    const permHub = apply(permCtx.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      chatCommands: { superUsers: '["10001"]' },
+    });
+    await sleep(60);
+    assert.ok(permHub.chatCommands, '配了超管就该挂上命令处理器');
+    const key = 'group:88991';
+    const evt = (text) => ({ post_type: 'message', user_id: 10001, message: [{ type: 'text', data: { text } }] });
+    // 先唤醒一次 = 有个"活着的会话"，id 必须是带后缀那个。
+    const reply = { candidate: null, capture() { return null; }, take() { return null; }, clear() {} };
+    await permHub.pool.wake(key, {
+      text: '装载检查',
+      summary: '装载检查',
+      setup: (agentCtx) => permHub.mind.setup(agentCtx, { reply, sessionKey: key, agentKey: key }),
+    });
+    const liveId = String(permCtx.recorded.created.at(-1)?.sessionId ?? '');
+    assert.match(liveId, /^onebot-hub:group%3A88991\.a[0-9a-z]+$/, `应当是本次激活的新会话 id：${liveId}`);
+
+    const ask = await permHub.chatCommands.handle({ event: evt('/perm'), sessionKey: key });
+    assert.equal(ask.handled, true);
+    assert.equal(ask.reason, 'ok', `查询不该失败：${ask.reply}`);
+    assert.match(ask.reply, /read-only/, '要报得出当前预设');
+    assert.match(ask.reply, /只对/, '必须把"权限只对这一次激活有效"说出来，否则用户以为改了就一直有效');
+
+    const set = await permHub.chatCommands.handle({ event: evt('/perm workspace-write'), sessionKey: key });
+    assert.equal(set.handled, true);
+    assert.equal(set.reason, 'ok', `设置不该失败：${set.reply}`);
+    assert.match(set.reply, /workspace-write/);
+    assert.match(set.reply, /只对这一次激活有效/, '回话要说清不持久');
+    assert.equal(permCalls.length, 1, '应当只调了一次 presets.set');
+    assert.equal(permCalls[0].id, liveId, `.perm 必须改到本次激活的会话，实际改到了 ${permCalls[0].id}`);
+    assert.equal(permCalls[0].value, 'workspace-write');
+    assert.ok(asked.length > 0, '没有去问 sessions.get');
+    assert.equal(
+      asked.includes('onebot-hub:group%3A88991'),
+      false,
+      '不该再去问那个无后缀的 id（真机 bug 的根）',
+    );
+
+    // 没被唤醒过的会话：`ensureAgent` 建起来后同样要改得到（超管常先给权限再让它干活）。
+    const cold = await permHub.chatCommands.handle({ event: evt('/perm workspace-write'), sessionKey: 'group:88992' });
+    assert.equal(cold.reason, 'ok', `没唤醒过的会话也要改得到：${cold.reply}`);
+    assert.equal(permCalls.length, 2);
+    assert.match(permCalls[1].id, /^onebot-hub:group%3A88992\.a/, `冷会话也该是带后缀的 id：${permCalls[1].id}`);
+
+    // 预设名不在部署里：不改，把可选项列出来。
+    const bad = await permHub.chatCommands.handle({ event: evt('/perm nope'), sessionKey: key });
+    assert.match(bad.reply, /没有「nope」/);
+    assert.equal(permCalls.length, 2, '认不出的预设名不许瞎设');
   });
 
   await checkAsync('onebot_timeline 能执行', async () => {
