@@ -64,6 +64,9 @@
   "dependencies": {
     "ws": "^8.18.0"
   },
+  "devDependencies": {
+    "@deepseek-ai/schemastery": "3.18.4"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
     "@deepseek-ai/dsh-agent": "*",

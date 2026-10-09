@@ -112,7 +112,7 @@ node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具�
 
 ### CI 与发布
 
-- **CI**：`.github/workflows/ci.yml`。push 到 `main`、提 PR 或手动触发时跑 `npm test`，矩阵是 Node 22/24 × Ubuntu/Windows。宿主那几个 `@deepseek-ai/*` 是 peer 依赖，装依赖时用 `--omit=peer`（测试用 `test/register-stubs.mjs` 打桩）。
+- **CI**：`.github/workflows/ci.yml`。push 到 `main`、提 PR 或手动触发时跑 `npm test`，矩阵是 Node 22/24 × Ubuntu/Windows。装依赖用 `npm install --omit=peer --legacy-peer-deps`：宿主那几个 `@deepseek-ai/dsh-*` 是 peer 依赖（测试用 `test/register-stubs.mjs` 打桩），而 registry 上它们自己的 peer 区间互相冲突，不加 `--legacy-peer-deps` 会直接 ERESOLVE。`devDependencies` 里的 `@deepseek-ai/schemastery` 才是 `test/load-check.mjs` 用的**真** Config schema 校验器，不能省。
 - **发到 npm**：`.github/workflows/publish.yml`。`git push origin v0.2.0` 触发——先校验 tag 与 `package.json` 版本一致，再跑一遍测试，然后 `npm publish --provenance --access public`。需要仓库里有名为 `NPM_TOKEN` 的 secret（npm automation token；想免 token 就改用 npm Trusted Publishing，把这个 workflow 登记成 trusted publisher）。手动触发默认只 dry-run，只跑测试和 `npm pack --dry-run`。
 - 本机 `npm publish` 如果报 `DEPTH_ZERO_SELF_SIGNED_CERT`（公司/杀软 TLS 拦截），加 `NODE_OPTIONS=--use-system-ca`；CI 上不受影响。
 
