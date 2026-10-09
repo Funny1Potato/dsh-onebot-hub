@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: node ${{ matrix.node }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['22', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # `@deepseek-ai/*` 是宿主提供的 peer 依赖，测试用 test/register-stubs.mjs 打桩，
+      # 所以这里必须 `--omit=peer`，否则 npm 会去 registry 拉一整套宿主包。
+      - name: Install
+        run: npm install --omit=peer --no-audit --no-fund
+
+      - name: Tests
+        run: npm test

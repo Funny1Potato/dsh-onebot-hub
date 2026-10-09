@@ -44,7 +44,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 
 | 键 | 说明 |
 | --- | --- |
-| `upstreamListen` | **推荐**。让实现端反连 hub（例 `127.0.0.1:14514/onebot/v11/ws`），不用在 hub 上填上游地址。与 `upstreamUrl` 二选一 |
+| `upstreamListen` | **推荐**。让实现端反连 hub（例 `127.0.0.1:8765/onebot/v11/ws`），不用在 hub 上填上游地址。与 `upstreamUrl` 二选一 |
 | `downstreamTargets` | 下游列表，JSON 数组。支持四种连接方式（`ws-dial` / `ws-listen` / `http-api` / `http-post`），可多条，设置页有行编辑器 |
 
 只想自己用、不接下游 bot：`downstreamTargets` 留空即可。
@@ -101,13 +101,24 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 
 ```powershell
 cd dsh-onebot-hub
-node test/smoke-core.mjs            # 纯逻辑
-node test/reply.mjs                 # 出站拆条
-node test/m15-e2e.mjs               # 编排闭环（真 Hub + 假两端）
+npm test                                    # 全部 20 个套件
+node test/smoke-core.mjs                    # 纯逻辑
+node test/reply.mjs                         # 出站拆条
+node test/m15-e2e.mjs                       # 编排闭环（真 Hub + 假两端）
 node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具注册（flag 必须放在脚本前面）
 ```
 
 设计与验证记录（协议取证、每个测试断言覆盖什么、历次真机事故复盘）见 [docs/design-notes.md](docs/design-notes.md)。
+
+### CI 与发布
+
+- **CI**：`.github/workflows/ci.yml`。push 到 `main`、提 PR 或手动触发时跑 `npm test`，矩阵是 Node 22/24 × Ubuntu/Windows。宿主那几个 `@deepseek-ai/*` 是 peer 依赖，装依赖时用 `--omit=peer`（测试用 `test/register-stubs.mjs` 打桩）。
+- **发到 npm**：`.github/workflows/publish.yml`。`git push origin v0.2.0` 触发——先校验 tag 与 `package.json` 版本一致，再跑一遍测试，然后 `npm publish --provenance --access public`。需要仓库里有名为 `NPM_TOKEN` 的 secret（npm automation token；想免 token 就改用 npm Trusted Publishing，把这个 workflow 登记成 trusted publisher）。手动触发默认只 dry-run，只跑测试和 `npm pack --dry-run`。
+- 本机 `npm publish` 如果报 `DEPTH_ZERO_SELF_SIGNED_CERT`（公司/杀软 TLS 拦截），加 `NODE_OPTIONS=--use-system-ca`；CI 上不受影响。
+
+### 示例值约定
+
+文档、注释、设置页提示和工具描述里的示例值**一律用编造的占位**：群号 `123456789`、QQ 号 `10001`、下游账号 `30001000`、上游反连端口 `8765`、下游地址 `127.0.0.1:8080`。真机上用的群号、QQ 号、端口、密钥不要写进来（`docs/design-notes.md` 里的真机复盘记录除外——那是事故日志，改动前先问）。
 
 ## License
 
