@@ -269,6 +269,10 @@ async function scenarioReply() {
   check('用户消息只放本批新消息（不再把整份上下文塞进转录）', () => {
     assert.match(followup, /【新消息 1 条】会话 group:55555/);
     assert.match(followup, /hub 你在吗/);
+    // 批头有绝对日期还不够（那是"凑批时刻"）：消息行自己也要带日期时间（m34049），
+    // 否则跨天时模型分不清"08:12 那条"是今天还是昨天。
+    assert.match(followup, /^-\s*\d{2}-\d{2} \d{2}:\d{2} .*hub 你在吗$/m, `新消息行没带日期时间：\n${followup}`);
+    assert.match(followup, /【新消息 1 条】会话 group:55555｜现在 \d{4}-\d{2}-\d{2} \d{2}:\d{2}/, '批头保留完整时间戳');
     assert.ok(!followup.includes('【会话卡】'), `用户消息里不该再有会话卡：\n${followup}`);
     assert.ok(followup.length < live.length, `用户消息应当明显短于整份上下文（${followup.length} vs ${live.length}）`);
   });

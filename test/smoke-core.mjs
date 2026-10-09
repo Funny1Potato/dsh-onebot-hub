@@ -38,6 +38,7 @@ import {
 } from '../lib/capability.js';
 import { renderPerson, renderWindow } from '../lib/memory/assembler.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
+import { full, mdhm } from '../lib/stamp.js';
 import { Cards } from '../lib/memory/cards.js';
 import { MemberResolver, atTargets, cardName, isUnsupported } from '../lib/members.js';
 import { ADMIN_OPS, ADMIN_OP_NAMES, planAdminOp } from '../lib/admin.js';
@@ -374,6 +375,36 @@ t('转发镜像：会话卡与最近窗口里一句话只出现一次', () => {
   const card = renderDigest(digest);
   assert.equal(card.split('/今日小猪').length - 1, 1, `会话卡里多出一条：\n${card}`);
   assert.match(card, /最近 1 条消息/);
+});
+
+// ---- 时间戳（m34049 用户要求"所有消息都加上日期和时间"） ----
+t('每条消息行都带日期和时间（只有 HH:MM 分不清跨天）', () => {
+  const at = new Date(2026, 0, 9, 8, 12, 0).getTime(); // 本地时间 01-09 08:12
+  assert.equal(mdhm(at), '01-09 08:12', '行内格式是 MM-DD HH:MM');
+  assert.equal(full(at), '2026-01-09 08:12', '锚点格式带年份');
+  assert.equal(mdhm(new Date(at)), '01-09 08:12', 'Date 对象照样能用');
+  assert.equal(mdhm(null), '--', '没有时间戳：占位而不是 --:--');
+  assert.equal(mdhm('昨天'), '--', '坏时间戳不抛异常');
+
+  // 三条渲染路径都得带日期：新消息批行、live context 的窗口、落盘会话卡。
+  // 直接给条目数组（时间戳写死成 01-09 08:12），这样断言能锁住"带的是哪一天"。
+  const events = [{
+    id: 'stamp-1',
+    ts: at,
+    direction: 'upstream-in',
+    linkId: 'up:1',
+    kind: 'message',
+    sessionKey: 'group:55555',
+    actor: { user_id: 10001, nickname: '小明' },
+    text: '你还在吗',
+    payload: { post_type: 'message', message_type: 'group', group_id: 55555 },
+  }];
+  const win = renderWindow(events, { selfId: 20002000 });
+  assert.match(win, /^01-09 08:12 小明：你还在吗$/m, `窗口行没带日期：\n${win}`);
+  const card = renderDigest(buildDigest(events));
+  assert.match(card, /^- 01-09 08:12 小明\(10001\)：你还在吗$/m, `会话卡行没带日期：\n${card}`);
+  const resumed = { ...buildDigest(events), resumed: true, savedAt: at };
+  assert.match(renderDigest(resumed), /重启前留下的那一份，01-09 08:12 为止/, '读回的旧事要标出隔了多久');
 });
 
 // ---- 能力面（§22）：分级、retcode 中文、TTL 缓存、能力注册表 ----
