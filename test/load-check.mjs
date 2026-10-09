@@ -639,6 +639,21 @@ await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent
   assert.ok(segmentGuidance.includes('排查类问题要快出结论'), '排查纪律不受识图档影响');
   assert.equal(segmentGuidance.includes('更不要绕道看图'), false, 'segment 档模型看得见图，绕道禁令不该出现');
 
+  // —— 指导段：权限不够怎么开口要（m33950）——
+  const permGuidance = buildHubGuidance({ chatCommands: { prefix: '.', superUsers: ['10001'] } });
+  assert.ok(permGuidance.includes('权限不够就开口要'), '要教 agent 开口要权限');
+  assert.ok(permGuidance.includes('.perm <预设名>'), '命令前缀要跟着配置走（配了 . 就不能写 /perm）');
+  assert.ok(permGuidance.includes('只对这一次唤醒有效'), '要说明授权不持久，免得它以为上次给过就行');
+  assert.equal(permGuidance.includes('/perm'), false, '默认前缀不出现：这份配置用的就是 .');
+  assert.equal(permGuidance.includes('workspace-write'), true, '要给出可用预设名，否则它不知道要什么');
+  const noAdminGuidance = buildHubGuidance({ chatCommands: { superUsers: [] } });
+  assert.ok(noAdminGuidance.includes('权限不够就如实说'), '没超管名单时改成"如实说缺什么"');
+  assert.ok(noAdminGuidance.includes('没有配聊天管理命令的超管名单'), '名单为空就别教它命令表');
+  assert.equal(noAdminGuidance.includes('.perm') || noAdminGuidance.includes('/perm'), false, '没人能执行的命令不许教');
+  const scopedPermGuidance = buildHubGuidance({ codeScopes: [{ name: '下游A', path: 'D:/x' }], chatCommands: { prefix: '/', superUsers: ['10001'] } });
+  assert.ok(scopedPermGuidance.includes('/perm read-only'), '默认前缀下要给 read-only 的对应写法');
+  assert.ok(scopedPermGuidance.includes('开口要权限'), '读源码那条也不能再说"如实说没权限读"就完事');
+
   // —— 工具本体：真去 stat，缺的如实报 missing ——
   const scopes = JSON.parse(await toolOf('onebot_code_scopes').execute({}));
   assert.equal(scopes.count, 2);
