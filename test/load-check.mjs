@@ -1010,6 +1010,13 @@ async function runAsyncChecks() {
     assert.equal(typeof live.text(), 'string', 'live 上下文要能给出文本');
     const replySpec = specs.find((s) => s.name === 'onebot-hub:reply');
     assert.ok(replySpec && typeof replySpec.text === 'string', '回复指令那条还是静态字符串（它不随轮次变化）');
+    // m30383 之后"文本=发言"默认关着，这条指令就不能再教模型"你写的回复会直接发出去"——
+    // 它与 guidance/工具说明/mind 的 guidance 段三处相反，模型会据此以为不调工具也算说话（m34646 顺带修）。
+    assert.ok(
+      !replySpec.text.includes('会直接发到聊天里'),
+      `speakAssistantText 默认关，却还在教"文本直接发言"：${replySpec.text.slice(0, 80)}`,
+    );
+    assert.ok(replySpec.text.includes('onebot_reply'), '要说清发言只有 onebot_reply 这一个出口');
     assert.equal(typeof hub.pool.retire, 'function', 'pool 缺 retire —— 激活结束交还会话就做不到');
   });
 

@@ -979,6 +979,129 @@ async function scenarioActiveTick() {
   });
 }
 
+// ------------------------------------------------------------------ 场景三点二：回完话再等 awakeMs 才休眠（m34646）
+
+/**
+ * 用户原话：「active模式唤醒的激活状态在agent回复完后就回到休眠了，应该把激活状态改成
+ * agent回复完后等待agent.awakeMs后再休眠。」
+ *
+ * 旧的空转基准是"最后一条**入站消息**"。`active` 档下这个基准错得很明显：消息先到、批量窗口
+ * 与 active 节拍再拖一会儿才唤醒、模型再想一会儿才答完——等它把话发出去，`awakeMs` 的额度
+ * 早就烧掉大半，于是"刚回完话就睡回去"，会话被归档交还，下一条消息又得从头开局快照。
+ *
+ * 现在基准取 `max(最后一条消息, 最后一个回合结束)`。用例不靠 sleep 猜时间：`#expireAwake(now)`
+ * 收 `now`，而 `lastTurnAt` 就在状态里，所以断言可以钉在精确的边界两侧（awakeMs±50ms），
+ * 唯一真实的等待只有"这一轮要想多久"。
+ */
+async function scenarioAwakeGraceAfterReply() {
+  const groupId = 777400;
+  const sessionKey = `group:${groupId}`;
+  const AWAKE_MS = 600;
+  const THINK_MS = 700; // 这一轮"想"多久：比 awakeMs 还长，才拉得开两个基准
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, ms = 3000) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      if (fn()) return true;
+      await sleep(10);
+    }
+    return false;
+  };
+
+  const { hub } = makeHub();
+  const policy = resolveAgentPolicy({ mode: 'active', batchSize: 6, batchMs: 5000, awakeMs: AWAKE_MS, activeTickMs: 300000 });
+  let turns = 0;
+  const { host } = makeFakeHost({
+    script: async (agent) => {
+      turns += 1;
+      if (turns > 1) return; // 第二轮故意沉默，见末尾用例
+      await sleep(THINK_MS);
+      await agent.tools.get('onebot_reply').execute({ text: '在的' });
+    },
+  });
+  const pool = new AgentPool({ policy, host, log: () => {} });
+  const mind = new Mind({ hub, timeline: hub.timeline, store: new MemoryStore({}), policy, pool, setup: (agentCtx, { reply }) => {
+    agentCtx.tools?.register?.({
+      name: 'onebot_reply',
+      async execute(args = {}) {
+        const candidate = reply.capture({ text: args.text });
+        return candidate ? `queued:${candidate.text}` : 'empty';
+      },
+    });
+  } });
+  hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+
+  const ping = (messageId, text) => hub.handleUpstreamEvent(groupMessage({
+    groupId,
+    messageId,
+    text,
+    segments: [
+      { type: 'at', data: { qq: SELF_ID } },
+      { type: 'text', data: { text: ` ${text}` } },
+    ],
+  }));
+
+  ping(61001, '在吗');
+  await until(() => mind.wakeStateOf(sessionKey)?.lastTurnAt > 0);
+  const st = mind.wakeStateOf(sessionKey);
+
+  check('回完话把这一轮的结束时刻记进 lastTurnAt（诊断里看得到）', () => {
+    assert.equal(st.state, 'awake');
+    assert.equal(
+      mind.stats.lastTurn?.hadReply,
+      true,
+      `这一轮应该真的回话了，否则后面全是空中楼阁：${JSON.stringify(mind.stats.lastTurn?.diag)}`,
+    );
+    assert.equal(st.silentTurns, 0, '回过话就不该记沉默轮');
+    assert.ok(st.lastTurnAt > 0, JSON.stringify(st));
+    assert.ok(
+      st.lastTurnAt - st.lastMsgAt >= THINK_MS - 100,
+      `回合结束该明显晚于消息到达，两个基准才拉得开：实际 ${st.lastTurnAt - st.lastMsgAt}ms`,
+    );
+  });
+
+  const base = st.lastTurnAt;
+  const early = await mind.tick(base + 100);
+  check('回复完 100ms：仍然是激活（换旧基准此刻早就睡回去了）', () => {
+    assert.equal(early.dormant.length, 0, JSON.stringify(early.dormant));
+    assert.equal(mind.wakeStateOf(sessionKey).state, 'awake');
+    assert.equal(mind.stats.retired ?? 0, 0, '不该在这期间把会话归档交还');
+  });
+
+  const justUnder = await mind.tick(base + AWAKE_MS - 50);
+  check('离 awakeMs 只差 50ms：还醒着（边界内侧不睡）', () => {
+    assert.equal(justUnder.dormant.length, 0, JSON.stringify(justUnder.dormant));
+    assert.equal(mind.wakeStateOf(sessionKey).state, 'awake');
+  });
+
+  const over = await mind.tick(base + AWAKE_MS + 50);
+  check('回合结束后超过 awakeMs 仍没动静 → 才回休眠', () => {
+    assert.ok(over.dormant.includes(sessionKey), JSON.stringify(over.dormant));
+    assert.equal(mind.wakeStateOf(sessionKey).state, 'dormant');
+    assert.ok((mind.stats.retired ?? 0) >= 1, '回休眠要把会话交还');
+  });
+
+  // 交还是 fire-and-forget（`#retireAfterDormant` 不 await）：先把归档等完再让下一轮 @ 进来，
+  // 否则新回合会和归档抢同一个 agentKey，偶发地"叫不醒"（第一版就踩到过）。
+  await until(() => !pool.isBusy(mind.agentKeyOf(sessionKey)));
+  await sleep(30);
+
+  // 沉默的一轮也是"动静"：模型被叫来了、想过了、选择不开口——那不是会话空转。
+  ping(61002, '还有别的吗');
+  await until(() => mind.wakeStateOf(sessionKey)?.state === 'awake');
+  await until(() => (mind.wakeStateOf(sessionKey)?.silentTurns ?? 0) >= 1 && (mind.wakeStateOf(sessionKey)?.lastTurnAt ?? 0) > base);
+  const silent = mind.wakeStateOf(sessionKey);
+  check('沉默的一轮同样刷新 lastTurnAt（不开口 ≠ 会话空转）', () => {
+    assert.equal(silent.silentTurns, 1, JSON.stringify(silent));
+    assert.ok(silent.lastTurnAt > base, `沉默回合也要续期：${silent.lastTurnAt} vs ${base}`);
+  });
+  const held = await mind.tick(silent.lastTurnAt + AWAKE_MS - 50);
+  check('沉默回合之后再等满 awakeMs 之前也不睡', () => {
+    assert.equal(held.dormant.length, 0, JSON.stringify(held.dormant));
+    assert.equal(mind.wakeStateOf(sessionKey).state, 'awake');
+  });
+}
+
 // ------------------------------------------------------------------ 场景三点半：会话白名单（m31030）
 
 async function scenarioWhitelistGate() {
@@ -4120,6 +4243,7 @@ const main = async () => {
   await scenarioWhitelistGate();
   await scenarioBatchTimeout();
   await scenarioActiveTick();
+  await scenarioAwakeGraceAfterReply();
   await scenarioIsolationAssemble();
   await scenarioPool();
   await scenarioAssistantText();
