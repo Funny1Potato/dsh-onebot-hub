@@ -30,9 +30,11 @@ jobs:
           node-version: ${{ matrix.node }}
 
       # `@deepseek-ai/*` 是宿主提供的 peer 依赖，测试用 test/register-stubs.mjs 打桩，
-      # 所以这里必须 `--omit=peer`，否则 npm 会去 registry 拉一整套宿主包。
+      # 所以只装真正的运行时依赖 `ws`。`--omit=peer` 不够用：npm 仍会解析 peer 依赖树，
+      # 而 registry 上那几个宿主包自己的 peer 区间互相冲突（首跑 ERESOLVE 就是这么炸的），
+      # `--legacy-peer-deps` 才是让 npm 彻底不管 peerDependencies 的开关。
       - name: Install
-        run: npm install --omit=peer --no-audit --no-fund
+        run: npm install --omit=peer --legacy-peer-deps --no-audit --no-fund
 
       - name: Tests
         run: npm test
