@@ -1,0 +1,13 @@
+# dsh-onebot-hub —— 把 DSH 挂到 OneBot v11 总线上的双向枢纽
+#
+# 加载方式（二选一）：
+#   1) 本文件被合并进 profile 的 cordis 补丁（dsh.bundle.patch 指向这里）；
+#   2) 手工把下面三行追加到 ~/.dsh/cordis.patch.yml。
+#
+# 装配后 hub 会：
+#   · 连上游 OneBot v11 实现端（拨过去，或自己监听等它拨进来，见 upstreamListen）；
+#   · 按 downstreamTargets 挂 N 条下游：ws-dial（我们拨过去）/ ws-listen（我们监听）/
+#     http-api（我们提供 HTTP API）/ http-post（我们把事件 POST 过去），地址统一 host:port/path。
+- insert:
+    - id: onebot-hub
+      name: 'dsh-onebot-hub'

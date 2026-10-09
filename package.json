@@ -1,0 +1,97 @@
+{
+  "name": "dsh-onebot-hub",
+  "version": "0.1.0",
+  "description": "OneBot v11 hub for DeepSeek Harness: connects to an upstream OneBot v11 implementation (forward WebSocket client) and serves/dials downstream bot implementations with the same protocol, relaying events and actions verbatim so DSH can observe every message and learn how each downstream bot is used.",
+  "type": "module",
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "onebot",
+    "onebot-v11",
+    "qq",
+    "nonebot",
+    "agent",
+    "llm"
+  ],
+  "homepage": "https://github.com/Funny1Potato/dsh-onebot-hub#readme",
+  "bugs": {
+    "url": "https://github.com/Funny1Potato/dsh-onebot-hub/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Funny1Potato/dsh-onebot-hub.git"
+  },
+  "author": "Funny1Potato",
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./protocol": {
+      "default": "./lib/protocol.js"
+    },
+    "./router": {
+      "default": "./lib/router.js"
+    },
+    "./hub": {
+      "default": "./lib/hub.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "engines": {
+      "dsh": ">=0.1.7-rc.2"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots",
+        "@deepseek-ai/dsh-client-ui-renderer"
+      ]
+    }
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-agent-default-model": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-session": "*",
+    "@deepseek-ai/dsh-system-prompt": "*",
+    "@deepseek-ai/dsh-tools": "*"
+  },
+  "files": [
+    "lib/**/*.js",
+    "cordis.patch.yml",
+    "LICENSE",
+    "README.md"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node test/smoke-core.mjs && node test/policy-modes.mjs && node test/m15-e2e.mjs && node test/link-listener.mjs && node test/multi-downstream.mjs && node test/isolation.mjs && node test/client-manifest.mjs && node test/client-render.mjs && node test/client-probe.mjs && node --import ./test/register-stubs.mjs test/load-check.mjs",
+    "test:core": "node test/smoke-core.mjs",
+    "test:policy": "node test/policy-modes.mjs",
+    "test:m15": "node test/m15-e2e.mjs",
+    "test:listen": "node test/link-listener.mjs",
+    "test:multi": "node test/multi-downstream.mjs",
+    "test:isolation": "node test/isolation.mjs",
+    "test:client": "node test/client-manifest.mjs",
+    "test:render": "node test/client-render.mjs",
+    "test:probe": "node test/client-probe.mjs",
+    "test:load": "node --import ./test/register-stubs.mjs test/load-check.mjs",
+    "test:e2e": "node test/hub-e2e.mjs"
+  }
+}

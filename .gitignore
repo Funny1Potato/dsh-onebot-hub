@@ -1,0 +1,12 @@
+# 依赖（发布仓库里不该有；真跑的时候由 pnpm 装）
+node_modules/
+
+# 测试产物
+e2e-report.json
+*.log
+
+# 编辑器/系统
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
