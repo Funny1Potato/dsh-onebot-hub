@@ -12,9 +12,12 @@
  *   E trace：dsh_trace 扩展字段被下游保留
  *   F 防环：hub 自己发出去的内容回流时被自送闸丢弃
  *
- * 用法：node test/hub-e2e.mjs   （需先启动 D:\DSH-workspace\DSH-QQ\test 下的 NoneBot）
+ * 用法：node test/hub-e2e.mjs   （需先启动那台 NoneBot 下游，并把它探针写的日志位置用
+ *   环境变量 HUB_E2E_PROBE_LOG 指过来；不指就默认读系统临时目录下的 probe_out.jsonl）
  */
 import { existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { WebSocket, WebSocketServer } from 'ws';
 
 import { Hub } from '../lib/hub.js';
@@ -26,7 +29,8 @@ const HUB_SELF_ID = '40004000'; // hub 在群里的账号（上游实现端上�
 const DOWN_SELF_ID = '30001000'; // hub 为下游链路扮演的账号（下游 NoneBot 自己的号）
 const GROUP_ID = 55555;
 const USER_ID = 10001;
-const PROBE_LOG = 'D:\\DSH-workspace\\DSH-QQ\\test\\probe_out.jsonl';
+// 下游 NoneBot 那侧探针写的日志：路径随部署走，所以这里不给死某个机器的绝对路径。
+const PROBE_LOG = process.env.HUB_E2E_PROBE_LOG || path.join(os.tmpdir(), 'probe_out.jsonl');
 
 const results = [];
 function check(name, ok, detail) {

@@ -237,6 +237,11 @@ function makeCtx(extraServices = {}) {
   return { ctx, recorded };
 }
 
+// 「源码范围」这套测试要有一个**真的存在的目录**才能断言 exists/kind。写死某台机器上的
+// 路径（曾经写的是本机 LLBot 安装目录）在本地一直绿、在 CI 上必红——所以改用仓库自己：
+// 任何 checkout 里它都在，Windows 上斜杠也统一成 `/`（与下面 alt 实例的写法一致）。
+const repoDir = process.cwd().replace(/\\/g, '/');
+
 const { ctx, recorded } = makeCtx();
 const hub = apply(ctx, {
   upstreamUrl: '',
@@ -244,7 +249,7 @@ const hub = apply(ctx, {
   downstreamTargets: '[]',
   agent: { mode: 'assist', batchMs: 500 },
   // 下游源码范围：多条（m14477）。位置**不进 prompt**，只由 onebot_code_scopes 回答。
-  code: { scopes: '[{"name":"下游A","path":"D:/LLBot-Desktop-win-x64/bin/llbot"},{"name":"下游B","path":"D:/不存在的路径/nope"}]' },
+  code: { scopes: `[{"name":"下游A","path":"${repoDir}"},{"name":"下游B","path":"D:/不存在的路径/nope"}]` },
   memory: { isolation: { level: 'scoped' } },
   // 测试不该往用户家里写东西：`persist:false` = 存储层整体关闭（不建目录、不落盘）。
   persist: false,
@@ -658,9 +663,9 @@ await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent
   const scopes = JSON.parse(await toolOf('onebot_code_scopes').execute({}));
   assert.equal(scopes.count, 2);
   assert.equal(scopes.scopes[0].name, '下游A');
-  assert.equal(scopes.scopes[0].path, 'D:/LLBot-Desktop-win-x64/bin/llbot');
+  assert.equal(scopes.scopes[0].path, repoDir);
   assert.equal(scopes.scopes[0].exists, true);
-  assert.ok(['dir', 'file', 'other'].includes(scopes.scopes[0].kind));
+  assert.equal(scopes.scopes[0].kind, 'dir');
   assert.equal(scopes.scopes[1].exists, false, '不存在的路径如实报');
   assert.equal(scopes.scopes[1].kind, 'missing');
   assert.ok(scopes.note.includes('权限'));
