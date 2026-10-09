@@ -1017,6 +1017,18 @@ async function runAsyncChecks() {
       `speakAssistantText 默认关，却还在教"文本直接发言"：${replySpec.text.slice(0, 80)}`,
     );
     assert.ok(replySpec.text.includes('onebot_reply'), '要说清发言只有 onebot_reply 这一个出口');
+    // 回复决策清单（参考 aigf-master）：提示词里必须有成体系的"什么不回"判断面，
+    // 不能只剩三条散落的窄规则——这是模型判断"该不该开口"的主要依据。
+    assert.ok(replySpec.text.includes('要不要回'), '回复提示词缺"要不要回"的决策清单入口');
+    assert.ok(
+      replySpec.text.includes('合并转发') && replySpec.text.includes('系统通知'),
+      '占位消息与系统通知的"不回"判断要写进回复提示词',
+    );
+    assert.ok(
+      replySpec.text.includes('不确定是不是在和你说话') && replySpec.text.includes('别硬续'),
+      '"不确定就不回"与"群友不感兴趣别硬续"要写进回复提示词',
+    );
+    assert.ok(replySpec.text.includes('下游 bot 已经应答过'), '"下游已应答"这条硬规矩也要在回复提示词里');
     assert.equal(typeof hub.pool.retire, 'function', 'pool 缺 retire —— 激活结束交还会话就做不到');
   });
 
