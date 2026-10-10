@@ -90,7 +90,16 @@ function fakeAgentCtx(recorded) {
         return () => {};
       },
     },
-    tools: { register: () => () => {} },
+    tools: {
+      register: () => () => {},
+      // 全局工具视图（globalToolNames 读它）：用例往 recorded.agentToolSchemas 里塞假清单。
+      schemas: () => recorded?.agentToolSchemas ?? [],
+      // restrict({allow}) 的调用记录（applyToolAllow 走它）——plugin 生图工具放行的断言看这里。
+      restrict: ({ allow } = {}) => {
+        recorded?.agentRestricts?.push(allow ?? null);
+        return () => {};
+      },
+    },
   };
   if (recorded) {
     agentCtx.on = (name, handler) => {
@@ -126,6 +135,9 @@ function makeCtx(extraServices = {}) {
     archives: [],
     /** 喂给 agent 的用户消息（`followup` 的实参）——批量渲染/补描的断言都看这里。 */
     followups: [],
+    /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict({allow}) 的调用记录。 */
+    agentToolSchemas: null,
+    agentRestricts: [],
   };
   // 假 `agentPresets`：宿主有一条不变量——没加入任何预设的 agent 一旦去喊模型，
   // `system-prompt/assemble` 直接判失败。这里只验证"我们确实 resolve 了默认预设、并在
@@ -175,6 +187,8 @@ function makeCtx(extraServices = {}) {
         recorded.tools.push(def);
         return () => {};
       },
+      // plugin 生图引擎用例：给 ctx 一份全局工具清单（extras.toolsSchemas）。
+      ...(extraServices.toolsSchemas ? { schemas: () => extraServices.toolsSchemas } : {}),
     },
     webServer: {
       registerUpgrade(route) {
@@ -307,6 +321,12 @@ check('Config schema 能填默认值', () => {
   assert.equal(plainConfig(filled.agent.replyGapMs), 400);
   assert.equal(plainConfig(filled.agent.replyMaxText), 3);
   assert.equal(plainConfig(filled.agent.replyMaxImages), 9);
+  // 生图引擎与发送时机（用户 2026-10-11 定）：默认 builtin + agent。
+  assert.equal(plainConfig(filled.imageGen.enabled), false);
+  assert.equal(plainConfig(filled.imageGen.engine), 'builtin');
+  assert.equal(plainConfig(filled.imageGen.delivery), 'agent');
+  assert.equal(plainConfig(filled.imageGen.plugin.tool), '');
+  assert.equal(plainConfig(filled.imageGen.plugin.timeoutMs), 180000);
 });
 
 check('设置页文字：每一个配置项在 client.js 里都有中文名与说明，且不多不少', () => {
@@ -564,6 +584,30 @@ check('hub 配置的默认模型（m024167）：provider/model 解析，留空/�
   const bare = resolveConfig({});
   assert.equal(bare.agentDefaultModel, null, '没配 = null');
   assert.equal(bare.agentDefaultVisionModel, null);
+});
+
+check('imageGen engine/delivery/plugin 配置归一（用户 2026-10-11 定）', () => {
+  const bare = resolveConfig({});
+  assert.equal(bare.imageGen.engine, 'builtin', '默认引擎 = builtin（老行为）');
+  assert.equal(bare.imageGen.delivery, 'agent', '默认发送时机 = agent（生成后由 agent 决定发不发）');
+  assert.deepEqual(bare.imageGen.plugin.tool, [], '默认不点名第三方工具');
+  assert.equal(bare.imageGen.plugin.timeoutMs, 180000);
+  const custom = resolveConfig({
+    imageGen: {
+      engine: 'plugin',
+      delivery: 'direct',
+      plugin: { tool: 'generate_image, image_generate', timeoutMs: 1500 },
+    },
+  });
+  assert.equal(custom.imageGen.engine, 'plugin');
+  assert.equal(custom.imageGen.delivery, 'direct');
+  assert.deepEqual(custom.imageGen.plugin.tool, ['generate_image', 'image_generate'], '逗号分隔拆开并去空白');
+  assert.equal(custom.imageGen.plugin.timeoutMs, 1500);
+  assert.equal(resolveConfig({ imageGen: { plugin: { timeoutMs: 999 } } }).imageGen.plugin.timeoutMs, 1000, '过小的超时钳到 1000');
+  const weird = resolveConfig({ imageGen: { engine: 'wat', delivery: 'wat', plugin: { tool: ['a', '', 'b'] } } });
+  assert.equal(weird.imageGen.engine, 'builtin', '认不出的引擎值回退 builtin');
+  assert.equal(weird.imageGen.delivery, 'agent', '认不出的发送时机回退 agent');
+  assert.deepEqual(weird.imageGen.plugin.tool, ['a', 'b'], '数组写法滤空');
 });
 
 check('apply 返回 hub 并挂出内部件', () => {
@@ -1724,9 +1768,199 @@ async function runAsyncChecks() {
     }
   });
 
+  // ---- imageGen delivery（用户 2026-10-11 定）：agent 模式 = 落地+描述+不直发；direct = 老行为 ----
+  const igMake = makeCtx();
+  const igHub = apply(igMake.ctx, {
+    upstreamUrl: '',
+    upstreamSelfId: '30001000',
+    downstreamTargets: '[]',
+    agent: { mode: 'assist', batchMs: 500 },
+    persist: false,
+    imageGen: { enabled: true, model: 'test-model', baseUrl: 'https://img.example', apiKey: 'k', delivery: 'agent' },
+  });
+  await sleep(30);
+
+  await checkAsync('imageGen delivery=agent：落地 hub-media + 补描述 + 不自动直发', async () => {
+    const igTool = igMake.recorded.tools.find((t) => t.name === 'onebot_imagegen');
+    assert.ok(igTool, 'builtin 引擎要注册 onebot_imagegen');
+    assert.match(String(igTool.description), /不自动发群/, 'agent 模式的工具说明要讲清"不自动发"');
+    const sentCalls = [];
+    const pngBytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3, 4]);
+    igHub.imageGen = {
+      generate: async ({ prompt }) => ({ ok: true, bytes: pngBytes, mediaType: 'image/png', size: '1024x1024', prompt }),
+    };
+    const savedKinds = [];
+    igHub.media = {
+      saveBytes: async (bytes, opts = {}) => {
+        savedKinds.push(opts.kind);
+        return { id: 'hub-media:ig0001', kind: opts.kind, mediaType: opts.mediaType, bytes: bytes.length, attachmentId: 'att-1', attachment: { attachmentId: 'att-1' } };
+      },
+    };
+    igHub.vision = {
+      describeEnabled: true,
+      enabled: true,
+      describeImage: async ({ bytes, attachment }) => ({ text: `描述（${bytes.length}B，${attachment?.attachmentId}）` }),
+    };
+    igHub.callUpstream = async (action, params) => {
+      sentCalls.push({ action, params });
+      return { ok: true };
+    };
+    const value = JSON.parse(await igTool.execute({ prompt: '一只猫' }));
+    assert.equal(value.ok, true);
+    assert.equal(value.mode, 'agent');
+    assert.equal(value.hubMedia, 'hub-media:ig0001');
+    assert.match(String(value.description), /att-1/, '描述要走落地时登记的 attachment（不为同一张图再登记）');
+    assert.deepEqual(savedKinds, ['image'], '生图落地按 image 类型登记');
+    assert.equal(sentCalls.length, 0, 'agent 模式不该自己直发');
+    assert.match(String(value.note), /onebot_reply/);
+    assert.match(String(value.note), /hub-media:ig0001/);
+  });
+
+  await checkAsync('imageGen delivery=direct：直发保留老行为，结果也带 hubMedia 与描述', async () => {
+    const igTool = igMake.recorded.tools.find((t) => t.name === 'onebot_imagegen');
+    igHub.config.imageGen.delivery = 'direct';
+    try {
+      const sentCalls = [];
+      igHub.callUpstream = async (action, params) => {
+        sentCalls.push({ action, params });
+        return { ok: true };
+      };
+      const value = JSON.parse(await igTool.execute({ prompt: '一只狗', session_key: 'group:55555' }));
+      assert.equal(value.mode, 'direct');
+      assert.equal(sentCalls.length, 1, 'direct 模式要直发一次');
+      assert.match(String(sentCalls[0]?.action), /group_msg|send_msg/);
+      assert.equal(sentCalls[0]?.params?.group_id, '55555');
+      assert.equal(value.hubMedia, 'hub-media:ig0001', 'sha256 相同 → 同一 hub-media 引用');
+      assert.ok(value.description, 'direct 模式也带描述');
+    } finally {
+      igHub.config.imageGen.delivery = 'agent';
+    }
+  });
+
+  await checkAsync('imageGen 落地失败：agent 模式退回 direct-fallback 直发，不浪费画好的图', async () => {
+    const igTool = igMake.recorded.tools.find((t) => t.name === 'onebot_imagegen');
+    const realMedia = igHub.media;
+    igHub.media = {
+      saveBytes: async () => {
+        throw new Error('disk full');
+      },
+    };
+    try {
+      const sentCalls = [];
+      igHub.callUpstream = async (action, params) => {
+        sentCalls.push({ action, params });
+        return { ok: true };
+      };
+      const value = JSON.parse(await igTool.execute({ prompt: '一只鸟', session_key: 'private:10001' }));
+      assert.equal(value.mode, 'direct-fallback', '落不了地就没法把图交到 agent 手里');
+      assert.equal(sentCalls.length, 1, 'fallback 要真的发出去');
+      assert.match(String(value.note), /direct/);
+    } finally {
+      igHub.media = realMedia;
+    }
+  });
+
+  // ---- imageGen engine=plugin：hub 不自己生图，第三方工具进白名单 + post-execute 落地/描述 ----
+  const pgMake = makeCtx({
+    toolsSchemas: [
+      { name: 'generate_image', description: '第三方生图' },
+      { name: 'generate_images', description: '第三方批量生图' },
+      { name: 'read', description: '读文件' },
+    ],
+  });
+  const pgHub = apply(pgMake.ctx, {
+    upstreamUrl: '',
+    upstreamSelfId: '30001000',
+    downstreamTargets: '[]',
+    agent: { mode: 'assist', batchMs: 500 },
+    persist: false,
+    imageGen: { enabled: false, engine: 'plugin' },
+  });
+  await sleep(30);
+
+  await checkAsync('imageGen engine=plugin：不注册 onebot_imagegen，挂 tools/post-execute，引导段放行第三方工具', async () => {
+    assert.equal(pgMake.recorded.tools.find((t) => t.name === 'onebot_imagegen'), undefined, 'plugin 引擎不许再挂自带生图');
+    const post = pgMake.recorded.onEvents.find((e) => e.name === 'tools/post-execute');
+    assert.ok(post, 'plugin 引擎要挂 tools/post-execute');
+    pgHub.media = {
+      saveBytes: async (bytes, opts = {}) => ({ id: 'hub-media:pg0001', kind: opts.kind, attachment: { attachmentId: 'att-pg' } }),
+    };
+    pgHub.vision = {
+      describeEnabled: true,
+      enabled: true,
+      describeImage: async () => ({ text: '一只像素猫' }),
+    };
+    const tmpPng = path.join(os.tmpdir(), `dsh-hub-test-${Date.now()}-${process.pid}.png`);
+    fs.writeFileSync(tmpPng, Buffer.from([137, 80, 78, 71]));
+    try {
+      // ① 命中名单：先透传拿结果，再追加 [hub] 落地/描述/发送指引。
+      const nextCalls = [];
+      const decision = await post.handler(
+        { name: 'generate_image' },
+        {
+          isError: false,
+          value: { savedTo: tmpPng },
+          content: [{ type: 'text', text: `Generated one image. It was also saved to the workspace as ${tmpPng}.` }],
+        },
+        async () => {
+          nextCalls.push(1);
+          return { kind: 'accept' };
+        },
+      );
+      assert.equal(nextCalls.length, 1, 'matching 工具也要先透传（后面的监听器还要跑）');
+      const last = String(decision.content.at(-1)?.text ?? '');
+      assert.match(last, /hub-media:pg0001/);
+      assert.match(last, /一只像素猫/);
+      assert.match(last, /onebot_reply/);
+      // ② 名单外工具：结果原样放行（引用相等）。
+      const passthrough = { kind: 'accept', marker: true };
+      const untouched = await post.handler({ name: 'read' }, { isError: false, value: 1, content: [] }, async () => passthrough);
+      assert.equal(untouched, passthrough, '名单外工具不许动结果');
+      // ③ isError 的结果不追加（失败的工具调用没有图可捡）。
+      const errDecision = await post.handler(
+        { name: 'generate_image' },
+        { isError: true, value: { savedTo: tmpPng }, content: [] },
+        async () => ({ kind: 'accept' }),
+      );
+      assert.ok(!errDecision.content?.length, 'isError 结果不追加 [hub] 块');
+    } finally {
+      fs.rmSync(tmpPng, { force: true });
+    }
+  });
+
+  await checkAsync('imageGen engine=plugin：setup 引导段 + allow 放行第三方工具', async () => {
+    const savedPrivates = pgHub.config.agentPrivates;
+    pgHub.config.agentPrivates = { ...savedPrivates, 10001: {} };
+    try {
+      pgMake.recorded.agentToolSchemas = [
+        { name: 'generate_image', description: '第三方生图' },
+        { name: 'read', description: '读文件' },
+      ];
+      pgHub.mind.noteDownstreamSend({
+        sessionKey: 'private:10001',
+        action: 'send_msg',
+        ts: Date.now(),
+        text: '画一只猫',
+        label: '下游A',
+        entry: { id: 'pg-1', sessionKey: 'private:10001', ts: Date.now(), text: '画一只猫', actor: { nickname: '下游A' }, live: null, refs: {} },
+      });
+      const r = await pgHub.mind.flush('private:10001', { reason: 'test-plugin-setup' });
+      assert.equal(r.woke, true, `要真的唤醒一次：${r.reason}`);
+      const section = pgMake.recorded.contexts.find((s) => s?.name === 'onebot-hub:imagegen');
+      assert.ok(section, 'setup 要挂 onebot-hub:imagegen 引导段');
+      assert.match(String(section.text), /generate_image/, '引导段要点名第三方工具');
+      assert.match(String(section.text), /onebot_reply/, '引导段要教 onebot_reply 发图');
+      const lastAllow = pgMake.recorded.agentRestricts.at(-1);
+      assert.ok(Array.isArray(lastAllow), 'setup 要真的应用白名单');
+      assert.ok(lastAllow.includes('generate_image'), '第三方生图工具要进 allow');
+    } finally {
+      pgHub.config.agentPrivates = savedPrivates;
+      pgMake.recorded.agentToolSchemas = null;
+    }
+  });
+
   // 释放必须放在最后：agent 通道的 disposer 会拿掉 hostRef 并回收池。
-  await checkAsync('release 全部 disposer 不抛异常，且之后唤醒退化而不崩', async () => {
-    for (const { dispose } of recorded.effects) dispose();
+  await checkAsync('release 全部 disposer 不抛异常，且之后唤醒退化而不崩', async () => {    for (const { dispose } of recorded.effects) dispose();
     assert.equal(hub.pool.host.create, null, 'dispose 后 host.create 未清空');
     assert.equal(hub.pool.size, 0, 'dispose 后池未清空');
     const r = await hub.pool.wake('group:55555', { text: 'x', setup: () => {} });
