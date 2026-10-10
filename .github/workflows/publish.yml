@@ -11,7 +11,7 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write   # 打 tag 时要自动建 GitHub Release（gh release create 用 github.token）
   id-token: write   # Trusted Publishing 的 OIDC 身份（npm publish 走 OIDC 免 token，provenance 自动附带）
 
 jobs:
@@ -49,6 +49,18 @@ jobs:
       - name: Publish
         if: ${{ !inputs.dry-run }}
         run: npm publish
+
+      # 打 tag 发布成功后自动建同名 GitHub Release，附上与 npm 同一内容的 tarball；
+      # release 已存在（重跑）时退化为重新上传资产
+      - name: GitHub Release
+        if: ${{ startsWith(github.ref, 'refs/tags/') && !inputs.dry-run }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir dist
+          npm pack --pack-destination dist
+          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*.tgz \
+            || gh release upload "$GITHUB_REF_NAME" dist/*.tgz --clobber
 
       - name: Pack（dry-run 模式下确认打包内容）
         if: ${{ inputs.dry-run }}
