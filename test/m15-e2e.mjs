@@ -4167,6 +4167,18 @@ async function scenarioChatFeatures() {
     assert.match(String(lastUpstream()?.text ?? ''), /动漫风格的角色立绘/);
     assert.match(String(lastUpstream()?.text ?? ''), /角色识别: 猫猫/);
   });
+
+  // ---- 门②（用户 2026-10-11 定）：没有描述就不问角色识别，失败原因亮进上下文 ----
+  describeQueue.push('', ''); // 视觉模型空回复——空回重试一次（vision.js 的兜底），两次都空才算失败
+  hub.handleUpstreamEvent(
+    say('[CQ:image,file=y4]', 10001, [{ type: 'image', data: { file: `${stickerPng.slice(0, -4)}QkM=` } }]),
+  );
+  await waitFor(() => /识图失败/.test(String(lastUpstream()?.text ?? '')), 3000);
+  check('二次元门②：描述失败 → 不问后端 + 上下文带"识图失败：原因"（不再出现孤零零的角色名）', () => {
+    assert.equal(recognizeCalls.length, 1, '失败消息不该触发识别（仍是门①"判是"那 1 次）');
+    assert.doesNotMatch(String(lastUpstream()?.text ?? ''), /角色识别/);
+    assert.match(String(lastUpstream()?.text ?? ''), /识图失败：视觉模型没有回任何文字/);
+  });
   // ---- 一轮完整回合：被 @ 唤醒 → 调 onebot_reply → 发出去，诊断要如实记 ----
   const pool = {
     async wake(agentKey, { setup }) {
