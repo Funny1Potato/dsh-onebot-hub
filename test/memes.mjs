@@ -83,17 +83,17 @@ t('normalizeKeywords：数组/顿号逗号字符串/空值/重复/超长/超量'
   assert.deepEqual(many, Array.from({ length: 12 }, (_, i) => `k${i}`), '保留前 12 条且顺序不变');
 });
 
-t('describeMeme：单行中文描述', () => {
+t('describeMeme：单行中文描述（关键词带"适用场景"标签，aigf-master 对比）', () => {
   assert.equal(
     describeMeme({ id: 'm3', keywords: ['开心', '得意'], description: '一只鼓掌的猫' }),
-    'm3（开心、得意）一只鼓掌的猫',
+    'm3（适用场景：开心、得意）一只鼓掌的猫',
   );
   assert.equal(describeMeme({ id: 'm4', keywords: [], description: '一条鱼' }), 'm4 一条鱼');
-  assert.equal(describeMeme({ id: 'm5', keywords: ['猫'] }), 'm5（猫）');
+  assert.equal(describeMeme({ id: 'm5', keywords: ['猫'] }), 'm5（适用场景：猫）');
   assert.equal(describeMeme({}), '');
   assert.equal(
     describeMeme({ id: 'm6', keywords: '开心、得意', description: '  多  空格  ' }),
-    'm6（开心、得意）多 空格',
+    'm6（适用场景：开心、得意）多 空格',
   );
 });
 
@@ -167,7 +167,10 @@ t('renderForPrompt：列出所有 id 与中文描述，并逐字带上"只能使
   }
   assert.match(text, /只能使用下面列出的 id/);
   assert.match(text, /不要编造 id/);
-  assert.ok(text.includes('m1（开心、得意）一只鼓掌的猫'), '描述行形如 m1（关键词）说明');
+  assert.ok(text.includes('m1（适用场景：开心、得意）一只鼓掌的猫'), '描述行形如 m1（适用场景：关键词）说明');
+  // aigf-master 对比：标题点明"用于发送"，且有一句正向引导（别全是禁令）。
+  assert.match(text, /用于发送/);
+  assert.match(text, /气氛合适就发一个/);
   assert.equal(text.split('\n').length, 4, '一行表头 + 三行清单');
 });
 
