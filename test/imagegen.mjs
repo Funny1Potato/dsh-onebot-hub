@@ -455,6 +455,33 @@ t('generate：错误信息会把回显里的 apiKey 抹成 ***', async () => {
   assert.match(out.error, /\*\*\*/);
 });
 
+t('generate：裸 b64_json 的魔数决定 mediaType，不再一律当 image/png', async () => {
+  const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(24, 0x11)]);
+  const base = { enabled: true, model: 'm', baseUrl: 'https://api.example.com', apiKey: 'k' };
+  // 豆包 Seedream 实测形态：裸 base64 的 JPEG 字节，之前被兜底成 image/png，
+  // 登记宿主 attachments 时被字节嗅探拒绝（"Declared image type does not match its bytes."）。
+  const raw = await new ImageGen({
+    ...base,
+    fetchImpl: async () => jsonResponse({ data: [{ b64_json: jpeg.toString('base64') }] }),
+  }).generate({ prompt: 'x' });
+  assert.equal(raw.ok, true, raw.error ?? '');
+  assert.equal(raw.mediaType, 'image/jpeg', '裸 base64 的 JPEG 字节不该被标成 image/png');
+  // data: 前缀谎报 png、字节是 jpeg：魔数赢过声明
+  const lied = await new ImageGen({
+    ...base,
+    fetchImpl: async () => jsonResponse({ data: [{ b64_json: `data:image/png;base64,${jpeg.toString('base64')}` }] }),
+  }).generate({ prompt: 'x' });
+  assert.equal(lied.ok, true, lied.error ?? '');
+  assert.equal(lied.mediaType, 'image/jpeg', '魔数优先于 data: 前缀的声明');
+  // 真 PNG 不受影响
+  const png = await new ImageGen({
+    ...base,
+    fetchImpl: async () => jsonResponse({ data: [{ b64_json: SIGNATURE.toString('base64') }] }),
+  }).generate({ prompt: 'x' });
+  assert.equal(png.ok, true, png.error ?? '');
+  assert.equal(png.mediaType, 'image/png');
+});
+
 await Promise.all(pending);
 const failed = cases.filter((c) => !c.ok);
 console.log(JSON.stringify({ passed, failed: failed.length, cases: failed }, null, 2));

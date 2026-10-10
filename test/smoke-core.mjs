@@ -2210,6 +2210,30 @@ t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m0
   });
 });
 
+t('saveBytes：声明类型与字节魔数打架时信字节（生成图上游标错类型的兜底）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-sniff-'));
+  const store = new JsonStore({ dir, debounceMs: 0 });
+  const media = new MediaStore({ storage: store, linkId: 'up:test', log: () => {} });
+  try {
+    // 豆包 Seedream 实测：JPEG 字节顶着 image/png 的声明来，宿主登记被当场拒绝。
+    const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(24, 0x11)]);
+    const ref = await media.saveBytes(jpeg, { mediaType: 'image/png', kind: 'image' });
+    assert.equal(ref.mediaType, 'image/jpeg', 'JPEG 字节不该顶着 image/png 的声明走');
+    assert.ok(ref.blob.endsWith('.jpg'), `blob 扩展名应跟着改判成 .jpg：${ref.blob}`);
+    // 声明与字节一致时不受影响
+    const png = await media.saveBytes(
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]),
+      { mediaType: 'image/png', kind: 'image' },
+    );
+    assert.equal(png.mediaType, 'image/png');
+    // 嗅探没命中（不是任何已知魔数）≠声明错了，保留调用方声明
+    const text = await media.saveBytes(Buffer.from('hello'), { mediaType: 'text/plain', kind: 'file' });
+    assert.equal(text.mediaType, 'text/plain', '嗅探没命中时保留声明');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 t('发送失败的消息不算聊天记录：检索跳过、原文仍在、裁决可反查（m30859）', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-failed-'));
   const recall = new RecallStore({ dir, linkId: 'up:test', log: () => {} });

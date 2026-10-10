@@ -1374,6 +1374,23 @@ async function runAsyncChecks() {
     assert.ok(Array.isArray(r.refs));
   });
 
+  await checkAsync('onebot_media：link 落地也走 describe:true（之前只有按消息 id 那条路会看图）', async () => {
+    const png = path.join(os.tmpdir(), `hub-ig-describe-${Date.now()}.png`);
+    fs.writeFileSync(png, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001', 'hex'));
+    const savedVision = hub.vision;
+    hub.vision = { describeEnabled: true, describeImage: async ({ mediaType }) => ({ text: `假描述（${mediaType}）` }) };
+    try {
+      const r = JSON.parse(await toolOf('onebot_media').execute({ link: png, type: 'image', describe: true }));
+      assert.equal(r.refs?.length, 1, '图应落成 ref');
+      assert.match(r.refs[0].mediaType, /^image\/png$/, 'PNG 魔数要被嗅探出来');
+      assert.match(r.refs[0].text ?? '', /假描述（image\/png）/, 'link 落地的图也要有描述');
+      assert.equal(r.descriptions?.length, 1, 'descriptions 里带回描述');
+    } finally {
+      hub.vision = savedVision;
+      fs.rmSync(png, { force: true });
+    }
+  });
+
   await checkAsync('onebot_avatar 拼社区惯例 URL 并标 provenance', async () => {
     const user = JSON.parse(await toolOf('onebot_avatar').execute({ user_id: 945126014, size: 100 }));
     assert.equal(user.url, 'https://q1.qlogo.cn/g?b=qq&nk=945126014&s=100');
