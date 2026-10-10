@@ -188,13 +188,35 @@ t('generate：b64_json 分支的 method/URL/头/body 与字节', async () => {
   assert.equal(body.size, '1024x1024');
   assert.equal(body.n, 1);
   assert.equal(body.response_format, 'b64_json');
-  assert.equal(body.watermark, false);
+  assert.equal('watermark' in body, false, 'watermark 不是官方参数，默认不发送');
   assert.equal('image' in body, false, '没给参考图就不该有 image 键');
   assert.ok(!call.init.body.includes('sk-secret'), '请求体里绝不能出现 apiKey');
 
   assert.equal(gen.stats.requests, 1);
   assert.equal(gen.stats.ok, 1);
   assert.equal(gen.stats.failed, 0);
+});
+
+t('generate：watermark 显式开启才透传；size 对齐官方 16 步进', async () => {
+  const bodies = [];
+  const fetchImpl = async (_url, init) => {
+    bodies.push(JSON.parse(init.body));
+    return jsonResponse({ data: [{ b64_json: SIGNATURE.toString('base64') }] });
+  };
+  const base = { enabled: true, model: 'm', baseUrl: 'https://api.example.com', apiKey: 'k', fetchImpl };
+  const plain = await new ImageGen(base).generate({ prompt: 'x', size: '3:2' });
+  assert.equal(plain.ok, true, plain.error ?? '');
+  assert.equal('watermark' in bodies[0], false, '默认不发 watermark');
+  {
+    const [w, h] = bodies[0].size.split('x').map(Number);
+    assert.equal(w % 16, 0, `宽 ${w} 应是 16 的倍数（官方 gpt-image-2 规则）`);
+    assert.equal(h % 16, 0, `高 ${h} 应是 16 的倍数（官方 gpt-image-2 规则）`);
+    assert.ok(Math.abs(w / h - 3 / 2) / (3 / 2) < 0.02, `3:2 比例偏差过大 ${w}x${h}`);
+    assert.ok(w <= 1024 && h <= 1024, `超 maxSize 框 ${w}x${h}`);
+  }
+  const marked = await new ImageGen({ ...base, watermark: true }).generate({ prompt: 'x' });
+  assert.equal(marked.ok, true, marked.error ?? '');
+  assert.equal(bodies[1].watermark, true, '显式开启才带 watermark');
 });
 
 t('generate：b64_json 带 data: 前缀也能剥掉', async () => {
