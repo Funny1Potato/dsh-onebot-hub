@@ -1,6 +1,6 @@
 {
   "name": "dsh-onebot-hub",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "OneBot v11 hub for DeepSeek Harness: connects to an upstream OneBot v11 implementation (forward WebSocket client) and serves/dials downstream bot implementations with the same protocol, relaying events and actions verbatim so DSH can observe every message and learn how each downstream bot is used.",
   "type": "module",
   "keywords": [
