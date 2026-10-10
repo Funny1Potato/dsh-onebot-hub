@@ -78,7 +78,6 @@
   },
   "files": [
     "lib/**/*.js",
-    "scripts/*.mjs",
     "cordis.patch.yml",
     "LICENSE",
     "README.md"
