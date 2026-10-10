@@ -12,7 +12,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write   # npm provenance（--provenance 需要 OIDC）
+  id-token: write   # Trusted Publishing 的 OIDC 身份（npm publish 走 OIDC 免 token，provenance 自动附带）
 
 jobs:
   publish:
@@ -23,7 +23,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-          registry-url: 'https://registry.npmjs.org'
+
+      # Trusted Publishing 要求 npm ≥ 11.5.1；node 22 自带的是 10.x，必须先升
+      - name: Upgrade npm
+        run: npm install -g npm@latest
 
       - name: Install
         run: npm install --omit=peer --legacy-peer-deps --no-audit --no-fund
@@ -42,11 +45,10 @@ jobs:
       - name: Tests
         run: npm test
 
+      # Trusted Publishing：npm 自动用 OIDC 换临时凭据，无需任何 secret/token
       - name: Publish
         if: ${{ !inputs.dry-run }}
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
 
       - name: Pack（dry-run 模式下确认打包内容）
         if: ${{ inputs.dry-run }}
