@@ -124,6 +124,8 @@ function makeCtx(extraServices = {}) {
     titles: [],
     /** 归档旧会话的调用记录（`workspaceRegistry.archiveSession`）。 */
     archives: [],
+    /** 喂给 agent 的用户消息（`followup` 的实参）——批量渲染/补描的断言都看这里。 */
+    followups: [],
   };
   // 假 `agentPresets`：宿主有一条不变量——没加入任何预设的 agent 一旦去喊模型，
   // `system-prompt/assemble` 直接判失败。这里只验证"我们确实 resolve 了默认预设、并在
@@ -207,7 +209,14 @@ function makeCtx(extraServices = {}) {
         // 真宿主返回的是句柄 `{ agent, dispose }`，会话对象在 handle.agent。
         const handle = (sessionId) => ({
           id: sessionId,
-          agent: { id: sessionId, followup() {}, whenIdle: async () => true },
+          agent: {
+            id: sessionId,
+            followup(msg) {
+              // 无 createUserMessage 的假宿主收到的是 `{role:'user', content:[…]}`，首段是文本。
+              recorded.followups.push(msg);
+            },
+            whenIdle: async () => true,
+          },
           dispose() {},
         });
         cb({
@@ -1657,6 +1666,62 @@ async function runAsyncChecks() {
     // 下一轮（新 key）重新领得到；limit=0 当 1 处理，绝不会退化成"无限"
     assert.equal(claimImageQuota(quota, 'group:1#8', 0).ok, true);
     assert.equal(claimImageQuota(quota, 'group:1#8', 1).ok, false);
+  });
+
+  await checkAsync('图片补描：晚到的看图描述在下一次唤醒按说话人补进 prompt，且取走即清', async () => {
+    const sessionKey = 'private:10001';
+    // resolveConfig 恒产出两张空名单（= 白名单已启用、生产默认 deny-all）：
+    // 测试会话临时进名单，用完恢复，别让这条改动漏进别的用例。
+    const savedPrivates = hub.config.agentPrivates;
+    hub.config.agentPrivates = { ...savedPrivates, 10001: {} };
+    try {
+      const downstream = (id, text, who = '下游A') => ({
+        sessionKey,
+        action: 'send_msg',
+        ts: Date.now(),
+        text,
+        label: who,
+        entry: { id, sessionKey, ts: Date.now(), text, actor: { nickname: who }, live: null, refs: {} },
+      });
+      const lastPromptText = () => {
+        const msg = recorded.followups.at(-1);
+        const part = Array.isArray(msg?.content) ? msg.content.find((p) => p?.type === 'text') : null;
+        return String(part?.text ?? '');
+      };
+      // ① 首轮渲染：批次带一条下游图片消息（描述还没生成 → 裸 [图片]），渲染后记入"已渲染"。
+      hub.mind.noteDownstreamSend(downstream('ld-img-1', '[图片]（已存为 hub-media:abc）'));
+      const first = await hub.mind.flush(sessionKey, { reason: 'test-render' });
+      assert.equal(first.woke, true, `首轮应当真的唤醒一次：${first.reason}`);
+      const firstText = lastPromptText();
+      assert.ok(firstText.includes('[图片]'), '首轮只有裸 [图片]（描述晚到）');
+      assert.ok(!firstText.includes('图片补描'), '首轮不该有补描块');
+      // ② 描述晚到：hub 在看图写回后调 noteLateDescribe → 下一次唤醒按说话人带上。
+      hub.mind.noteLateDescribe(
+        { id: 'ld-img-1', sessionKey, ts: Date.now(), actor: { nickname: '下游A' } },
+        new Map([[0, { text: '一只橘猫趴在键盘上' }]]),
+      );
+      hub.mind.noteDownstreamSend(downstream('ld-txt-2', '第二条'));
+      const second = await hub.mind.flush(sessionKey, { reason: 'test-backfill' });
+      assert.equal(second.woke, true, `次轮应当唤醒：${second.reason}`);
+      const secondText = lastPromptText();
+      assert.ok(secondText.includes('图片补描'), `次轮要带【图片补描】块：${secondText.slice(0, 200)}`);
+      assert.ok(secondText.includes('一只橘猫趴在键盘上'), '补描块里要有描述文本');
+      assert.ok(secondText.includes('下游A'), '补描要按说话人对上号');
+      // ③ 取走即清：再下一轮不再重复。
+      hub.mind.noteDownstreamSend(downstream('ld-txt-3', '第三条'));
+      await hub.mind.flush(sessionKey, { reason: 'test-clear' });
+      assert.ok(!lastPromptText().includes('图片补描'), '补描块是取走即清，不能每轮重复');
+      // ④ 没渲染过的 entry 不补（下一批渲染时 live.text 自带描述，补了反而重复）。
+      hub.mind.noteLateDescribe(
+        { id: 'ld-img-fresh', sessionKey, ts: Date.now(), actor: { nickname: '下游B' } },
+        new Map([[0, { text: '从未渲染的图' }]]),
+      );
+      hub.mind.noteDownstreamSend(downstream('ld-txt-4', '第四条', '下游B'));
+      await hub.mind.flush(sessionKey, { reason: 'test-negative' });
+      assert.ok(!lastPromptText().includes('从未渲染的图'), '没渲染过的 entry 不该被补描');
+    } finally {
+      hub.config.agentPrivates = savedPrivates;
+    }
   });
 
   // 释放必须放在最后：agent 通道的 disposer 会拿掉 hostRef 并回收池。
