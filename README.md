@@ -108,17 +108,7 @@ node test/m15-e2e.mjs                       # 编排闭环（真 Hub + 假两端
 node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具注册（flag 必须放在脚本前面）
 ```
 
-设计与验证记录（协议取证、每个测试断言覆盖什么、历次真机事故复盘）见 [docs/design-notes.md](docs/design-notes.md)。
-
-### CI 与发布
-
-- **CI**：`.github/workflows/ci.yml`。push 到 `main`、提 PR 或手动触发时跑 `npm test`，矩阵是 Node 22/24 × Ubuntu/Windows。装依赖用 `npm install --omit=peer --legacy-peer-deps`：宿主那几个 `@deepseek-ai/dsh-*` 是 peer 依赖（测试用 `test/register-stubs.mjs` 打桩），而 registry 上它们自己的 peer 区间互相冲突，不加 `--legacy-peer-deps` 会直接 ERESOLVE。`devDependencies` 里的 `@deepseek-ai/schemastery` 才是 `test/load-check.mjs` 用的**真** Config schema 校验器，不能省。
-- **发到 npm**：`.github/workflows/publish.yml`，走 **npm Trusted Publishing**（OIDC 免 token，provenance 自动附带，仓库里不需要任何 npm secret）。`git push origin vX.Y.Z` 触发——先校验 tag 与 `package.json` 版本一致，再跑一遍测试，然后 `npm publish`；发布成功后自动建同名 GitHub Release（自动生成 notes，附上与 npm 同一内容的 tarball）。前置条件：包已在 npmjs.com 上存在，并且在 npmjs.com → 包 → Settings → Trusted publishing 里登记本仓库为 trusted publisher（repository `Funny1Potato/dsh-onebot-hub`，workflow 文件名填 `publish.yml`；2026-09 之后新建的配置默认只允许 `npm stage publish`，要手动勾上直接 `npm publish` 的许可）。**首发例外**：包还不存在时 OIDC 无处落地，先用本地登录的 npm 把 0.1.0 发出去（或 `npm stage publish`），登记好配置后，之后的版本才由 CI 发。手动触发默认只 dry-run，只跑测试和 `npm pack --dry-run`。
-- 本机 `npm publish` 如果报 `DEPTH_ZERO_SELF_SIGNED_CERT`（公司/杀软 TLS 拦截），加 `NODE_OPTIONS=--use-system-ca`；CI 上不受影响。
-
-### 示例值约定
-
-文档、注释、设置页提示和工具描述里的示例值**一律用编造的占位**：群号 `123456789`、QQ 号 `10001`、下游账号 `30001000`、上游反连端口 `8765`、下游地址 `127.0.0.1:8080`。真机上用的群号、QQ 号、端口、密钥不要写进来（`docs/design-notes.md` 里的真机复盘记录除外——那是事故日志，改动前先问）。
+设计与验证记录（协议取证、每个测试断言覆盖什么、历次真机事故复盘）见 [docs/design-notes.md](docs/design-notes.md)；CI 与发布流程、示例值约定也记在那里。
 
 ## License
 
