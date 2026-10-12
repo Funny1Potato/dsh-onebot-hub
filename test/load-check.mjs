@@ -94,9 +94,9 @@ function fakeAgentCtx(recorded) {
       register: () => () => {},
       // 全局工具视图（globalToolNames 读它）：用例往 recorded.agentToolSchemas 里塞假清单。
       schemas: () => recorded?.agentToolSchemas ?? [],
-      // restrict({allow}) 的调用记录（applyToolAllow 走它）——plugin 生图工具放行的断言看这里。
-      restrict: ({ allow } = {}) => {
-        recorded?.agentRestricts?.push(allow ?? null);
+      // restrict(filter) 的调用记录（applyToolDeny 走它）——遮罩名单/生图工具放行的断言看这里。
+      restrict: (filter = {}) => {
+        recorded?.agentRestricts?.push(filter ?? null);
         return () => {};
       },
     },
@@ -135,7 +135,7 @@ function makeCtx(extraServices = {}) {
     archives: [],
     /** 喂给 agent 的用户消息（`followup` 的实参）——批量渲染/补描的断言都看这里。 */
     followups: [],
-    /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict({allow}) 的调用记录。 */
+    /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict(filter) 的调用记录。 */
     agentToolSchemas: null,
     agentRestricts: [],
   };
@@ -1945,13 +1945,15 @@ async function runAsyncChecks() {
     }
   });
 
-  await checkAsync('imageGen engine=plugin：setup 引导段 + allow 放行第三方工具', async () => {
+  await checkAsync('imageGen engine=plugin：setup 引导段 + deny 不遮第三方工具', async () => {
     const savedPrivates = pgHub.config.agentPrivates;
     pgHub.config.agentPrivates = { ...savedPrivates, 10001: {} };
     try {
       pgMake.recorded.agentToolSchemas = [
         { name: 'generate_image', description: '第三方生图' },
         { name: 'read', description: '读文件' },
+        { name: 'task_board_create', description: '任务板' },
+        { name: 'subagent', description: '子代理' },
       ];
       pgHub.mind.noteDownstreamSend({
         sessionKey: 'private:10001',
@@ -1967,12 +1969,66 @@ async function runAsyncChecks() {
       assert.ok(section, 'setup 要挂 onebot-hub:imagegen 引导段');
       assert.match(String(section.text), /generate_image/, '引导段要点名第三方工具');
       assert.match(String(section.text), /onebot_reply/, '引导段要教 onebot_reply 发图');
-      const lastAllow = pgMake.recorded.agentRestricts.at(-1);
-      assert.ok(Array.isArray(lastAllow), 'setup 要真的应用白名单');
-      assert.ok(lastAllow.includes('generate_image'), '第三方生图工具要进 allow');
+      const denyFilter = pgMake.recorded.agentRestricts.at(-1);
+      assert.ok(denyFilter && Array.isArray(denyFilter.deny), 'setup 要真的应用遮罩名单');
+      assert.ok(denyFilter.deny.includes('task_board_create') && denyFilter.deny.includes('subagent'), '第三方大件要被遮');
+      assert.ok(!denyFilter.deny.includes('generate_image'), '第三方生图工具不能被遮（imageGen.plugin 靠它）');
+      assert.ok(!denyFilter.deny.includes('read'), '基础工具不能被遮');
+      assert.ok(!denyFilter.deny.includes('web_search'), '预设工具（哪怕晚注册）不在遮罩名单');
     } finally {
       pgHub.config.agentPrivates = savedPrivates;
       pgMake.recorded.agentToolSchemas = null;
+    }
+  });
+
+  await checkAsync('onebot_tools：遮罩语义（默认遮第三方大件，enable/disable/all/slim 都走 deny）', async () => {
+    const savedPrivates = pgHub.config.agentPrivates;
+    pgHub.config.agentPrivates = { ...savedPrivates, 10001: {} };
+    try {
+      pgMake.recorded.agentToolSchemas = [
+        { name: 'generate_image', description: '第三方生图' },
+        { name: 'read', description: '读文件' },
+        { name: 'task_board_create', description: '任务板' },
+        { name: 'subagent', description: '子代理' },
+        { name: 'web_search', description: '网搜' },
+      ];
+      pgHub.mind.noteDownstreamSend({
+        sessionKey: 'private:10001',
+        action: 'send_msg',
+        ts: Date.now(),
+        text: 'hi',
+        label: '下游A',
+        entry: { id: 'ot-1', sessionKey: 'private:10001', ts: Date.now(), text: 'hi', actor: { nickname: '下游A' }, live: null, refs: {} },
+      });
+      await pgHub.mind.flush('private:10001', { reason: 'test-onebot-tools' });
+      pgHub.mind.activeSessionKey = 'private:10001';
+      const def = pgMake.recorded.tools.find((t) => t.name === 'onebot_tools');
+      assert.ok(def, 'onebot_tools 要注册');
+      // list：可见/被遮分两面报告；第三方生图走 pluginImageTools 不被遮。list:true 时 allowed 换成 canEnable 描述行。
+      const listed = JSON.parse(await def.execute({ list: true }));
+      assert.equal(listed.restricted, true, `默认应挂遮罩；响应=${JSON.stringify(listed)}`);
+      assert.ok(listed.canEnable.some((s) => s.startsWith('task_board_create')) && listed.canEnable.some((s) => s.startsWith('subagent')), '第三方大件进 canEnable');
+      assert.ok(!listed.canEnable.some((s) => s.startsWith('generate_image')), '生图工具不该出现在"被遮"里');
+      const view0 = JSON.parse(await def.execute({}));
+      assert.ok(view0.allowed.includes('read') && view0.allowed.includes('web_search') && view0.allowed.includes('generate_image'), '查询视图：可见名单正确');
+      // enable / disable：动的是 deny 名单（enable=从名单删、disable=加进名单）。
+      const after1 = JSON.parse(await def.execute({ enable: 'task_board_create', disable: 'read' }));
+      assert.ok(after1.allowed.includes('task_board_create'), 'enable 后要可见');
+      assert.ok(!after1.allowed.includes('read'), 'disable 后要被遮');
+      assert.ok(after1.canEnable.includes('read'), '被遮的回到 canEnable');
+      // all：解除遮罩，全景可见。
+      const after2 = JSON.parse(await def.execute({ all: true }));
+      assert.equal(after2.restricted, false, 'all 后无遮罩');
+      assert.equal(after2.allowed.length, 5, 'all 后全景可见');
+      // slim：回默认名单；晚注册的 web_search 天然可见（fail-open 的意义所在）。
+      const after3 = JSON.parse(await def.execute({ slim: true }));
+      assert.equal(after3.restricted, true, 'slim 后重新挂遮罩');
+      assert.ok(after3.canEnable.includes('task_board_create') && after3.canEnable.includes('subagent'));
+      assert.ok(after3.allowed.includes('web_search'), 'slim 名单不含 web_search，它必须可见');
+    } finally {
+      pgHub.config.agentPrivates = savedPrivates;
+      pgMake.recorded.agentToolSchemas = null;
+      pgHub.mind.activeSessionKey = null;
     }
   });
 
