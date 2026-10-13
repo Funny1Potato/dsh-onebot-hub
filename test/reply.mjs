@@ -192,7 +192,7 @@ t('纯空白/空 parts 排不出任何消息', () => {
 
 // ---- ReplyBuffer（会话缓冲版的行为） -------------------------------------------
 
-t('capture 产出 messages；后写覆盖先写', () => {
+t('capture 产出 messages；后写覆盖先写（工具层负责先把上一批发出去，见 m15 插话场景）', () => {
   const buf = new ReplyBuffer({ maxText: 3, maxImages: 9 });
   assert.equal(buf.active, false);
   assert.equal(buf.capture({ text: '第一版\n\n第二版' }).messages.length, 2);
@@ -202,11 +202,13 @@ t('capture 产出 messages；后写覆盖先写', () => {
   assert.equal(second.messages.length, 1);
 });
 
-t('capture 的上限来自构造参数（配置钉在这里）', () => {
+t('capture 的上限来自构造参数（配置钉在这里），候选带上实际上限与跳过原因', () => {
   const buf = new ReplyBuffer({ maxText: 1, maxImages: 9 });
-  const c = buf.capture({ text: '一\n\n二' });
+  const c = buf.capture({ parts: [{ type: 'text', content: '一' }, { type: 'break' }, { type: 'text', content: '二' }, { type: 'at', data: { qq: '昵称' } }] });
   assert.equal(c.messages.length, 1);
   assert.deepEqual(c.dropped, { text: 1, images: 0 });
+  assert.deepEqual(c.limits, { maxText: 1, maxImages: 9 }, '回执要报实际上限，不能是 undefined（m05944）');
+  assert.equal(c.skipped.length, 1, '解不出来的 @ 段要说出来');
 });
 
 t('candidate 保留旧字段（segments/text/images/memes），供诊断与旧调用点', () => {

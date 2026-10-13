@@ -16,7 +16,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Config, apply, auditClientModules, buildHubGuidance, claimImageQuota, describeCodeScopes, inject, name, normalizeTargets, parseCodeRoots, parseCodeScopes, parseListenTarget, parseModelRef, resolveConfig } from '../lib/index.js';
+import { Config, apply, auditClientModules, buildHubGuidance, claimImageQuota, describeCodeScopes, inject, makeReplyTool, name, normalizeTargets, parseCodeRoots, parseCodeScopes, parseListenTarget, parseModelRef, resolveConfig } from '../lib/index.js';
+import { ReplyBuffer } from '../lib/reply.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
@@ -979,6 +980,35 @@ check('onebot_timeline / onebot_reply 形状', () => {
   const replyTool = recorded.tools.find((t) => t.name === 'onebot_reply');
   assert.ok(timelineTool.parameters.limit, '缺 limit 参数声明');
   assert.ok(replyTool.parameters.text, '缺 text 参数声明');
+});
+
+await checkAsync('onebot_reply（会话缓冲版）：新排队先把上一条立即发出，回执说实话（m06083）', async () => {
+  const flushed = [];
+  const tool = makeReplyTool(new ReplyBuffer(), { media: null, memes: { pathOf: () => null } }, () => {}, {
+    deliverNow: async (candidate) => {
+      flushed.push(candidate.text);
+      return { status: 'ok', sentCount: 1, total: 1, failedAt: null };
+    },
+  });
+  const desc = String(tool.description);
+  assert.ok(desc.includes('允许多次调用'), '工具说明要写明一轮可以多次调用（m06083）');
+  assert.ok(desc.includes('直接发出'), '工具说明要写明调用后会直接发出消息（m06083）');
+  // 第一次调用：只排队。
+  const r1 = await tool.execute({ text: '第一批' });
+  assert.equal(flushed.length, 0, '第一次调用没有上一批，不该触发投递');
+  assert.match(r1, /已排队回复/, `第一笔回执：${r1}`);
+  // 第二次调用：先把上一批冲正发出，再排队本批。
+  const r2 = await tool.execute({ text: '第二批' });
+  assert.deepEqual(flushed, ['第一批'], '上一批要经 deliverNow 立即发出');
+  assert.match(r2, /上一条回复已直接发出（1\/1 条）/, `冲正回执要说实话：${r2}`);
+  assert.match(r2, /已排队回复/, `本批照常排队：${r2}`);
+  // 失败路径：deliverNow 报 failed 时回执要带上第几条与 retcode。
+  const failTool = makeReplyTool(new ReplyBuffer(), { media: null, memes: { pathOf: () => null } }, () => {}, {
+    deliverNow: async () => ({ status: 'failed', sentCount: 0, total: 2, failedAt: 1, retcode: -1935986436 }),
+  });
+  await failTool.execute({ text: '甲' });
+  const r4 = await failTool.execute({ text: '乙' });
+  assert.match(r4, /发送失败（第 1\/2 条没发出去，retcode -1935986436）/, `失败回执要如实：${r4}`);
 });
 
 check('onebot_invoke 能在工具层指定说话人 user_id，并明说换账号可能换结果', () => {

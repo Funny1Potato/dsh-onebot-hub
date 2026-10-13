@@ -19,6 +19,7 @@ import { planAdminOp } from '../lib/admin.js';
 import { JsonlLog, safeName } from '../lib/storage.js';
 import { nameIn } from '../lib/profile.js';
 import { Mind, SESSION_ID_PREFIX, isSilentMarker, textOfContent } from '../lib/mind.js';
+import { makeReplyTool } from '../lib/index.js';
 import { AgentPool } from '../lib/agent/pool.js';
 import { resolveAgentPolicy, shouldWake } from '../lib/agent/policy.js';
 import { MemoryStore } from '../lib/memory/store.js';
@@ -1771,7 +1772,7 @@ async function scenarioMultiMessageReply() {
 /**
  * 插话（m31311）：回合在飞时的新消息不再排队等下一轮，而是以【插话 N 条】直接递进
  * 正在进行的回合。脚本第一段卡住模拟"模型在跑"，插话到达后驱动器在步骤边界认领；
- * 收尾验证：结算只归主 flush、回复后写覆盖、窗口不丢账。
+ * 收尾验证：结算只归主 flush、上一批在新 reply 调用时立即发出（m06083）、窗口不丢账。
  */
 async function scenarioSteerInterject() {
   const { hub, sent } = makeHub();
@@ -1802,14 +1803,14 @@ async function scenarioSteerInterject() {
     policy,
     pool,
     log: () => {},
-    setup: (agentCtx, { reply }) => {
-      agentCtx.tools.register({
-        name: 'onebot_reply',
-        async execute(args = {}) {
-          const c = reply.capture({ text: args.text, images: args.images ?? [] });
-          return c ? `queued:${c.text}` : 'empty';
-        },
-      });
+    setup: (agentCtx, { reply, mind: mindRef, sessionKey }) => {
+      // 用**真**的 one_reply 工具（lib/index.js 的 makeReplyTool）：m06083 定案后"多次调用"
+      // 的冲正逻辑在工具层（新调用先把上一批立即发出），假工具测不到它。
+      agentCtx.tools.register(
+        makeReplyTool(reply, hub, () => {}, {
+          deliverNow: (candidate) => mindRef.deliver(sessionKey, candidate),
+        }),
+      );
     },
   });
   hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
@@ -1832,7 +1833,7 @@ async function scenarioSteerInterject() {
   const flush2 = mind.flush('group:55555', { reason: 'test:steer' });
   await waitFor(() => mind.stats.steered === 1, '插话被受理');
 
-  check('插话：受理时首批候选还没发（后写覆盖，一轮只 deliver 一次）', () => {
+  check('插话：受理时首批候选还没发（新语义下要等下一次 reply 调用才冲正）', () => {
     assert.equal(sent.length, 0, `首批候选不该提前出站：${JSON.stringify(sent)}`);
     assert.equal(mind.stats.lastSteer?.count, 1);
     assert.equal(mind.stats.lastSteer?.reason, 'test:steer');
@@ -1840,14 +1841,15 @@ async function scenarioSteerInterject() {
   });
 
   gateResolve();
-  await waitFor(() => sent.length === 1, '这一回合最终出站一次');
+  await waitFor(() => sent.length === 2, '首批冲正 + 回合末出站，共两次');
   await flush2;
-  check('插话：同一回合收尾，回复取最后一次调用（后写覆盖）', () => {
+  check('插话：同一回合收尾，上一批在新调用时立即发出（m06083）', () => {
     assert.deepEqual(ref.inputs.map((i) => i.kind), ['turn', 'steer'], '驱动器应该在步骤边界认领插话，而不是等下一轮');
-    assert.equal(sent.length, 1, `整轮只该出站一次：${JSON.stringify(sent)}`);
-    const text = sent[0].params.message.map((p) => p.data?.text ?? '').join('');
-    assert.match(text, /插话收到/, `出站应是插话后的回复：${text}`);
-    assert.ok(!text.includes('第一批的回复'), `首批候选该被覆盖：${text}`);
+    assert.equal(sent.length, 2, `首批 + 插话回复都要出站：${JSON.stringify(sent)}`);
+    const first = sent[0].params.message.map((p) => p.data?.text ?? '').join('');
+    const second = sent[1].params.message.map((p) => p.data?.text ?? '').join('');
+    assert.match(first, /第一批的回复/, `第一批要被第二次调用冲正发出：${first}`);
+    assert.match(second, /插话收到/, `插话后的回复最后出站：${second}`);
     assert.equal(mind.stats.lastTurn?.spokeFrom, 'tool');
   });
   check('插话：窗口与账本不丢账', () => {
