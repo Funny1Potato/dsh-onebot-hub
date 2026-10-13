@@ -1238,6 +1238,30 @@ t('媒体上限与关开关：超限只记元信息，关掉就只标注不落�
   });
 });
 
+t('媒体上限：超大图放行落盘且不标 error（识图要看字节），非图片照旧拒绝', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-image-limit-'));
+  const store = new JsonStore({ dir, debounceMs: 0 });
+  const tiny = new MediaStore({ storage: store, linkId: 'up:test', log: () => {}, maxBytes: 64 * 1024 });
+
+  return Promise.resolve().then(async () => {
+    const bigPng = Buffer.alloc(200 * 1024, 0x61);
+    bigPng[0] = 0x89; bigPng[1] = 0x50; bigPng[2] = 0x4e; bigPng[3] = 0x47; // PNG magic → kind=image
+    const ref = await tiny.resolve({ type: 'image', data: { file: `base64://${bigPng.toString('base64')}` } }, { messageId: 33 });
+    assert.equal(ref.error, null, '超大图不标 error——识图环节见 error 会放弃');
+    assert.ok(ref.blob, '超大图要落盘（识图链要字节）');
+    assert.equal(ref.bytes, bigPng.length, '大小照记');
+    assert.equal(tiny.stats.blobs, 1);
+    assert.equal(ref.attachment ?? null, null, '超大图不登记宿主附件（主请求别被巨图撑爆）');
+
+    // 非图片照旧：超限只记元信息。
+    const bigBin = Buffer.alloc(200 * 1024, 1);
+    const ref2 = await tiny.resolve({ type: 'file', data: { file: `base64://${bigBin.toString('base64')}`, name: 'big.bin' } }, { messageId: 34 });
+    assert.match(ref2.error, /超过上限/);
+    assert.equal(ref2.blob ?? null, null);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 t('回合配对判定：谁能开回合、谁算下游说话、什么是 hub 自己说话', () => {
   const trigger = { direction: 'upstream-in', kind: 'group_message', ts: 1 };
   assert.equal(isTriggerEntry(trigger), true);
