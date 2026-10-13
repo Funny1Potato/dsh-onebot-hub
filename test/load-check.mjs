@@ -142,8 +142,17 @@ function makeCtx(extraServices = {}) {
   // 假 `agentPresets`：宿主有一条不变量——没加入任何预设的 agent 一旦去喊模型，
   // `system-prompt/assemble` 直接判失败。这里只验证"我们确实 resolve 了默认预设、并在
   // setup 回调里 mount 了它"；真 mount 的效果只能由真 DSH 证明。
+  // resolve(id)：带 id 按名字解析（预设切换用例看 recorded.created[].meta.agentPreset），
+  // 未知名字抛 agent-preset/not-found（真服务的语义：未知抛错，hub 要退回默认预设）。
   const fakePresets = {
-    resolve: async () => ({ id: 'standard' }),
+    resolve: async (id) => {
+      const wanted = String(id ?? '').trim();
+      if (!wanted) return { id: 'standard' };
+      if (wanted === 'standard' || wanted === 'hub-minimal') return { id: wanted };
+      const err = new Error(`agent-preset/not-found: ${wanted}`);
+      err.meta = { available: ['standard', 'hub-minimal'] };
+      throw err;
+    },
     mount: async (agentCtx, id) => {
       recorded.presetMounts.push({ id, agentCtx });
       return { id: id ?? 'standard' };
@@ -2027,6 +2036,99 @@ async function runAsyncChecks() {
       assert.ok(after3.allowed.includes('web_search'), 'slim 名单不含 web_search，它必须可见');
     } finally {
       pgHub.config.agentPrivates = savedPrivates;
+      pgMake.recorded.agentToolSchemas = null;
+      pgHub.mind.activeSessionKey = null;
+    }
+  });
+
+  await checkAsync('agent.preset：精简预设建会话 + onebot_tools 整档切换（下一轮生效）+ 休眠回切 + 未知预设退回', async () => {
+    const savedPrivates = pgHub.config.agentPrivates;
+    const savedPreset = pgHub.config.agentPreset;
+    pgHub.config.agentPrivates = { ...savedPrivates, 10001: {} };
+    pgHub.mind.activeSessionKey = 'private:10001';
+    try {
+      pgMake.recorded.agentToolSchemas = [
+        { name: 'read', description: '读文件' },
+        { name: 'subagent', description: '子代理' },
+      ];
+      /** 一轮唤醒 = 一条下游发言 + 一次 flush（照遮罩语义用例的前置）。 */
+      const round = async (n) => {
+        pgHub.mind.noteDownstreamSend({
+          sessionKey: 'private:10001',
+          action: 'send_msg',
+          ts: Date.now(),
+          text: `m${n}`,
+          label: '下游A',
+          entry: { id: `ap-${n}`, sessionKey: 'private:10001', ts: Date.now(), text: `m${n}`, actor: { nickname: '下游A' }, live: null, refs: {} },
+        });
+        const r = await pgHub.mind.flush('private:10001', { reason: `test-preset-${n}` });
+        assert.equal(r.woke, true, `第 ${n} 轮要真的唤醒：${r.reason}`);
+      };
+      const def = pgMake.recorded.tools.find((t) => t.name === 'onebot_tools');
+      assert.ok(def, 'onebot_tools 要注册（前面用例已注册，这里是同一份）');
+      // 起手先交还上一组用例留下的活 agent，保证下面每一轮都是"新会话"（能看到 meta.agentPreset）。
+      await pgHub.mind.pool.retire('private:10001', 'test-preset-reset');
+      assert.equal(pgHub.preset.choice.size, 0, 'retire（休眠回切）要清预设选择');
+      assert.equal(pgHub.preset.applied.size, 0, 'retire 也要清 applied 账');
+      // recorded.created 是全部 pg 用例共享的，断言一律用相对起点的增量。
+      const baseCreated = pgMake.recorded.created.length;
+
+      // ① 配置了精简预设 → 新会话 meta.agentPreset 进它，mount 也挂它。
+      pgHub.config.agentPreset = 'hub-minimal';
+      await round(1);
+      assert.equal(pgMake.recorded.created.length, baseCreated + 1, '一轮唤醒恰好建一个新会话');
+      const meta1 = pgMake.recorded.created.at(-1).meta;
+      assert.equal(meta1.agentPreset, 'hub-minimal', `create 的 meta 要带精简预设：${JSON.stringify(meta1)}`);
+      assert.equal(pgMake.recorded.presetMounts.at(-1).id, 'hub-minimal', 'setup 的 mount 要进精简预设');
+      assert.equal(pgHub.preset.applied.get('private:10001'), 'config', 'applied 账要记 config');
+
+      // ② onebot_tools{preset:'default'} 只排队不当场切（本回合还握着写句柄），下一轮才生效。
+      const q1 = JSON.parse(await def.execute({ preset: 'default' }));
+      assert.equal(q1.preset.queued, 'default', `要点名 default：${JSON.stringify(q1.preset)}`);
+      assert.equal(q1.preset.current, 'config', '当前形态还是 config');
+      assert.match(String(q1.note), /默认预设/, 'note 要说清排了什么');
+      assert.equal(pgMake.recorded.created.length, baseCreated + 1, '排队不许当场建新会话');
+      const createdBefore = pgMake.recorded.created.length;
+      await round(2);
+      assert.equal(pgMake.recorded.created.length, createdBefore + 1, '换装要交还旧会话并以新会话重开');      const meta2 = pgMake.recorded.created.at(-1).meta;
+      assert.equal(meta2.agentPreset, 'standard', `下一轮要进 DSH 默认预设：${JSON.stringify(meta2)}`);
+      const notice = pgMake.recorded.contexts.filter((s) => s?.name === 'onebot-hub:preset');
+      assert.ok(notice.length >= 1, '新会话要有 onebot-hub:preset 说明段（m04664）');
+      assert.match(String(notice.at(-1).text), /默认预设/, '说明段要说"切到了默认预设"');
+      assert.equal(pgHub.preset.applied.get('private:10001'), 'default', 'applied 账要记 default');
+      // "切到默认"的说明段里也提"休眠切回精简预设"这句话，所以负断言用精简说明段独有的短语。
+      assert.ok(!pgMake.recorded.contexts.some((s) => s?.name === 'onebot-hub:preset' && /大型工具已收起/.test(String(s.text))), '还没切回来，不该出现"精简"说明');
+
+      // ③ 切回精简：同样下一轮生效，说明段换成"精简"。
+      const q2 = JSON.parse(await def.execute({ preset: 'slim' }));
+      assert.equal(q2.preset.queued, 'slim', '要点名 slim');
+      await round(3);
+      const meta3 = pgMake.recorded.created.at(-1).meta;
+      assert.equal(meta3.agentPreset, 'hub-minimal', `要切回精简预设：${JSON.stringify(meta3)}`);
+      const notice2 = pgMake.recorded.contexts.filter((s) => s?.name === 'onebot-hub:preset');
+      assert.match(String(notice2.at(-1).text), /大型工具已收起/, '第二段说明要说"切回了精简预设"');
+      assert.equal(pgHub.preset.notice.size, 0, '说明段是一次性的（取走即删）');
+
+      // ④ 不认识的档位：不排队、如实说。
+      const q3 = JSON.parse(await def.execute({ preset: 'bogus' }));
+      assert.equal(q3.preset.queued, null, '不认识的不许排队');
+      assert.match(String(q3.preset.note), /不认识/, '要如实说');
+      // ⑤ enable 对预设作用域大件本来就管不到——响应里 preset 段在，账目诚实。
+      assert.ok('preset' in JSON.parse(await def.execute({})), '普通查询响应也要带 preset 段');
+
+      // ⑥ 配置的预设名解析不到（agent-preset/not-found）→ 退回 profile 默认预设，不挡唤醒。
+      pgHub.config.agentPreset = 'no-such-preset';
+      await pgHub.mind.pool.retire('private:10001', 'test-preset-notfound');
+      await round(4);
+      const meta4 = pgMake.recorded.created.at(-1).meta;
+      assert.equal(meta4.agentPreset, 'standard', `解析不到要退回默认预设：${JSON.stringify(meta4)}`);
+      assert.equal(pgHub.preset.applied.get('private:10001'), 'config', 'applied 记的是**意图**（config），防下轮空转');
+    } finally {
+      pgHub.config.agentPrivates = savedPrivates;
+      pgHub.config.agentPreset = savedPreset;
+      pgHub.preset.choice.clear();
+      pgHub.preset.applied.clear();
+      pgHub.preset.notice.clear();
       pgMake.recorded.agentToolSchemas = null;
       pgHub.mind.activeSessionKey = null;
     }
