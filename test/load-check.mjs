@@ -127,6 +127,8 @@ function makeCtx(extraServices = {}) {
     onEvents: [],
     agentEvents: [],
     presetMounts: [],
+    /** hub 注册过的预设定义（fake register 收到的 definition，m05750 slim 清单断言用）。 */
+    presetRegisters: [],
     /** 会话级 `systemPrompt.context(...)` 的登记（live 上下文走这里）。 */
     contexts: [],
     /** 会话改名的调用记录（`sessions.rename`）。 */
@@ -162,6 +164,7 @@ function makeCtx(extraServices = {}) {
       if (!id) throw new Error('agent-preset: id required');
       if (fakePresets.definitions.has(id)) throw new Error(`Duplicate agent preset: ${id}`);
       fakePresets.definitions.set(id, { ...definition });
+      recorded.presetRegisters.push({ ...definition, plugins: definition?.plugins?.map((r) => ({ ...r })) ?? definition?.plugins });
       return async () => fakePresets.definitions.delete(id);
     },
     mount: async (agentCtx, id) => {
@@ -2090,6 +2093,18 @@ async function runAsyncChecks() {
       const meta1 = pgMake.recorded.created.at(-1).meta;
       assert.equal(meta1.agentPreset, 'onebot-hub-slim', `create 的 meta 要带内置精简预设：${JSON.stringify(meta1)}`);
       assert.equal(pgMake.recorded.presetMounts.at(-1).id, 'onebot-hub-slim', 'setup 的 mount 要进内置精简预设');
+      // m05750：slim 预设要带 6 行原生工具插件清单（照抄官方 standard 预设的对应行），
+      // 否则 slim 会话里 read/grep/pwsh/web 等 11 个原生工具一个都没有。
+      const slimDef = pgMake.recorded.presetRegisters.find((d) => d.id === 'onebot-hub-slim');
+      assert.ok(slimDef, 'hub 装配时要注册内置精简预设');
+      assert.equal(slimDef.plugins?.length, 6, `slim 清单要正好 6 行：${JSON.stringify(slimDef?.plugins)}`);
+      const slimNames = slimDef.plugins.map((r) => r.name);
+      for (const n of ['@deepseek-ai/dsh-tool-fs', '@deepseek-ai/dsh-tool-fs-search', '@deepseek-ai/dsh-tool-pwsh', '@deepseek-ai/dsh-tool-jobs', '@deepseek-ai/dsh-tool-web', '@deepseek-ai/dsh-tool-todo']) {
+        assert.ok(slimNames.includes(n), `slim 清单缺 ${n}`);
+      }
+      const webRow = slimDef.plugins.find((r) => r.name === '@deepseek-ai/dsh-tool-web');
+      assert.equal(webRow?.config?.fetch, true, 'tool-web 行要照抄官方 config（fetch:true）');
+      assert.equal(process.platform !== 'win32', slimDef.plugins.find((r) => r.name === '@deepseek-ai/dsh-tool-pwsh').disabled, 'tool-pwsh 的 disabled 要跟平台走（同官方）');
       assert.equal(pgHub.preset.applied.get('private:10001'), 'slim', 'applied 账要记 slim');
       assert.equal(pgHub.preset.sessionPid.get('private:10001'), 'onebot-hub-slim', 'sessionPid 要记活会话的预设');
 
