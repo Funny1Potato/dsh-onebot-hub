@@ -40,6 +40,7 @@ import { renderPerson, renderMemoryBlocks, renderWindow } from '../lib/memory/as
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
 import { full, mdhm } from '../lib/stamp.js';
 import { Cards } from '../lib/memory/cards.js';
+import { flatBreaks } from '../lib/text.js';
 import { MemberResolver, atTargets, cardName, isUnsupported } from '../lib/members.js';
 import { ADMIN_OPS, ADMIN_OP_NAMES, planAdminOp } from '../lib/admin.js';
 import { JsonStore, safeName } from '../lib/storage.js';
@@ -1551,15 +1552,45 @@ t('用法学习：够阈值才 active，code 并入保观测用法，未复现�
   assert.equal(map.size, 0);
 });
 
-t('L3 注入：前缀来自学到的形状（§6.1）', () => {
+t('L3 注入：前缀来自学到的形状 + 能力段自带标题（§6.1）', () => {
+  /**
+   * 能力段以前光秃秃几行 `- /roll …`，夹在表情包清单后面看不出是什么（`m08997`）。
+   * 分组标题就是干这个的：观测到几条、置信度是什么意思，都写在标题里。
+   */
+  const head = (n) => `【下游会吃的命令（观测 ${n} 条，置信度＝真被触发过的次数）】：`;
   assert.equal(
     renderCapabilities([{ name: 'roll', prefix: '/', args: '10', outcome: 'send_msg ~130ms', confidence: 3 }]),
-    '- /roll 10 → send_msg ~130ms（置信度 3）',
+    `${head(1)}\n- /roll 10 → send_msg ~130ms（置信度 3）`,
   );
-  assert.equal(renderCapabilities([{ name: '今日小猪', prefix: '', confidence: 2 }]), '- 今日小猪（置信度 2）');
-  assert.equal(renderCapabilities([{ name: 'roll' }]), '- /roll');
+  assert.equal(
+    renderCapabilities([{ name: '今日小猪', prefix: '', confidence: 2 }, { name: 'roll' }]),
+    `${head(2)}\n- 今日小猪（置信度 2）\n- /roll`,
+  );
+  assert.equal(renderCapabilities([]), '', '没有观测就不占段');
   assert.equal(renderArgs({ prefix: '#', name: '抽签', preconditions: { needsAt: true }, args: { text: '3' } }), '#抽签 @某人 3');
   assert.equal(renderParams({ preconditions: { needsReply: true } }), '（需回复它）');
+});
+
+t('注入文本的换行留痕：一条消息一行，断行渲染成 ⏎（m08997）', () => {
+  /**
+   * 真机现场（用户 11:29 那轮）：开头那条"完整清单（可见 28 个）：\n【消息与会话】…"
+   * 入库存的是真换行，但快照/窗口/恢复卡各自 `replace(/\s+/g,' ')` 把它吃成了空格，
+   * 五个【分组】挤成一条 200 多字单行——只有【新消息】那一路是 `⏎`。
+   */
+  assert.equal(flatBreaks('清单：\n【甲】a\n【乙】b'), '清单： ⏎ 【甲】a ⏎ 【乙】b');
+  assert.equal(flatBreaks('一行\n二行'), '一行 ⏎ 二行');
+  assert.equal(flatBreaks('  挤   在 一起  '), '挤 在 一起', '行内空白照旧压一格');
+  assert.equal(flatBreaks('a\r\nb'), 'a ⏎ b', 'CRLF 一样');
+  assert.equal(flatBreaks(undefined), '');
+  // 真换行会裂成多行、伪造 `- ` 列表项与段标题 → 那是注入面，只能留痕不能还原。
+  assert.equal(flatBreaks('a\n- 假列表').includes('\n'), false);
+
+  const events = [
+    { direction: 'downstream-in', ts: 1700000000000, text: '完整清单：\n【消息与会话】a\n【本体】b', actor: '945126014', refs: { downstreamLabel: 'test' } },
+  ];
+  const win = renderWindow(events, { selfId: 20002000 });
+  assert.equal(win.split('\n').length, 1, `一条消息只能占一行：\n${win}`);
+  assert.ok(win.includes('【消息与会话】a ⏎ 【本体】b'), `断行要留痕：\n${win}`);
 });
 
 t('先预测再动手：dryRun 探针只按现有用法表回答，不发送（M7-③）', () => {
