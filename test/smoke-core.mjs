@@ -1101,6 +1101,31 @@ t('本群认识的人：一行一人、只列本群、排除当前对话者与 b
   assert.ok(grp.text.indexOf('【人物卡】') < grp.text.indexOf('【本群认识的人】'), '先人物卡、再名单（order 33 → 34）');
 });
 
+t('本群认识的人：同一天里谁又冒泡，名单文本必须逐字不变；跨天才重排（m09699）', () => {
+  // 用**本地正午**当基准：无论机器在哪个时区，+10 分钟仍在同一天，+20 小时一定跨天。
+  const base = new Date(2024, 4, 15, 12, 0, 0, 0).getTime();
+  const roster = (at) => {
+    const p = new Profiles({ storage: null, now: () => at });
+    p.noteGroupCard('10001', 'group:55555', { card: '群主小明', role: 'owner' }, at);
+    p.noteGroupCard('10002', 'group:55555', { card: '老张', lastSentAt: at }, at);
+    p.noteGroupCard('10003', 'group:55555', { card: '小王' }, at);
+    return renderPeopleRoster(p.persons(), {
+      sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', selfId: '30001', limit: 20,
+    });
+  };
+  // hub 每条群消息都会刷新发言人的 lastSentAt（lib/hub.js noteGroupCard）——按时间戳排的话
+  // 每来一条消息顺序就变，快照（逐字节判重）就整份重注一次。排序键必须是天粒度。
+  assert.equal(roster(base + 10 * 60_000), roster(base), '同一天内谁又说了话，名单文本不许变');
+  // 跨天确实会重排：最近露面的排前面。
+  const p3 = new Profiles({ storage: null, now: () => base });
+  p3.noteGroupCard('10002', 'group:55555', { card: '老张', lastSentAt: base + 20 * 3600_000 }, base);
+  p3.noteGroupCard('10003', 'group:55555', { card: '小王', lastSentAt: base }, base);
+  p3.noteGroupCard('10004', 'group:55555', { card: '小李', lastSentAt: base - 20 * 3600_000 }, base);
+  const days = renderPeopleRoster(p3.persons(), { worldKey: 'group:55555', sessionKey: 'group:55555', limit: 20 });
+  const order = [...days.matchAll(/^- ([^（]+)/gm)].map((m) => m[1]);
+  assert.deepEqual(order, ['老张', '小王', '小李'], '跨天时按最近露面的先后排');
+});
+
 t('主动回忆的渲染是陈述句，不是命令', () => {
   const now = 1_700_000_000_000;
   const text = renderCues(
@@ -1108,9 +1133,16 @@ t('主动回忆的渲染是陈述句，不是命令', () => {
     { now },
   );
   assert.match(text, /【还没兑现的事】/);
-  assert.match(text, /你答应过「小明」：帮他看一个 bug（当时说大约 .*，已经过了 3 天；他上次露面是 2 小时前）/);
+  assert.match(text, /你答应过「小明」：帮他看一个 bug（当时说大约 .*，已经过了 3 天；他上次露面是 \d{4}-\d{2}-\d{2}）/);
+  assert.ok(!/\d+ (分钟|小时|天)前/.test(text), '时间写绝对日期：相对时间每回合都在变，快照逐字节判重会整份重注（m09699）');
   assert.ok(!/(该提醒|必须|现在就去|别忘了|催)/.test(text), '代码不下命令：提不提由模型判断');
   assert.equal(renderCues([], { now }), '');
+  // 同一份承诺隔一小时再渲染一次，文本必须逐字相同（否则每回合重注一次整份上下文）。
+  const later = renderCues(
+    [{ key: 'k', name: '小明', what: '帮他看一个 bug', due: now - 3 * 86400_000, overdueDays: 3, lastSeenAt: now - 2 * 3600_000 }],
+    { now: now + 3600_000 },
+  );
+  assert.equal(later, text, '一小时后重渲染，文本必须逐字不变（快照重注的判据就是逐字节相等）');
 });
 
 t('24 小时安全阀：同一条承诺一天最多进一次 prompt', () => {
