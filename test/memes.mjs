@@ -189,6 +189,15 @@ t('renderForPrompt：最近使用过的即使不在高频前 limit 个里也必�
   );
   assert.ok(text.includes('描述10'));
   assert.equal(lines.length, 9, '8 个高频项 + 1 个最近使用项（去重后共 9 行）');
+  /**
+   * 标题里的两个数必须都对得上（`m09114` 用户指出）：真机上是 128 个表情包、topK 默认 8，
+   * 标题却写"共 128 个"而清单只有 8 行——读起来像漏注入了一百多个。列出来的条数是
+   * `limit + recentShown`（去重后），跟全库总数不是一回事，所以两个数都要写。
+   */
+  assert.match(text, /^表情包库（用于发送；下面列出常用的 9 个，全库共 12 个；/, '标题要同时说清"列了几个"和"全库几个"');
+  const listed = lines.filter((l) => l.startsWith('- m')).length;
+  assert.equal(listed, 9, '标题里的"列出的 N 个"要等于实际行数，不能拿 total 冒充');
+  assert.ok(text.includes('全库共 12 个'), '全库总数照旧写出来');
 });
 
 // ---- 使用与持久化 -------------------------------------------------------------
