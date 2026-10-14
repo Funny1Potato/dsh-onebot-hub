@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 import { Config, apply, auditClientModules, buildHubGuidance, claimImageQuota, describeCodeScopes, inject, makeReplyTool, name, normalizeTargets, parseCodeRoots, parseCodeScopes, parseListenTarget, parseModelRef, resolveConfig } from '../lib/index.js';
 import { ReplyBuffer } from '../lib/reply.js';
+import { DEFAULT_GUIDANCE } from '../lib/mind.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
@@ -1125,6 +1126,17 @@ async function runAsyncChecks() {
       `speakAssistantText 默认关，却还在教"文本直接发言"：${replySpec.text.slice(0, 80)}`,
     );
     assert.ok(replySpec.text.includes('onebot_reply'), '要说清发言只有 onebot_reply 这一个出口');
+    // 多次调用语义（m06083 定案 A）：新调用会把上一批立即发出去。这句在 guidance 段里
+    // 曾经一直写着旧语义"只有最后一次会发出去"——它等于告诉模型"前几批会蒸发"，
+    // 14:22 真机事故（分批发长报告，模型以为说完了就沉默）就是这句造成的。锁住两侧。
+    assert.ok(
+      !DEFAULT_GUIDANCE.includes('只有最后一次'),
+      `guidance 里还留着"只有最后一次会发出去"的旧覆盖语义：${DEFAULT_GUIDANCE.match(/^.*只有最后一次.*$/m)?.[0] ?? ''}`,
+    );
+    assert.ok(
+      /多调一次|多次调用的内容都会按顺序到达/.test(DEFAULT_GUIDANCE),
+      'guidance 要写清"多调几次，前几批都会按顺序到达"，否则模型不敢分批发',
+    );
     // 回复决策清单（参考 aigf-master）：提示词里必须有成体系的"什么不回"判断面，
     // 不能只剩三条散落的窄规则——这是模型判断"该不该开口"的主要依据。
     assert.ok(replySpec.text.includes('要不要回'), '回复提示词缺"要不要回"的决策清单入口');
