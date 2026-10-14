@@ -192,7 +192,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `vision.mode` | 字符串 | describe | **看图模式**：describe 让视觉模型给描述 / segment 只把图片段交给会话模型 / both / off。识图模型默认用系统默认模型，要按会话换就用模型切换命令（按下面的命令前缀，默认是 /vmodel）。 |
+| `vision.mode` | 字符串 | describe | **看图模式**：describe 让视觉模型给描述 / segment 只把图片段交给会话模型 / both / off。识图模型默认用系统默认模型，要按会话换就用 `vmodel` 命令（前缀见「聊天管理命令」那节）。 |
 | `vision.prompt` | 字符串 | 空 | **用户侧提示词**：给视觉模型的图描述要求；留空用内置中文提示。 |
 | `vision.system` | 字符串 | 空 | **系统提示**：视觉模型的 system 段。 |
 | `vision.maxTokens` | 数字 | 0 | **单次最多输出 token**：0 = 不传该参数（默认，描述不做长度控制）；填 >0 才给单次生成加上限。 |
@@ -215,9 +215,9 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `chatCommands.enabled` | 开关 | 开 | **聊天管理命令**：关掉后 /status 一类命令不再由枢纽处理（消息照常转发给下游）。 |
-| `chatCommands.prefix` | 字符串 | / | **命令前缀**：默认 /；它是公共前缀，下游有同名命令也照常触发，枢纽不抢。 |
-| `chatCommands.bypassPrefix` | 字符串 | !! | **让路前缀**：默认 !!：!!/reset 连枢纽那条回话都不要，当普通消息走。 |
+| `chatCommands.enabled` | 开关 | 开 | **聊天管理命令**：关掉后 `status` 一类命令不再由枢纽处理（消息照常转发给下游）。 |
+| `chatCommands.prefix` | 字符串 | / | **命令前缀**：命令名本身固定，前缀换成什么都能用（配成 `!` 就敲 `!help`）；只认**句首**前缀。它是公共前缀，下游有同名命令也照常触发，枢纽不抢。 |
+| `chatCommands.bypassPrefix` | 字符串 | !! | **让路前缀**：加在原命令前面，枢纽连那条回话都不要、当普通消息走（默认前缀下如 `!!/reset`）。 |
 | `chatCommands.superUsers` | 字符串 | [] | **超管名单（JSON）**：JSON 数组，如 ["10001"]；空 = 整条链沉默（不猜谁是管理员）。 |
 | `chatCommands.maxReplyChars` | 数字 | 800 | **回话长度上限**：超长就截断，防刷屏。 |
 
