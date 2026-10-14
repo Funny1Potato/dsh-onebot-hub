@@ -1868,6 +1868,120 @@ async function scenarioSteerInterject() {
 
 
 /**
+ * 多批插话（m08218 用户定案）：长回合里**每一批**消息都该插得进去，而不是只有第一批。
+ *
+ * 旧行为：`#steering` 是"单会话单飞行"，第二批及以后每一拍都撞在 `steer:pending` 上且不排水，
+ * 只能堆到回合结束当一整坨进下一轮（批与批的边界、与回合内对话的时序全丢了）。现在闸门降为
+ * "每批次一次"：本场景在一个回合里连插三批，断言三批都在步骤边界被依次认领、回复按序全部出站。
+ */
+async function scenarioMultiSteerInterject() {
+  const { hub, sent } = makeHub();
+  const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 99, batchMs: 600000 });
+  const ref = { inputs: [], bodies: [] };
+  let gateResolve = null;
+  const gate = new Promise((resolve) => { gateResolve = resolve; });
+  const { host } = makeFakeHost({
+    script: async (agent) => {
+      const kind = agent.lastInput?.kind;
+      const message = agent.lastInput?.message;
+      ref.inputs.push({ kind, message });
+      if (kind === 'turn') {
+        await gate; // 模拟长回合：模型还卡在第一步
+        await agent.tools.get('onebot_reply').execute({ text: '第一批的回复' });
+        return;
+      }
+      if (kind === 'steer') {
+        const body = (message?.content ?? []).map((p) => p.text ?? '').join('');
+        ref.bodies.push(body);
+        assert.match(body, /【插话 1 条】/, `插话消息缺头：${body.slice(0, 80)}`);
+        await agent.tools.get('onebot_reply').execute({ text: `插话回复（第 ${ref.bodies.length} 批）` });
+      }
+    },
+  });
+  const pool = new AgentPool({ policy, host, log: () => {} });
+  const mind = new Mind({
+    hub,
+    timeline: hub.timeline,
+    store: new MemoryStore({}),
+    policy,
+    pool,
+    log: () => {},
+    setup: (agentCtx, { reply, mind: mindRef, sessionKey }) => {
+      agentCtx.tools.register(
+        makeReplyTool(reply, hub, () => {}, {
+          deliverNow: (candidate) => mindRef.deliver(sessionKey, candidate),
+        }),
+      );
+    },
+  });
+  hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+
+  const waitFor = async (fn, label) => {
+    for (let i = 0; i < 300; i += 1) {
+      if (fn()) return;
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assert.fail(`等不到 ${label}`);
+  };
+
+  // 第一批：@ 唤醒（observe 自己触发 flush），回合卡在 gate 上——模拟模型正在跑。
+  hub.handleUpstreamEvent(groupMessage({ groupId: 55555, messageId: 53011, text: '第一批消息', segments: [{ type: 'at', data: { qq: SELF_ID } }, { type: 'text', data: { text: '第一批消息' } }] }));
+  await waitFor(() => ref.inputs.length >= 1, '第一段脚本开始');
+
+  // 三批插话依次到达（都不带 @，靠手动排水模拟批量窗口到期）——回合还在飞。
+  const steers = [];
+  const batches = [
+    { messageId: 53012, text: '插话一' },
+    { messageId: 53013, text: '插话二' },
+    { messageId: 53014, text: '插话三' },
+  ];
+  for (let i = 0; i < batches.length; i += 1) {
+    const b = batches[i];
+    hub.handleUpstreamEvent(groupMessage({ groupId: 55555, messageId: b.messageId, text: b.text }));
+    steers.push(mind.flush('group:55555', { reason: 'test:steer' }));
+    await waitFor(() => mind.stats.steered === i + 1, `第 ${i + 1} 批插话被受理`);
+  }
+
+  check('多批插话：长回合里每一批都插得进去（旧代码只放第一批，其余堆到下一轮）', () => {
+    assert.equal(mind.stats.steered, 3);
+    assert.equal(ref.inputs.filter((i) => i.kind === 'steer').length, 0, '回合卡在第一步，三批插话都还没被认领');
+    const inFlight = mind.statsSnapshot.steering;
+    assert.equal(inFlight.length, 1, '在飞的是同一个会话');
+    assert.equal(inFlight[0].sessionKey, 'group:55555');
+    assert.equal(inFlight[0].count, 3, '三批插话都在飞，不是"单飞行"');
+  });
+
+  gateResolve();
+  await waitFor(() => sent.length === 4, '首批冲正 + 三批插话回复，共四次出站');
+  await Promise.all(steers);
+  check('多批插话：三批按序在步骤边界认领，回复按序全部出站', () => {
+    assert.deepEqual(ref.inputs.map((i) => i.kind), ['turn', 'steer', 'steer', 'steer'], '每一批都要被认领成一步');
+    assert.equal(ref.bodies.length, 3);
+    assert.ok(ref.bodies[0].includes('插话一'), `第一批要插到最前：${ref.bodies[0].slice(0, 80)}`);
+    assert.ok(ref.bodies[1].includes('插话二'));
+    assert.ok(ref.bodies[2].includes('插话三'), '批次顺序不能乱');
+    const bodies = sent.map((m) => m.params.message.map((p) => p.data?.text ?? '').join(''));
+    assert.equal(sent.length, 4, `首批 + 三批插话的回复都要出站：${JSON.stringify(bodies)}`);
+    assert.match(bodies[0], /第一批的回复/);
+    assert.match(bodies[1], /插话回复（第 1 批）/);
+    assert.match(bodies[2], /插话回复（第 2 批）/);
+    assert.match(bodies[3], /插话回复（第 3 批）/);
+    assert.equal(mind.stats.lastTurn?.spokeFrom, 'tool');
+  });
+  check('多批插话：账目与窗口不丢账，收尾后没有残留在飞', () => {
+    assert.equal(mind.stats.lastTurn?.ok, true, '多批插话延长了回合，仍由主 flush 结算一次');
+    assert.equal(mind.stats.lastTurn?.sent, true);
+    assert.deepEqual(mind.statsSnapshot.steering, [], '回合结束后不该还有在飞的插话');
+    const snap = mind.snapshot('group:55555');
+    for (const text of ['第一批消息', '插话一', '插话二', '插话三']) {
+      assert.ok(String(snap.window ?? '').includes(text), `窗口里要有 ${text}`);
+    }
+  });
+  assert.equal(pool.stats.created, 1, '多批插话不该另建会话');
+}
+
+
+/**
  * 真机回归：会话级 `onebot_reply` 的候选必须**跨轮存活**。
  *
  * 线上表现（2026-10-06 真宿主）：模型调了工具、回了"在。`/status` 没动静不是装死…"，
@@ -4265,6 +4379,7 @@ const main = async () => {
   await scenarioSendFailureNotice();
   await scenarioMultiMessageReply();
   await scenarioSteerInterject();
+  await scenarioMultiSteerInterject();
   await scenarioReplyBufferSurvivesSecondWake();
   await scenarioTurnErrorRecorded();
   await scenarioArchivedSessionGate();
