@@ -297,12 +297,18 @@ check('T4 上游一条事件：ws-listen 的接入连接收到 + http-post 目�
   fanned2 && String(inboundFrames.find((f) => f.message_id === 888)?.self_id) === '30007000',
   { inbound: inboundFrames.length, posted: posted.length });
 const postHit = posted.find((p) => p.body.includes('888'));
+// `posts` 是在 `await fetch(...)` **之后**才自增的（lib/hub.js `#postEvent`），而 posted 一收到请求
+// 就有值——两者之间没有同步点，这里直读就是抢跑（真在 CI 上翻过：run 38504580381 的
+// node22/windows T5 FAIL，其它三个 job 绿，同提交 rerun 即绿）。所以计数条件走 waitFor，
+// 和 T4 同一个模式：headers/body 是同步拿到的事实，计数是会随后落地的异步状态。
+const counted = await waitFor('T5 http-post 的计数进状态', () =>
+  (hub2.downstreamLinks.find((l) => l.id === 'F')?.posts ?? 0) >= 1 &&
+  (hub2.downstreamLinks.find((l) => l.id === 'F')?.failures ?? 0) === 0, 4000);
 check('T5 http-post 带上 X-Self-ID 与 JSON 事件体，计数进状态',
   postHit?.headers['x-self-id'] === '30008000' &&
     postHit?.headers['content-type'] === 'application/json' &&
     JSON.parse(postHit.body).group_id === 55555 &&
-    (hub2.downstreamLinks.find((l) => l.id === 'F')?.posts ?? 0) >= 1 &&
-    (hub2.downstreamLinks.find((l) => l.id === 'F')?.failures ?? 0) === 0,
+    counted,
   { headers: postHit?.headers, status: hub2.downstreamLinks.find((l) => l.id === 'F') });
 
 const unauth = await fetch(`${linkG.url}/send_msg`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
