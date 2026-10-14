@@ -1549,6 +1549,16 @@ async function runAsyncChecks() {
     const bad = JSON.parse(await t.execute({ ...ctxArg, ops: '这不是 JSON' }));
     assert.equal(bad.applied.short_term.add, 0);
     assert.match(String(bad.note ?? bad.rejected[0]?.reason), /必须是对象/);
+
+    // 同文本写进 long_term ＝ **提升**（`m08521`）：就地升格为长期并移到长期块。
+    const rp = JSON.parse(await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '他喜欢喝拿铁' }] } } }));
+    assert.equal(rp.blocks.long_term.promoted, 1, JSON.stringify(rp.blocks));
+    const promotedRec = hub.store.all().find((e) => e.text === '他喜欢喝拿铁');
+    assert.equal(promotedRec.term, 'long');
+    assert.equal(promotedRec.visibility, 'shareable');
+    const rp2 = JSON.parse(await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '他喜欢喝拿铁' }] } } }));
+    assert.equal(rp2.blocks.long_term.promoted, 0);
+    assert.ok(rp2.rejected.some((x) => /已经是长期记忆/.test(x.reason)), JSON.stringify(rp2.rejected));
   });
 
   await checkAsync('onebot_topic：单条读得到，列表按最近活动倒序', async () => {

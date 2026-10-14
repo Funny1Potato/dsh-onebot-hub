@@ -2698,8 +2698,9 @@ async function scenarioProfiles() {
     },
     writeCtx('group:55555'),
   );
-  // 「短期/长期」不是模型声明的：**代码按这条记忆是在哪个会话学到的**来分块。
-  // 所以"长期"必须来自别的会话——从群 55555 看它是跨群条目，才是长期记忆。
+  // 「短期/长期」仍是**代码分块**（`m08521` 起多了一条路）：短期＝本会话学到的、还没提升过的；
+  // 长期＝模型提升过的（`term:'long'`）或本来就在别处学到的。
+  // 这里写进群 77777 的长期条目，从群 55555 看就是跨会话带来的那条。
   applyMemoryOps({ long_term: { add: [{ text: '他在别的群提过喜欢猫' }] } }, writeCtx('group:77777'));
   const snap = mind.snapshot('group:55555', { actorId: '10001' });
 
@@ -2712,6 +2713,25 @@ async function scenarioProfiles() {
     assert.equal(snap.blocks.shortTerm.length, 1);
     assert.equal(snap.blocks.longTerm.length, 1);
     assert.ok(snap.sections.some((s) => s.name === 'person' && s.chars > 0), '装配段里要有 person 一段');
+  });
+
+  check('M16 提升：同文本写进 long_term 会就地升格并移到长期块', () => {
+    const before = mind.snapshot('group:55555', { actorId: '10001' });
+    const target = before.blocks.shortTerm.find((e) => e.text === '他说过在写机器人');
+    assert.ok(target, '先得有这条短期条目');
+    const r = applyMemoryOps({ long_term: { add: [{ text: '他说过在写机器人' }] } }, writeCtx('group:55555'));
+    assert.equal(r.blocks.long_term.promoted, 1);
+    assert.equal(r.rejected.length, 0, JSON.stringify(r.rejected));
+    const after = mind.snapshot('group:55555', { actorId: '10001' });
+    assert.ok(!after.blocks.shortTerm.some((e) => e.id === target.id), '提升后不该还在短期块');
+    assert.ok(after.blocks.longTerm.some((e) => e.id === target.id), '提升后该在长期块');
+    const rec = store.byId(target.id);
+    assert.equal(rec.term, 'long');
+    assert.equal(rec.visibility, 'shareable', '公开群里提升后就能跨会话说');
+    // 第二次再写同一句话：已经是长期了，如实拒绝并说明，不谎报"又提升了一次"。
+    const again = applyMemoryOps({ long_term: { add: [{ text: '他说过在写机器人' }] } }, writeCtx('group:55555'));
+    assert.equal(again.blocks.long_term.promoted, 0);
+    assert.ok(again.rejected.some((x) => /已经是长期记忆/.test(x.reason)), JSON.stringify(again.rejected));
   });
 
   check('M16 人物卡里的私事跨群仍被隔离规则挡下（可见性由代码判定）', () => {

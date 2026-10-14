@@ -54,7 +54,7 @@ import {
 } from '../lib/turns.js';
 import { MemoryStore, memoryDedupeKey, normalizeMemoryText } from '../lib/memory/store.js';
 import { resolveIsolation } from '../lib/memory/isolation.js';
-import { applyMemoryOps } from '../lib/memory/writer.js';
+import { applyMemoryOps, memoryBlocks } from '../lib/memory/writer.js';
 import { tokenize, RecallStore } from '../lib/memory/recall.js';
 import { decayStrength, isWeak, weakMessageIds } from '../lib/memory/decay.js';
 import { collectCues, cueKey, Reminders } from '../lib/memory/cues.js';
@@ -782,7 +782,25 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   );
   assert.equal(w.all().length, 1, '同一句话不该在库里存两份');
   assert.equal(r5.blocks.short_term.add + r5.blocks.long_term.add, 1);
-  assert.equal(r5.blocks.short_term.deduped + r5.blocks.long_term.deduped, 1);
+  // 紧接着把同一句话写进 long_term ＝ **提升**（`m08521` 用户定案）：就地翻成长期，
+  // 而不是像以前那样"已有同一条"顶回去（那样模型以为提升了，库里其实什么都没变）。
+  assert.equal(r5.blocks.long_term.promoted, 1, '同文本重写进长期要就地提升');
+  const promoted = w.all()[0];
+  assert.equal(promoted.term, 'long');
+  assert.equal(promoted.visibility, 'shareable', '公开群里提升后就能跨会话说');
+  const afterPromote = memoryBlocks(w.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: resolveIsolation({ level: 'scoped' }) });
+  assert.equal(afterPromote.shortTerm.length, 0, '提升后要离开短期块');
+  assert.equal(afterPromote.longTerm.length, 1, '提升后就该在长期块里');
+
+  // 私聊里学到的升不动（硬边界）：写 long_term 只换回一条说明，条目还是短期、还是 private。
+  const wp = new MemoryStore({});
+  const pbase = { ...wbase, store: wp, sessionKey: 'private:10001', worldKey: 'private:10001' };
+  assert.equal(applyMemoryOps({ short_term: { add: [{ text: '他说他明天要去医院' }] } }, pbase).blocks.short_term.add, 1);
+  const refused = applyMemoryOps({ long_term: { add: [{ text: '他说他明天要去医院' }] } }, pbase);
+  assert.equal(refused.blocks.long_term.promoted, 0);
+  assert.ok(refused.rejected.some((x) => /没能提升为长期/.test(x.reason)), JSON.stringify(refused.rejected));
+  assert.equal(wp.all()[0].term, 'short');
+  assert.equal(wp.all()[0].visibility, 'private');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-dedupe-'));
   try {
