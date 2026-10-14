@@ -36,7 +36,7 @@ import {
   toWireResponse,
   ttlOf,
 } from '../lib/capability.js';
-import { renderPerson, renderWindow } from '../lib/memory/assembler.js';
+import { renderPerson, renderMemoryBlocks, renderWindow } from '../lib/memory/assembler.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
 import { full, mdhm } from '../lib/stamp.js';
 import { Cards } from '../lib/memory/cards.js';
@@ -801,6 +801,27 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   assert.ok(refused.rejected.some((x) => /没能提升为长期/.test(x.reason)), JSON.stringify(refused.rejected));
   assert.equal(wp.all()[0].term, 'short');
   assert.equal(wp.all()[0].visibility, 'private');
+
+  // 渲染形状（`m08663` 用户指出）：短期与长期**必须各成一块**——长期标题前空一行，
+  // 否则它紧贴在短期最后一条下面，看着像同一段里的下一行；每块的序号也都从 0 起。
+  assert.equal(
+    renderMemoryBlocks({ shortTerm: [{ text: '本会话的一条' }], longTerm: [{ text: '别处学来的一条' }] }),
+    [
+      '【短期记忆（本会话；序号可用于 modify/delete）】',
+      '0. 本会话的一条',
+      '',
+      '【长期记忆（跨会话；序号可用于 modify/delete）】',
+      '0. 别处学来的一条',
+    ].join('\n'),
+    '两块之间要空一行，且各自的序号从 0 起',
+  );
+  assert.equal(
+    renderMemoryBlocks({ shortTerm: [{ text: '只有短期' }] }),
+    '【短期记忆（本会话；序号可用于 modify/delete）】\n0. 只有短期',
+    '只有一块时不留多余空行',
+  );
+  assert.ok(renderMemoryBlocks({ longTerm: [{ text: '只有长期' }] }).startsWith('【长期记忆'), '只有长期时开头就是长期标题');
+  assert.equal(renderMemoryBlocks({}), '', '没有记忆时渲染为空串，不留孤零零的标题');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-dedupe-'));
   try {
