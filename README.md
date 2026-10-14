@@ -109,7 +109,11 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 6. **测试下游用探针**：排查/试探下游插件时注入的消息走**另一个账号**，真人在群里说的话不会串进去。
 7. **超管给的权限只管这一次**：管理命令里的 `perm`（前缀见上面那节）改的是**本次激活**那个 agent 会话的权限；下一次唤醒是全新会话、自动回到部署默认——一次授权一次用。权限不够时它会在群里说清缺什么、要它干什么，请超管敲一条命令授权，而不是绕路或假装能做。
 
-## agent 可用的工具（28 个）
+## agent 可用的工具
+
+工具面 = **28 个 `onebot_*`**（本插件提供）+ **agent 预设自带的 DSH 原生工具**（不由本插件提供，由预设决定给多少）。
+
+### 本插件提供的（28 个）
 
 | 用途 | 工具 |
 | --- | --- |
@@ -120,6 +124,26 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | 控制下游 | `onebot_invoke` `onebot_relay_probe` `onebot_capabilities` `onebot_code_scopes` |
 | 协议与能力 | `onebot_call` `onebot_caps` `onebot_admin` `onebot_media` `onebot_imagegen` `onebot_memes` |
 | 其它 | `onebot_tools`（按需取回 DSH 的其它工具） |
+
+### 预设自带的原生工具
+
+精简预设 `onebot-hub-slim`（本插件注册，默认用）补齐了这 11 个常用原生工具——照抄官方 standard 预设里对应的 6 行插件注册，注册后体检，坏了就退回 profile 默认预设：
+
+| 用途 | 工具 | 备注 |
+| --- | --- | --- |
+| 读文件 | `read` | 另有 `write` / `edit`，要才用 `onebot_tools` 取回 |
+| 搜代码 | `grep` `glob` | |
+| 跑命令 | `pwsh` | 非 Windows 上自动停用（同官方预设） |
+| 后台任务 | `job_list` `job_output` `job_kill` | 长命令放后台跑，别把回合卡住 |
+| 上网 | `web_search` `web_fetch` | |
+| 计划 | `todo_write` | 多步任务把计划显式列出来 |
+
+`read_image`（自己打开图片看）**默认不给**：`vision.mode` 是 `describe` 时图片只有描述这一条路，开了它 agent 会绕过描述自己去翻 blob。要用就 `onebot_tools` 显式取回。
+
+两条容易误解的：
+
+- **工具面是"预设作用域"，`onebot_tools` 的 enable/disable 管不到预设自带的那些**——宿主的工具限制只作用于全局层，预设挂进来的一律豁免。想换整档工具面就换预设（`onebot_tools { preset: 'default' }` 换回 DSH 默认预设，会带全 `subagent` / `workflow` / `goal` / `task_board_*` / `plugin_manager` 等大件；换档在本次激活结束时生效）。
+- **`onebot_tools` 的增删只对本次激活有效**：会话一退役，限制跟着没，下次唤醒回到预设默认。
 
 ## 排查
 
