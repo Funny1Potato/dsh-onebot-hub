@@ -316,6 +316,8 @@ check('Config schema 能填默认值', () => {
   assert.equal(plainConfig(filled.agent.mode), 'assist');
   assert.equal(plainConfig(filled.agent.batchSize), 6);
   assert.equal(plainConfig(filled.memory.isolation.level), 'scoped');
+  // 【本群认识的人】默认列 20 人（`m09409` 用户要求"不写死"→ 走配置项，0 才是关）
+  assert.equal(plainConfig(filled.memory.peopleRoster), 20);
   assert.equal(plainConfig(filled.media.enabled), true);
   assert.equal(plainConfig(filled.media.transcribe), true);
   assert.equal(plainConfig(filled.learn.threshold), 3);

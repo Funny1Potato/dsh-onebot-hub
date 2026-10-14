@@ -36,7 +36,7 @@ import {
   toWireResponse,
   ttlOf,
 } from '../lib/capability.js';
-import { renderPerson, renderMemoryBlocks, renderWindow } from '../lib/memory/assembler.js';
+import { renderPerson, renderMemoryBlocks, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
 import { full, mdhm } from '../lib/stamp.js';
 import { Cards } from '../lib/memory/cards.js';
@@ -1030,6 +1030,75 @@ t('主动回忆只挑"还没兑现的承诺"，并且要过一遍隔离', () => 
 
   const inPrivate = collectCues({ persons, sessionKey: 'private:10002', worldKey: 'private:10002', isolation, now });
   assert.deepEqual(inPrivate.map((c) => c.what), ['帮他带一份午饭'], '私聊视角只看得到私聊里答应的事');
+});
+
+t('本群认识的人：一行一人、只列本群、排除当前对话者与 bot 自己、不展开 facts（m09409）', () => {
+  const at = 1_700_000_000_000;
+  const profiles = new Profiles({ storage: null, now: () => at });
+  // 本群的三个人：当前对话者、一个有内容的老友、一个空壳（只被拉过成员表）
+  profiles.noteGroupCard('10001', 'group:55555', { card: '群主小明', role: 'owner' }, at);
+  profiles.noteGroupCard('10002', 'group:55555', { card: '老张', lastSentAt: at - 1000 }, at);
+  profiles.noteGroupCard('10003', 'group:55555', {}, at);
+  profiles.upsertPerson('10002', { facts: [{ text: '做后端，爱问细节' }, { text: '喝奶茶只喝三分糖' }], impression: '话不多但靠谱' }, at);
+  profiles.upsertPerson('10002', { commitments: [{ what: '帮他看一个 bug', status: 'open' }] }, at);
+  // 别的群认识的人：不该出现在这个群的名单里
+  profiles.noteGroupCard('20002', 'group:77777', { card: '张工' }, at);
+  // bot 自己也有档案（拉成员表建档），同样不该列出来
+  profiles.noteGroupCard('30001', 'group:55555', {}, at);
+
+  const people = profiles.persons();
+  const text = renderPeopleRoster(people, {
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    actorId: '10001',
+    selfId: '30001',
+    limit: 20,
+  });
+  assert.match(text, /【本群认识的人】/);
+  assert.match(text, /onebot_person/, '得告诉模型细节去哪儿查');
+  assert.match(text, /- 老张（10002）｜印象：话不多但靠谱｜知道 2 件事｜有 1 件没兑现的承诺/, '名片与名字相同时不重复写（真机上一半人名片＝昵称）');
+  assert.match(text, /- 10003（10003）/, '没内容的人也列，只是信息少——这是"我认识他"的事实');
+  assert.ok(!text.includes('10001'), '当前对话对象有自己的完整卡片，不重复列');
+  assert.ok(!text.includes('30001'), 'bot 自己不是"认识的人"');
+  assert.ok(!text.includes('张工') && !text.includes('20002'), '别的群的人不进这个群的名单');
+  assert.ok(!text.includes('三分糖'), '别人的 facts 正文不展开（只给条数）');
+  assert.ok(!/\d+ (分钟|小时|天)前/.test(text), '不渲染相对时间：快照按逐字节判重，时间一变整份重注');
+
+  // 条数上限来自配置，不写死：超出的按"还有 N 人"交代，而不是悄悄少列
+  const capped = renderPeopleRoster(people, { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', selfId: '30001', limit: 1 });
+  assert.equal((capped.match(/^- /gm) ?? []).length, 1);
+  assert.match(capped, /还有 1 人没列出来/);
+  assert.equal(renderPeopleRoster(people, { sessionKey: 'group:55555', worldKey: 'group:55555', limit: 0 }), '', '0 = 整段不注入');
+  assert.equal(renderPeopleRoster([], { limit: 5 }), '');
+  // 私聊视角：档案里没有 `groups['private:…']` 这条记录，于是整段为空——群里的人不会顺着私聊跑出来。
+  assert.equal(renderPeopleRoster(people, { sessionKey: 'private:10001', worldKey: 'private:10001', actorId: '10001', limit: 20 }), '');
+  // 段本身由装配层决定放不放（私聊不注入这一段），渲染器只管"这个 scope 里我认识谁"。
+  const priv = assembleContext({
+    guidance: '',
+    sessionKey: 'private:10001',
+    worldKey: 'private:10001',
+    actorId: '10001',
+    isolation: resolveIsolation({ level: 'balanced' }),
+    memoryEntries: [],
+    people,
+    peopleLimit: 20,
+  });
+  assert.ok(!priv.text.includes('【本群认识的人】'), '私聊不注入【本群认识的人】');
+  const grp = assembleContext({
+    guidance: '',
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    actorId: '10001',
+    isolation: resolveIsolation({ level: 'balanced' }),
+    memoryEntries: [],
+    people,
+    peopleLimit: 20,
+  });
+  // 注意：`assembleContext` 返回的 `sections` 刻意剥掉了 `text`（只有名字/序号/字数），正文看 `text`。
+  const peopleSection = grp.sections.find((s) => s.name === 'people');
+  assert.ok(peopleSection && peopleSection.chars > 0, '群会话里这一段在（有内容）');
+  assert.ok(grp.text.includes('老张'), '群会话里这一段在（正文里有本群的人）');
+  assert.ok(grp.text.indexOf('【人物卡】') < grp.text.indexOf('【本群认识的人】'), '先人物卡、再名单（order 33 → 34）');
 });
 
 t('主动回忆的渲染是陈述句，不是命令', () => {

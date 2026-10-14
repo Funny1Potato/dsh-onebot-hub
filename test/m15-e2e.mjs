@@ -338,6 +338,26 @@ async function scenarioReply() {
     assert.ok(row.hits >= 1, 'hits 记宿主这一轮调了几次（每步都调）');
   });
 
+  /**
+   * 【本群认识的人】（`m09409` 用户批准）：上下文里原本**只有当前对话者那一张人物卡**，
+   * 模型看不见"群里还有谁"——认不出谁在说话，也接不上曾用名。段内一行一人，条数走配置项
+   * `memory.peopleRoster`（用户明确要求"不写死"）。三条防线在本条里各验一次：只列本群、
+   * 不展开别人的 facts 正文、不渲染相对时间（会按逐字节判重把整份快照重注）。
+   */
+  const rosterAt = Date.now();
+  hub.profiles.noteGroupCard('10002', 'group:55555', { card: '老张', lastSentAt: rosterAt - 1000 }, rosterAt);
+  hub.profiles.upsertPerson('10002', { impression: '话不多但靠谱', facts: [{ text: '做后端，爱问细节' }] }, rosterAt);
+  hub.profiles.noteGroupCard('20002', 'group:77777', { card: '张工' }, rosterAt);
+  mind.invalidateLiveContext('group:55555');
+  const withRoster = mind.liveContext('group:55555');
+  check('本群认识的人进上下文：只列本群、不展开别人 facts、不写相对时间（m09409）', () => {
+    assert.match(withRoster, /【本群认识的人】/);
+    assert.match(withRoster, /- 老张（10002）｜印象：话不多但靠谱｜知道 1 件事/);
+    assert.ok(!withRoster.includes('张工'), '别的群认识的人不进这个群的名单');
+    assert.ok(!withRoster.includes('做后端'), '别人的 facts 正文不展开（只给条数，细节走 onebot_person）');
+    assert.ok(!/张工?\D{0,20}\d+ (分钟|小时|天)前/.test(withRoster), '不渲染相对时间：它一变整份快照就被判成新的一份');
+  });
+
   const wokenBefore = mind.stats.woken;
   mind.noteDownstreamSend({ sessionKey: 'group:55555', action: 'send_msg', text: '🎉 抓到新猪【猪利猪】！', label: '127.0.0.1:8080' });
   check('下游消息入批但不自己叫醒模型（"下游已应答 → 保持沉默"不变）', () => {

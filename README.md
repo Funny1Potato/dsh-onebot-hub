@@ -65,6 +65,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | `imageGen.enabled` | 让 agent 自己生图（默认关，填 `model`/`baseUrl`/`apiKey` 才开） |
 | `code.scopes` | 下游 bot 的源码目录。**地址不写进 prompt**，agent 需要时调 `onebot_code_scopes` 取位置，读文件用它自带的 `read`/`grep` |
 | `memory.isolation.level` | 记忆隔离：`strict`（跨会话一律不可见）/ `scoped` / `balanced`（默认） |
+| `memory.peopleRoster` | 上下文里【本群认识的人】最多列几个（默认 20，按最近露面排序；`0`＝整段不注入，细节仍可用 `onebot_person` 现查） |
 | `agent.speakAssistantText` | 默认 `false`：**普通回复文本只是内部草稿，只有 `onebot_reply` 会真的发进聊天** |
 | `retention.days` | 原始报文与媒体保留天数（默认 7） |
 | `agent.replyGapMs` / `agent.replyMaxText` / `agent.replyMaxImages` | 一次回复发多条时的间隔（默认 400ms）、文字条数上限（默认 3，图另算）、图片上限（默认 9） |
