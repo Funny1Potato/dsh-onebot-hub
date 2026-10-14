@@ -300,6 +300,44 @@ async function scenarioReply() {
     assert.equal(live2.includes('agent:memory'), false, `枢纽自己的账不该进会话上下文：\n${live2}`);
   });
 
+  /**
+   * 方案 A（`m09285` 用户定案）：live 上下文**一轮之内冻结**，靠 `invalidateLiveContext`
+   * 在投递前解冻。为什么必须冻结：宿主 `RuntimeContextProjection.project` 的判据只有
+   * `if (this.retained?.text === snapshot) return;`，文本变一个字节就把**整份**上下文
+   * append 成一条 user message。真机日志实测 seq 9 / seq 19 两份 3649/3619 字符的快照，
+   * 唯一差异是模型自己删掉一条短期记忆——为了这一行重注 3.6KB。
+   */
+  const frozenWrite = () => applyMemoryOps(
+    { short_term: { add: [{ text: '回合中途记下的一句' }] } },
+    {
+      store,
+      profiles: hub.profiles,
+      sessionKey: 'group:55555',
+      worldKey: 'group:55555',
+      actorId: '10001',
+      isolation,
+      now: Date.now(),
+      source: 'test',
+    },
+  );
+  check('回合中改记忆不会让 live 上下文变（冻结，m09285 方案 A）', () => {
+    const t0 = mind.liveContext('group:55555');
+    const r = frozenWrite();
+    assert.equal(r.applied.short_term.add, 1, '记忆要真的写进去了，这条测试才算数');
+    const t1 = mind.liveContext('group:55555');
+    assert.equal(t1, t0, '同一轮内上下文必须逐字不变，否则宿主把整份重注一遍');
+    assert.ok(!t1.includes('回合中途记下的一句'), '冻结的那份不含刚写的记忆（模型本回合看不到，回执里有）');
+  });
+  check('投递前解冻后拿到新记忆，且真的重算过一次（m09285）', () => {
+    mind.invalidateLiveContext('group:55555');
+    const t2 = mind.liveContext('group:55555');
+    assert.match(t2, /回合中途记下的一句/, '新一轮应当看到上一轮写下的记忆');
+    const row = mind.statsSnapshot.liveContext.find((v) => v.sessionKey === 'group:55555');
+    assert.ok(row, '状态里要有冻结快照的诊断行');
+    assert.equal(row.composed, 1, '解冻后应恰好重算一次');
+    assert.ok(row.hits >= 1, 'hits 记宿主这一轮调了几次（每步都调）');
+  });
+
   const wokenBefore = mind.stats.woken;
   mind.noteDownstreamSend({ sessionKey: 'group:55555', action: 'send_msg', text: '🎉 抓到新猪【猪利猪】！', label: '127.0.0.1:8080' });
   check('下游消息入批但不自己叫醒模型（"下游已应答 → 保持沉默"不变）', () => {
