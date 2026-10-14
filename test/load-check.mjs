@@ -384,6 +384,31 @@ check('设置页文字：每一个配置项在 client.js 里都有中文名与�
   }
 });
 
+check('配置文档：docs/config.md 里每个 schema 叶子都有一行，且没有多余的键', () => {
+  // 文档也会漂移：加了配置项忘了写进 docs/config.md，读者就查不到它管什么。这里拿真 schema 的
+  // 叶子清单去对账（键 = 表格第一列的反引号内容），少一行、多一行都红。
+  const doc = fs.readFileSync(path.join(here, '..', 'docs', 'config.md'), 'utf8');
+  const listed = new Set();
+  for (const line of doc.split('\n')) {
+    const m = /^\|\s*`([A-Za-z][\w.]*)`\s*\|/.exec(line);
+    if (m) listed.add(m[1]);
+  }
+  const leaves = [];
+  const walk = (node, trail) => {
+    if (!node) return;
+    if (node.dict && typeof node.dict === 'object' && Object.keys(node.dict).length > 0) {
+      for (const [key, child] of Object.entries(node.dict)) walk(child, [...trail, key]);
+      return;
+    }
+    leaves.push(trail.join('.'));
+  };
+  walk(Config, []);
+  const missing = leaves.filter((key) => !listed.has(key));
+  const extra = [...listed].filter((key) => !leaves.includes(key));
+  assert.deepEqual(missing, [], `这些配置项没写进 docs/config.md：${missing.join(', ')}`);
+  assert.deepEqual(extra, [], `docs/config.md 里有 schema 中不存在的键（改配置时忘了删）：${extra.join(', ')}`);
+});
+
 check('多下游目标：normalizeTargets 保留启用位、id 去重、容忍缺字段与坏 JSON', () => {
   // §19 多下游的配置面：一条目标 = 一个 id（缺省 selfId）+ 自己的 url/token/重连间隔/enabled。
   const parsed = normalizeTargets(JSON.stringify([

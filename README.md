@@ -51,7 +51,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 
 ## 常用配置
 
-设置页里每一项都有中文名与说明，下面是真正需要你手动改的那些：
+**完整配置项（137 项，每一项的作用与默认值）见 [docs/config.md](docs/config.md)**——设置页里每个字段的中文名与说明也在那里，二者由测试对账、不会各说各话。下面是真正需要你手动改的那些：
 
 | 键 | 什么时候改 |
 | --- | --- |
@@ -69,6 +69,33 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | `agent.speakAssistantText` | 默认 `false`：**普通回复文本只是内部草稿，只有 `onebot_reply` 会真的发进聊天** |
 | `retention.days` | 原始报文与媒体保留天数（默认 7） |
 | `agent.replyGapMs` / `agent.replyMaxText` / `agent.replyMaxImages` | 一次回复发多条时的间隔（默认 400ms）、文字条数上限（默认 3，图另算）、图片上限（默认 9） |
+
+## 聊天里的命令（12 条）
+
+只有 `chatCommands.superUsers` 里的账号能用（**留空 = 整条命令链沉默**）。别人敲同样的字，枢纽一声不吭——回一句"你没权限"等于告诉全群这里有个能管事的 bot。前缀默认 `/`，可配。
+
+| 命令 | 别名 | 作用 |
+| --- | --- | --- |
+| `/help` | `/帮助` `/?` | 列出这 12 条 |
+| `/status` | `/状态` | 链路、模式、时间线、运行时长、人设、表情包一屏概览 |
+| `/presets` | `/preset` `/预设` | 列出可用人设预设（`→` 表示本会话在用） |
+| `/set_preset <预设名>` | `/set_presets` `/设置预设` | 把本会话切到某个预设 |
+| `/set_role <名字> <设定>` | `/设置角色` | 临时给本会话换个角色名和设定 |
+| `/preset_role <设定>` | `/设置设定` | 只改设定，不改角色名 |
+| `/memes` ｜ `/memes del <id>` | `/表情包` `/meme` | 看最近 10 个；`del` 删掉某个 |
+| `/reload_meme` | `/重载表情包` | 从磁盘重读一遍表情包索引 |
+| `/perm [预设名]` | `/permission` `/权限` | 看 / 换**本会话 agent** 的权限预设（只管本次激活） |
+| `/model [provider/model｜编号｜default]` | `/模型` `/聊天模型` | 看 / 换本会话的聊天模型 |
+| `/vmodel [provider/model｜编号｜default]` | `/视觉模型` `/识图模型` | 看 / 换本会话的识图模型 |
+| `/reset` | `/重置` | 本会话的人设绑定与模型选择回初始（**不动长期记忆**） |
+
+三条要知道的语义：
+
+1. **命令不吞消息**。命中之后消息照常转发给下游、照常给模型看，只跳过"喂模型"这一步——枢纽已经用同一个账号答过这句话了。
+2. **前缀撞车 = 两个都触发**，不是谁先谁赢。下游也有 `/status` 就各回各的；想让枢纽别管某一条，加绕开前缀 `!!`（如 `!!/help`）。
+3. **只在开头认前缀**：`你好 /status` 是聊天，不是命令。回话超 `chatCommands.maxReplyChars`（默认 800 字）会截断。
+
+`/perm` 改的是**本次唤醒**那个 agent 会话的权限，下一次唤醒自动回部署默认——一次授权一次用。
 
 ## 使用前要知道的行为
 
@@ -109,7 +136,7 @@ node test/m15-e2e.mjs                       # 编排闭环（真 Hub + 假两端
 node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具注册（flag 必须放在脚本前面）
 ```
 
-设计与验证记录（协议取证、每个测试断言覆盖什么、历次真机事故复盘）见 [docs/design-notes.md](docs/design-notes.md)；CI 与发布流程、示例值约定也记在那里。
+设计与验证记录（协议取证、每个测试断言覆盖什么、历次真机事故复盘）见 [docs/design-notes.md](docs/design-notes.md)；全部配置项见 [docs/config.md](docs/config.md)；CI 与发布流程、示例值约定记在 design-notes 里。
 
 ## License
 
