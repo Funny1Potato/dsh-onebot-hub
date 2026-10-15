@@ -2235,13 +2235,24 @@ async function runAsyncChecks() {
       ];
       /** 一轮唤醒 = 一条下游发言 + 一次 flush（照遮罩语义用例的前置）。 */
       const round = async (n) => {
+        // 先照真机那样落进时间线（hub.record），再 note 下游发言并带上 timelineId——
+        // 开局快照读的是时间线（snapshot().events），没有这一步就造不出"这段之前聊到哪"。
+        const entry = pgHub.timeline.record({
+          direction: 'downstream-in',
+          linkId: 'test-link',
+          action: 'send_msg',
+          decision: 'recorded',
+          text: `m${n}`,
+          refs: { sessionKey: 'private:10001' },
+        });
         pgHub.mind.noteDownstreamSend({
           sessionKey: 'private:10001',
           action: 'send_msg',
           ts: Date.now(),
           text: `m${n}`,
           label: '下游A',
-          entry: { id: `ap-${n}`, sessionKey: 'private:10001', ts: Date.now(), text: `m${n}`, actor: { nickname: '下游A' }, live: null, refs: {} },
+          timelineId: entry.id,
+          entry: { ...entry, actor: { nickname: '下游A' } },
         });
         const r = await pgHub.mind.flush('private:10001', { reason: `test-preset-${n}` });
         assert.equal(r.woke, true, `第 ${n} 轮要真的唤醒：${r.reason}`);
@@ -2286,6 +2297,14 @@ async function runAsyncChecks() {
       const reawakeResult = await pgHub.preset.lastReawake;
       assert.equal(reawakeResult?.woke, true, `裸激活要真的跑：${JSON.stringify(reawakeResult)}`);
       assert.equal(pgMake.recorded.created.length, baseCreated + 2, '重开要建新会话');
+      // m12385 真机事故：换装出来的是**新会话**（转录是空的），所以裸激活必须自己递一份开局快照。
+      // 只递"预设刚切换"这一句的话，模型看不到这段之前聊到哪——真机上它判"本轮无新对话内容"
+      // 直接沉默，旧会话里已经答应过的事（"下次你喊我一声我就发清单"）也接不上。
+      const reawakeFollowup = pgMake.recorded.followups.at(-1);
+      const reawakeText = String(reawakeFollowup?.content?.[0]?.text ?? reawakeFollowup?.content ?? '');
+      assert.match(reawakeText, /【开局快照】/, `裸激活要带开局快照：${reawakeText.slice(0, 200)}`);
+      assert.match(reawakeText, /预设刚切换/, '裸激活要保留换装说明句');
+      assert.match(reawakeText, /下游A|m1/, '快照里要有换装之前这段会话说过的话');
       const meta2 = pgMake.recorded.created.at(-1).meta;
       assert.equal(meta2.agentPreset, 'standard', `重开要进 DSH 默认预设：${JSON.stringify(meta2)}`);
       const notice = pgMake.recorded.contexts.filter((s) => s?.name === 'onebot-hub:preset');
@@ -2323,6 +2342,16 @@ async function runAsyncChecks() {
       assert.equal(q3.preset.queued, null, '不认识的不许排队');
       assert.match(String(q3.preset.note), /不认识/, '要如实说');
       assert.ok('preset' in JSON.parse(await def.execute({})), '普通查询响应也要带 preset 段');
+
+      // ⑥ 同一段会话里的裸激活**不重复**递快照（m12385）：已是目标形态时点名，applyPresetSwitch
+      //    消费点名就返回，唤醒的是同一段会话——那里的快照早在它自己那一轮给过了。
+      const sameBefore = pgMake.recorded.followups.length;
+      const q4 = JSON.parse(await def.execute({ preset: 'slim' }));
+      assert.equal(q4.preset.queued, 'slim', '点名 slim（当前就是 slim）');
+      await pgHub.preset.lastReawake;
+      assert.ok(pgMake.recorded.followups.length > sameBefore, '同会话裸激活也要真的跑一次');
+      const sameText = String(pgMake.recorded.followups.at(-1)?.content?.[0]?.text ?? '');
+      assert.ok(!sameText.includes('【开局快照】'), `同一段会话的裸激活不许重复递快照：${sameText.slice(0, 200)}`);
     } finally {
       pgHub.config.agentPrivates = savedPrivates;
       for (const map of [pgHub.preset.choice, pgHub.preset.applied, pgHub.preset.sessionPid, pgHub.preset.notice]) map.clear();
