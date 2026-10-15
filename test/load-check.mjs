@@ -83,8 +83,11 @@ const checkAsync = async (label, fn) => {
 /**
  * 假 agent 作用域上下文：`installModelSelection` 的真实要求只有真 DSH 能证明。
  * 传 `recorded` 时额外暴露 `on`/`effect`——用来验"会话作用域那条 session/event 订阅"。
+ * `opts.failFirstRegister`（m11162）：让**第一次** register 故意抛错——setup 里那一次就是会话版
+ * `onebot_reply`，用来复现"会话版挂不上"的场景（此时 `skipNames` 为空、直发版顶上）。
  */
-function fakeAgentCtx(recorded) {
+function fakeAgentCtx(recorded, opts = {}) {
+  let firstRegisterFailed = false;
   const agentCtx = {
     systemPrompt: {
       context: (spec) => {
@@ -98,16 +101,23 @@ function fakeAgentCtx(recorded) {
       },
     },
     tools: {
-      // m10863：28 个 onebot_* 工具现在注册在会话装配（setup）的 **agent 作用域**里——
-      // 定义收进 recorded.agentTools。**同名后注册的覆盖先注册的**：setup 里先挂会话版
-      // `onebot_reply`（绑 reply 句柄、无 group_id/user_id 参数），随后才是 registerHubTools
-      // 的直发版；用例（与真机诊断）要看的是直发版，所以后者胜出。
+      // m10863：28 个 onebot_* 工具注册在会话装配（setup）的 **agent 作用域**里，定义收进
+      // recorded.agentTools。
+      // m11162：真宿主在**同一个作用域**里遇到重名会**抛错**
+      // （`@deepseek-ai/dsh-tools` `lib/types/index.js:179-180`
+      // `tool "${name}" is already registered in this scope`），而且抛错会**中断同一批剩下的注册**——
+      // 假 ctx 必须一样凶，否则"一个重名把后面 22 个工具全带走"这类真机事故测不出来。
       register: (def) => {
+        if (opts.failFirstRegister && !firstRegisterFailed) {
+          firstRegisterFailed = true;
+          throw new Error('probe：故意让第一次注册（会话版回复工具）失败');
+        }
         if (recorded && def?.name) {
           const list = (recorded.agentTools ??= []);
-          const at = list.findIndex((t) => t.name === def.name);
-          if (at >= 0) list[at] = def;
-          else list.push(def);
+          if (list.some((t) => t.name === def.name)) {
+            throw new Error(`tool "${def.name}" is already registered in this scope`);
+          }
+          list.push(def);
         }
         return () => {};
       },
@@ -332,11 +342,11 @@ await sleep(60); // 等 agent 通道那次动态 import 落地
  * （宿主 `agents.create/resume` 走的就是同一条路），把定义收出来。自带 recorder，并复原
  * `mind.stats.lastSetup`，不污染真实会话的统计。
  */
-function probeHub(who) {
+function probeHub(who, opts = {}) {
   const rec = { agentTools: [], agentSections: [], contexts: [], effects: [], agentEvents: [] };
   const before = who?.mind?.stats?.lastSetup;
   try {
-    who.mind.setup?.(fakeAgentCtx(rec), { reply: () => null, sessionKey: 'group:10000', agentKey: 'agent:group:10000' });
+    who.mind.setup?.(fakeAgentCtx(rec, opts), { reply: () => null, sessionKey: 'group:10000', agentKey: 'agent:group:10000' });
   } catch (err) {
     console.error(`[probe] 枢纽 setup 探针失败：${String(err?.message ?? err)}`);
   }
@@ -346,6 +356,12 @@ function probeHub(who) {
 const hubProbe = probeHub(hub);
 const hubTools = () => hubProbe.agentTools;
 const hubSections = () => hubProbe.agentSections;
+/**
+ * m11162：正常探针里直发版 `onebot_reply` 是**刻意让位**的那个（会话缓冲版占着这个名字；硬撞会让
+ * 宿主抛错并连坐后面 22 个注册），所以要验直发版本体，得走"会话版挂不上"的那一套。
+ */
+const hubDirectProbe = probeHub(hub, { failFirstRegister: true });
+const hubDirectReply = () => hubDirectProbe.agentTools.find((t) => t.name === 'onebot_reply');
 
 check('插件名与依赖声明', () => {
   assert.equal(name, 'dsh-onebot-hub');
@@ -762,6 +778,20 @@ check('枢纽工具只挂在会话装配的 agent 作用域，profile 全局层�
   assert.deepEqual(recorded.globalTools, [], 'apply 阶段不该往全局层注册工具：那会让每个 DSH 会话都看见 onebot_*');
   assert.equal(hubTools().length, 28, '会话装配（宿主 create/resume 走的就是同一条路）里应当收全 28 个');
   assert.deepEqual(hubSections().map((s) => s.name), ['plugin:dsh-onebot-hub'], '指导段同理：只跟着枢纽会话走，不再是全局段落');
+  // m11162 真机事故：同名工具硬撞会让宿主抛错并**连坐**后面 22 个注册（真机会话里只剩 6 个 onebot_*）。
+  // 现在 setup 主动让位：会话缓冲版占 `onebot_reply`，直发版不注册（它的本体在 hubDirectProbe 里验）。
+  assert.equal(
+    hubTools().find((t) => t.name === 'onebot_reply')?.parameters.group_id,
+    undefined,
+    '占住 onebot_reply 的应当是会话缓冲版（绑这一轮 reply 句柄），直发版让位',
+  );
+});
+
+check('会话版回复工具挂不上时，直发版 onebot_reply 顶位（m11162 让位规则不能把能力让没）', () => {
+  const direct = hubDirectReply();
+  assert.ok(direct, '直发版应当注册：会话版一坏，回复能力不能整个丢');
+  assert.ok(direct.parameters.group_id, '直发版要能发到指定目标（group_id / user_id）');
+  assert.equal(hubDirectProbe.agentTools.length, 28, '让位场景下同样该收全 28 个工具');
 });
 
 await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent 需要时调 onebot_code_scopes 取（m14477）', async () => {
@@ -1472,7 +1502,7 @@ async function runAsyncChecks() {
           return { status: 'ok', retcode: 0, data: null, echo: null };
         },
       };
-      const t = toolOf('onebot_reply');
+      const t = hubDirectReply();
       // m32420 起「一次调用发多条」：文字一条 + 图各一条 = 2 次 send_msg。
       await t.execute({ text: '看这个', images: ['hub-media:abc123'], group_id: '55555' });
       const segs = calls.at(-1)?.params?.message ?? [];
