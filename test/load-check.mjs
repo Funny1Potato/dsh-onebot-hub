@@ -2224,7 +2224,7 @@ async function runAsyncChecks() {
     }
   });
 
-  await checkAsync('内置精简预设：默认建会话进它 + 点名 default 本回合后立即重开 + 一次性消费（下次激活强制回精简）+ 跨休眠点名仍生效', async () => {
+  await checkAsync('内置精简预设：默认建会话进它 + 点名 default 本回合后立即重开 + 全量窗口覆盖那一次真实激活（用完强制回精简、回程段带开局快照）+ 跨休眠点名与窗口都仍生效', async () => {
     const savedPrivates = pgHub.config.agentPrivates;
     pgHub.config.agentPrivates = { ...savedPrivates, 10001: {} };
     pgHub.mind.activeSessionKey = 'private:10001';
@@ -2312,30 +2312,46 @@ async function runAsyncChecks() {
       assert.match(String(notice.at(-1).text), /默认预设/, '说明段要说"切到了默认预设"');
       assert.equal(pgHub.preset.applied.get('private:10001'), 'default', 'applied 账要记 default');
       assert.equal(pgHub.preset.sessionPid.get('private:10001'), 'standard', 'sessionPid 要跟着换');
-      assert.equal(pgHub.preset.choice.get('private:10001'), '__config__', '回程票已排（全量只持续一次激活，下次激活强制回精简）');
+      assert.equal(pgHub.preset.choice.get('private:10001'), pgHub.preset.windowTicket, '裸激活之后要挂**窗口**而不是回程票（切换自己那次裸激活不算"那一次"，m12814）');
       // "切到默认"的说明段里也提"这次激活结束后会自动切回"这句话，所以负断言用精简说明段独有的短语。
       assert.ok(!pgMake.recorded.contexts.some((s) => s?.name === 'onebot-hub:preset' && /大型工具已收起/.test(String(s.text))), '还没切回来，不该出现"精简"说明');
 
-      // ③ 一次性消费（m04972 定案②）：全量只持续一次激活，下一次激活**强制**回精简预设，
-      //    不归 agent 管——无需再点名，直接下一轮就该回精简。回精简不设说明段（m05515：
-      //    收起工具是回到常态，没什么可交代）。
+      // ③ 窗口覆盖那一次**真实**激活（m12814 用户定案，改 m04972 定案②）：老规则"下一次唤醒就回程"
+      //    会被切换自身那次裸激活吃掉，用户切完还没发过一条消息就被弹回精简（真机 m12699 复现两次）。
+      //    所以带新消息的这一轮仍在 default 会话里（resume，不建新会话），整轮结束后窗口才兑现。
       const noticeCount = pgMake.recorded.contexts.filter((s) => s?.name === 'onebot-hub:preset').length;
       await round(2);
+      assert.equal(pgMake.recorded.created.length, baseCreated + 2, '窗口内的那次真实激活是 resume，不建新会话');
+      assert.equal(pgMake.recorded.created.at(-1).meta.agentPreset, 'standard', '窗口内仍用 DSH 默认预设');
+      assert.equal(pgHub.preset.choice.get('private:10001'), '__config__', '那次真实激活结束后窗口兑现成回程票');
+      assert.equal(pgMake.recorded.contexts.filter((s) => s?.name === 'onebot-hub:preset').length, noticeCount, '窗口内不再出现说明段');
+
+      // ③' 再下一次激活才**强制**回精简（m04972 定案②的本意保留：不归 agent 管），回精简不设说明段
+      //     （m05515：收起工具是回到常态，没什么可交代）。
+      //     m12699 真机事故：换装发生在 `pool.wake` **内部**，而用户消息文本在那之前就拼好了——
+      //     所以这一轮必须自带开局快照，否则弹回来的新会话是空转录，模型看不到之前聊到哪、
+      //     接不上旧会话里答应过的话。修法是组文本前先问池子 `presetSwapPlan(...).freshSession`。
+      await round(3);
+      assert.equal(pgMake.recorded.created.length, baseCreated + 3, '回程要建新会话（交还 default、重开精简）');
       const meta3 = pgMake.recorded.created.at(-1).meta;
-      assert.equal(meta3.agentPreset, 'onebot-hub-slim', `下一次激活要强制回精简预设：${JSON.stringify(meta3)}`);
+      assert.equal(meta3.agentPreset, 'onebot-hub-slim', `窗口用掉后下一次激活要强制回精简：${JSON.stringify(meta3)}`);
       assert.equal(pgMake.recorded.contexts.filter((s) => s?.name === 'onebot-hub:preset').length, noticeCount, '回切精简不再出现说明段（m05515）');
       assert.equal(pgHub.preset.notice.size, 0, '回切后说明账要空（只开全量时才设）');
+      const backText = String(pgMake.recorded.followups.at(-1)?.content?.[0]?.text ?? '');
+      assert.match(backText, /【开局快照】/, `回程换出来的新会话要带开局快照：${backText.slice(0, 200)}`);
+      assert.match(backText, /下游A|m[123]/, '快照里要有换装之前这段会话说过的话');
 
       // ④ 跨休眠点名仍生效（m04972 揪出的 bug 的回归测试）：点名 → 模拟休眠 retire →
-      //    下一次唤醒照样按点名建会话（choice 不随休眠清掉）。
+      //    下一次唤醒照样按点名建 default 会话；**窗口也不随休眠清**（否则跨休眠就白切了）。
       const q2 = JSON.parse(await def.execute({ preset: 'default' }));
       assert.equal(q2.preset.queued, 'default', '再点名 default');
-      await pgHub.preset.lastReawake; // 裸激活先落定（create 进 default 并消费点名）
+      await pgHub.preset.lastReawake; // 裸激活先落定（换装 + 排窗口）
       await pgHub.mind.pool.retire('private:10001', 'test-preset-dormancy'); // 模拟休眠
       assert.equal(pgHub.preset.applied.size, 0, '休眠清活会话账');
-      await round(3);
-      const meta4 = pgMake.recorded.created.at(-1).meta;
-      assert.equal(meta4.agentPreset, 'onebot-hub-slim', '休眠后下一次激活回精简（点名已被裸激活消费）');
+      await round(4);
+      assert.equal(pgMake.recorded.created.at(-1).meta.agentPreset, 'standard', '休眠后的那次真实激活仍落在 default（窗口跨休眠不被清）');
+      await round(5);
+      assert.equal(pgMake.recorded.created.at(-1).meta.agentPreset, 'onebot-hub-slim', '窗口用掉后再下一次激活强制回精简');
 
       // ⑤ 不认识的档位：不排队、如实说；普通查询响应也带 preset 段（账目诚实）。
       const q3 = JSON.parse(await def.execute({ preset: 'bogus' }));
