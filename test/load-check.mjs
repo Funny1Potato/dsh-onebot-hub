@@ -91,9 +91,26 @@ function fakeAgentCtx(recorded) {
         recorded?.contexts?.push(spec);
         return () => {};
       },
+      // m10863：枢纽指导段从 profile 全局层搬进了会话装配（`agentCtx.systemPrompt.section`）。
+      section: (spec) => {
+        recorded?.agentSections?.push(spec);
+        return () => {};
+      },
     },
     tools: {
-      register: () => () => {},
+      // m10863：28 个 onebot_* 工具现在注册在会话装配（setup）的 **agent 作用域**里——
+      // 定义收进 recorded.agentTools。**同名后注册的覆盖先注册的**：setup 里先挂会话版
+      // `onebot_reply`（绑 reply 句柄、无 group_id/user_id 参数），随后才是 registerHubTools
+      // 的直发版；用例（与真机诊断）要看的是直发版，所以后者胜出。
+      register: (def) => {
+        if (recorded && def?.name) {
+          const list = (recorded.agentTools ??= []);
+          const at = list.findIndex((t) => t.name === def.name);
+          if (at >= 0) list[at] = def;
+          else list.push(def);
+        }
+        return () => {};
+      },
       // 全局工具视图（globalToolNames 读它）：用例往 recorded.agentToolSchemas 里塞假清单。
       schemas: () => recorded?.agentToolSchemas ?? [],
       // restrict(filter) 的调用记录（applyToolDeny 走它）——遮罩名单/生图工具放行的断言看这里。
@@ -119,7 +136,8 @@ function fakeAgentCtx(recorded) {
 function makeCtx(extraServices = {}) {
   const recorded = {
     effects: [],
-    tools: [],
+    /** 全局层注册的工具（m10863 后枢纽**不该**再往这里挂东西——回归断言钉住）。 */
+    globalTools: [],
     upgrades: [],
     routes: [],
     sections: [],
@@ -142,6 +160,9 @@ function makeCtx(extraServices = {}) {
     /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict(filter) 的调用记录。 */
     agentToolSchemas: null,
     agentRestricts: [],
+    /** m10863：会话装配（setup）里注册的工具定义与指导段（用例经 probeHub 取）。 */
+    agentTools: [],
+    agentSections: [],
   };
   // 假 `agentPresets`：宿主有一条不变量——没加入任何预设的 agent 一旦去喊模型，
   // `system-prompt/assemble` 直接判失败。这里只验证"我们确实 resolve 了默认预设、并在
@@ -209,7 +230,7 @@ function makeCtx(extraServices = {}) {
     },
     tools: {
       register(def) {
-        recorded.tools.push(def);
+        recorded.globalTools.push(def);
         return () => {};
       },
       // plugin 生图引擎用例：给 ctx 一份全局工具清单（extras.toolsSchemas）。
@@ -237,7 +258,7 @@ function makeCtx(extraServices = {}) {
           ...sctxBase,
           systemPrompt: {
             section(section) {
-              recorded.sections.push(section);
+              hubSections().push(section);
               return () => {};
             },
           },
@@ -303,6 +324,28 @@ const hub = apply(ctx, {
   persist: false,
 });
 await sleep(60); // 等 agent 通道那次动态 import 落地
+
+/**
+ * **工具/指导段探针（m10863）**：28 个 onebot_* 工具与枢纽指导段都从 profile 全局层搬进了
+ * 会话装配 `setup(agentCtx)`（agent 作用域）——apply 阶段不再往全局层注册任何东西。
+ * 需要"工具定义清单 / 指导段正文"的用例走这个：用一个假的 agent 作用域上下文调一次枢纽的 setup
+ * （宿主 `agents.create/resume` 走的就是同一条路），把定义收出来。自带 recorder，并复原
+ * `mind.stats.lastSetup`，不污染真实会话的统计。
+ */
+function probeHub(who) {
+  const rec = { agentTools: [], agentSections: [], contexts: [], effects: [], agentEvents: [] };
+  const before = who?.mind?.stats?.lastSetup;
+  try {
+    who.mind.setup?.(fakeAgentCtx(rec), { reply: () => null, sessionKey: 'group:10000', agentKey: 'agent:group:10000' });
+  } catch (err) {
+    console.error(`[probe] 枢纽 setup 探针失败：${String(err?.message ?? err)}`);
+  }
+  if (who?.mind?.stats) who.mind.stats.lastSetup = before;
+  return rec;
+}
+const hubProbe = probeHub(hub);
+const hubTools = () => hubProbe.agentTools;
+const hubSections = () => hubProbe.agentSections;
 
 check('插件名与依赖声明', () => {
   assert.equal(name, 'dsh-onebot-hub');
@@ -669,8 +712,8 @@ check('apply 返回 hub 并挂出内部件', () => {
 });
 
 check('注册了 28 个工具且形状合法', () => {
-  assert.equal(recorded.tools.length, 28);
-  const names = recorded.tools.map((t) => t.name).sort();
+  assert.equal(hubTools().length, 28);
+  const names = hubTools().map((t) => t.name).sort();
   assert.deepEqual(names, [
     'onebot_admin',
     'onebot_avatar',
@@ -701,7 +744,7 @@ check('注册了 28 个工具且形状合法', () => {
     'onebot_topic',
     'onebot_turns',
   ]);
-  for (const def of recorded.tools) {
+  for (const def of hubTools()) {
     assert.equal(typeof def.description, 'string');
     assert.equal(typeof def.execute, 'function');
     assert.ok(def.output?.schema, `${def.name} 缺 output.schema`);
@@ -710,8 +753,19 @@ check('注册了 28 个工具且形状合法', () => {
   }
 });
 
+// m10863：28 个工具与枢纽指导段都挂在**会话装配的 agent 作用域**（`setup(agentCtx)`），
+// profile 全局层一个都不留。这就是"子代理与非枢纽会话看不见 onebot_*"的机制：宿主 `dsh-scope`
+// 的视图 = global + 本 scope 的链，而 agent 的 scope 没有父链（`dsh-agent-loop` 里
+// `createScope(loopCtx, this)` 不传 parent、`bindScopeParent` 零调用者），
+// 所以子代理即便 join 了父预设，也拿不到父 agent 的 scoped 注册。
+check('枢纽工具只挂在会话装配的 agent 作用域，profile 全局层一个都不留（m10863）', () => {
+  assert.deepEqual(recorded.globalTools, [], 'apply 阶段不该往全局层注册工具：那会让每个 DSH 会话都看见 onebot_*');
+  assert.equal(hubTools().length, 28, '会话装配（宿主 create/resume 走的就是同一条路）里应当收全 28 个');
+  assert.deepEqual(hubSections().map((s) => s.name), ['plugin:dsh-onebot-hub'], '指导段同理：只跟着枢纽会话走，不再是全局段落');
+});
+
 await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent 需要时调 onebot_code_scopes 取（m14477）', async () => {
-  const toolOf = (n) => recorded.tools.find((t) => t.name === n);
+  const toolOf = (n) => hubTools().find((t) => t.name === n);
 
   // —— 配置：多条范围，JSON 数组；老写法（一行一个路径）也认 ——
   assert.deepEqual(resolveConfig({}).codeScopes, [], '没填 = 空');
@@ -775,7 +829,7 @@ await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent
   assert.equal(scopes.scopes[1].kind, 'missing');
   assert.ok(scopes.note.includes('权限'));
   const alt = makeCtx();
-  apply(alt.ctx, {
+  const altHub = apply(alt.ctx, {
     upstreamUrl: '',
     upstreamSelfId: '30001000',
     downstreamTargets: '[]',
@@ -783,18 +837,21 @@ await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent
     code: { scopes: '[{"name":"下游A","path":"D:/不存在的目录/xyz"},{"path":"' + process.cwd().replace(/\\/g, '/') + '"}]' },
   });
   await sleep(60);
+  const altProbe = probeHub(altHub);
+  const altTools = altProbe.agentTools;
+  const altSections = altProbe.agentSections;
   try {
     // 自带扫描器已移除：两个实例的工具数一样（28），都不该有 onebot_scan_code。
-    assert.equal(alt.recorded.tools.length, 28, '工具数应当与主实例一致（扫描器已移除）');
-    assert.equal(alt.recorded.tools.some((t) => t.name === 'onebot_scan_code'), false, '扫描器工具已移除');
-    const section = alt.recorded.sections.find((s) => s.name === 'plugin:dsh-onebot-hub');
+    assert.equal(altTools.length, 28, '工具数应当与主实例一致（扫描器已移除）');
+    assert.equal(altTools.some((t) => t.name === 'onebot_scan_code'), false, '扫描器工具已移除');
+    const section = altSections.find((s) => s.name === 'plugin:dsh-onebot-hub');
     assert.equal(section?.order, 160);
     assert.equal(typeof section.text, 'string');
     assert.ok(!section.text.includes('onebot_scan_code'), '指导段不该提已移除的扫描器');
     assert.ok(section.text.includes('onebot_code_scopes'), '要告诉 agent 去哪取位置');
     assert.equal(section.text.includes('不存在的目录'), false, '路径不进 prompt');
     assert.equal(section.text.includes('下游A'), false, '备注也不进 prompt');
-    const altTool = alt.recorded.tools.find((t) => t.name === 'onebot_code_scopes');
+    const altTool = altTools.find((t) => t.name === 'onebot_code_scopes');
     const got = JSON.parse(await altTool.execute({}));
     assert.equal(got.count, 2);
     assert.equal(got.scopes[0].exists, false, '不存在的路径如实报');
@@ -959,10 +1016,10 @@ await checkAsync('模型清单路由（m024193）：有 llm 才真列，缺 llm 
 });
 
 check('全局指导段注册在 systemPrompt.section', () => {
-  assert.equal(recorded.sections.length, 1);
-  assert.equal(recorded.sections[0].name, 'plugin:dsh-onebot-hub');
-  assert.equal(recorded.sections[0].order, 160);
-  assert.equal(typeof recorded.sections[0].text, 'string');
+  assert.equal(hubSections().length, 1);
+  assert.equal(hubSections()[0].name, 'plugin:dsh-onebot-hub');
+  assert.equal(hubSections()[0].order, 160);
+  assert.equal(typeof hubSections()[0].text, 'string');
 });
 
 check('三个 effect 都可释放', () => {
@@ -999,13 +1056,13 @@ check('agent 通道把宿主 API 接进了 pool.host', () => {
 });
 
 check('onebot_hub_status 返回编排/记忆/隔离', () => {
-  const tool = recorded.tools.find((t) => t.name === 'onebot_hub_status');
+  const tool = hubTools().find((t) => t.name === 'onebot_hub_status');
   assert.equal(typeof tool.execute, 'function');
 });
 
 check('onebot_timeline / onebot_reply 形状', () => {
-  const timelineTool = recorded.tools.find((t) => t.name === 'onebot_timeline');
-  const replyTool = recorded.tools.find((t) => t.name === 'onebot_reply');
+  const timelineTool = hubTools().find((t) => t.name === 'onebot_timeline');
+  const replyTool = hubTools().find((t) => t.name === 'onebot_reply');
   assert.ok(timelineTool.parameters.limit, '缺 limit 参数声明');
   assert.ok(replyTool.parameters.text, '缺 text 参数声明');
 });
@@ -1040,7 +1097,7 @@ await checkAsync('onebot_reply（会话缓冲版）：新排队先把上一条�
 });
 
 check('onebot_invoke 能在工具层指定说话人 user_id，并明说换账号可能换结果', () => {
-  const invokeTool = recorded.tools.find((t) => t.name === 'onebot_invoke');
+  const invokeTool = hubTools().find((t) => t.name === 'onebot_invoke');
   assert.ok(invokeTool.parameters.user_id, '缺 user_id 参数声明');
   const desc = String(invokeTool.description);
   assert.ok(desc.includes('user_id'), '工具说明里没提 user_id');
@@ -1051,7 +1108,7 @@ check('onebot_invoke 能在工具层指定说话人 user_id，并明说换账号
 });
 
 check('onebot_invoke / onebot_relay_probe：注入只选**下游**，物理链路由枢纽决定（m02768）', () => {
-  const invokeTool = recorded.tools.find((t) => t.name === 'onebot_invoke');
+  const invokeTool = hubTools().find((t) => t.name === 'onebot_invoke');
   assert.ok(invokeTool.parameters.downstream, 'onebot_invoke 缺 downstream（只有它才能真正"选下游"）');
   assert.ok(invokeTool.parameters.allow_real_link, 'onebot_invoke 缺 allow_real_link 逃生口');
   assert.ok(
@@ -1059,7 +1116,7 @@ check('onebot_invoke / onebot_relay_probe：注入只选**下游**，物理链�
     'onebot_invoke 的 linkId 必须注明只对 mode=action 有意义（否则 agent 会拿它点物理链路）',
   );
   assert.ok(/由枢纽决定|枢纽按/.test(String(invokeTool.description)), '工具说明没写清"路由归枢纽"');
-  const probeTool = recorded.tools.find((t) => t.name === 'onebot_relay_probe');
+  const probeTool = hubTools().find((t) => t.name === 'onebot_relay_probe');
   assert.ok(probeTool.parameters.downstream, 'onebot_relay_probe 缺 downstream');
   assert.ok(probeTool.parameters.allow_real_link, 'onebot_relay_probe 缺 allow_real_link');
   assert.equal(probeTool.parameters.link, undefined, '旧的 link（点物理链路）应当去掉');
@@ -1068,17 +1125,17 @@ check('onebot_invoke / onebot_relay_probe：注入只选**下游**，物理链�
 check('多下游记录带人话名字：hub 暴露 labelOf，指导段与工具说明都提到它', () => {
   assert.equal(typeof hub.labelOf, 'function', 'hub 没有 labelOf —— agent 分不出"这是哪个下游"');
   assert.equal(typeof hub.pickInjectLink, 'function', 'hub 没有 pickInjectLink —— 路由没归枢纽');
-  const guided = recorded.sections.map((s) => String(s.text)).join('\n');
+  const guided = hubSections().map((s) => String(s.text)).join('\n');
   assert.ok(/linkLabel|downstreamLabel/.test(guided), '指导段没告诉 agent 记录里带人话名字');
 });
 
 check('下游发出的媒体也会被解析：指导段说明"看到的是引用不是 base64"', () => {
-  const guided = recorded.sections.map((s) => String(s.text)).join('\n');
+  const guided = hubSections().map((s) => String(s.text)).join('\n');
   assert.ok(/mediaRefs/.test(guided) && /base64/.test(guided), '指导段没说明下游媒体会落地成引用');
 });
 
 check('onebot_media 取聊天记录：三个参数名都收，别让 agent 挨个试（真机试了 4 次）', () => {
-  const mediaTool = recorded.tools.find((t) => t.name === 'onebot_media');
+  const mediaTool = hubTools().find((t) => t.name === 'onebot_media');
   for (const key of ['id', 'file', 'message_id']) {
     assert.ok(mediaTool.parameters[key], `onebot_media 缺 ${key}（实现端认的名字各家不同）`);
   }
@@ -1088,7 +1145,7 @@ check('onebot_media 取聊天记录：三个参数名都收，别让 agent 挨�
 
 // ---- 异步项：真执行工具（走真 mind / store / timeline） ----
 async function runAsyncChecks() {
-  const toolOf = (n) => recorded.tools.find((t) => t.name === n);
+  const toolOf = (n) => hubTools().find((t) => t.name === n);
 
   await checkAsync('唤醒一次 agent：setup 走通 installModelSelection（假 agentCtx）', async () => {
     const reply = { candidate: null, capture() { return null; }, take() { return null; }, clear() {} };
@@ -1899,9 +1956,10 @@ async function runAsyncChecks() {
     imageGen: { enabled: true, model: 'test-model', baseUrl: 'https://img.example', apiKey: 'k', delivery: 'agent' },
   });
   await sleep(30);
+  const igTools = probeHub(igHub).agentTools;
 
   await checkAsync('imageGen delivery=agent：落地 hub-media + 补描述 + 不自动直发', async () => {
-    const igTool = igMake.recorded.tools.find((t) => t.name === 'onebot_imagegen');
+    const igTool = igTools.find((t) => t.name === 'onebot_imagegen');
     assert.ok(igTool, 'builtin 引擎要注册 onebot_imagegen');
     assert.match(String(igTool.description), /不自动发群/, 'agent 模式的工具说明要讲清"不自动发"');
     const sentCalls = [];
@@ -1937,7 +1995,7 @@ async function runAsyncChecks() {
   });
 
   await checkAsync('imageGen delivery=direct：直发保留老行为，结果也带 hubMedia 与描述', async () => {
-    const igTool = igMake.recorded.tools.find((t) => t.name === 'onebot_imagegen');
+    const igTool = igTools.find((t) => t.name === 'onebot_imagegen');
     igHub.config.imageGen.delivery = 'direct';
     try {
       const sentCalls = [];
@@ -1958,7 +2016,7 @@ async function runAsyncChecks() {
   });
 
   await checkAsync('imageGen 落地失败：agent 模式退回 direct-fallback 直发，不浪费画好的图', async () => {
-    const igTool = igMake.recorded.tools.find((t) => t.name === 'onebot_imagegen');
+    const igTool = igTools.find((t) => t.name === 'onebot_imagegen');
     const realMedia = igHub.media;
     igHub.media = {
       saveBytes: async () => {
@@ -1997,9 +2055,10 @@ async function runAsyncChecks() {
     imageGen: { enabled: false, engine: 'plugin' },
   });
   await sleep(30);
+  const pgTools = probeHub(pgHub).agentTools;
 
   await checkAsync('imageGen engine=plugin：不注册 onebot_imagegen，挂 tools/post-execute，引导段放行第三方工具', async () => {
-    assert.equal(pgMake.recorded.tools.find((t) => t.name === 'onebot_imagegen'), undefined, 'plugin 引擎不许再挂自带生图');
+    assert.equal(pgTools.find((t) => t.name === 'onebot_imagegen'), undefined, 'plugin 引擎不许再挂自带生图');
     const post = pgMake.recorded.onEvents.find((e) => e.name === 'tools/post-execute');
     assert.ok(post, 'plugin 引擎要挂 tools/post-execute');
     pgHub.media = {
@@ -2105,7 +2164,7 @@ async function runAsyncChecks() {
       });
       await pgHub.mind.flush('private:10001', { reason: 'test-onebot-tools' });
       pgHub.mind.activeSessionKey = 'private:10001';
-      const def = pgMake.recorded.tools.find((t) => t.name === 'onebot_tools');
+      const def = pgTools.find((t) => t.name === 'onebot_tools');
       assert.ok(def, 'onebot_tools 要注册');
       // list：可见/被遮分两面报告；第三方生图走 pluginImageTools 不被遮。list:true 时 allowed 换成 canEnable 描述行。
       const listed = JSON.parse(await def.execute({ list: true }));
@@ -2157,7 +2216,7 @@ async function runAsyncChecks() {
         const r = await pgHub.mind.flush('private:10001', { reason: `test-preset-${n}` });
         assert.equal(r.woke, true, `第 ${n} 轮要真的唤醒：${r.reason}`);
       };
-      const def = pgMake.recorded.tools.find((t) => t.name === 'onebot_tools');
+      const def = pgTools.find((t) => t.name === 'onebot_tools');
       assert.ok(def, 'onebot_tools 要注册（前面用例已注册，这里是同一份）');
       // 起手先交还上一组用例留下的活 agent，保证下面每一轮都是"新会话"（能看到 meta.agentPreset）。
       await pgHub.mind.pool.retire('private:10001', 'test-preset-reset');
