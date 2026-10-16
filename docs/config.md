@@ -126,28 +126,32 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 ### 分群额度（每个群/私聊各记各的）
 
-额度按本地自然日/自然月记账，`.quota` 命令随时能查（`.quota reset` 追加解限额度，`.quota reset 50000` 也可）。**限额全是 `0` = 不限**（默认如此，不配就是不限）。单个会话要单独定额度，就在 `groups`/`privates` 条目里写同样的字段（字段级覆盖全局默认）。账本只存输入/缓存/输出三元组原值，**钱是读取时现算的**——改单价、换口径都自动重算。
+额度**不再有全局块**，就在 `agent.groups` / `agent.privates` 白名单里**逐行配**：某行写了 `quota` 就按那行算，没写就是这个会话不限。设置页每行有张「额度」折叠面板（口径、单价、限额、报数口径都在里面），行标题旁还会挂个徽标写明"按 token · 每日 1000"之类。记账按本地自然日/自然月，`.quota` 命令随时能查（`.quota reset` 追加解限额度，`.quota reset 50000` 也可）。账本只存输入/缓存/输出三元组原值，**钱是读取时现算的**——改单价、换口径都自动重算历史账。
 
 用尽之后（第二期，m13831）：那一批**只进记忆、不调模型**（退成 observer，群里照常看得见发生过什么，不会丢档）；同时被 @ 就替模型回一句固定话术（`onExhaust`）。攒下的消息不会烂在窗口里——恢复后下一轮会把**期间攒下的最近 20 条原话**补在开头（只补一次，超过 60 条丢最旧的并注明丢了多少），免得模型回来时对群里的事一无所知。报数行受 `noticeCooldownMs` 冷却防刷屏，但**快用完/已用完时不冷却**（那正是模型该知道的时候）。
 
+行内字段（`quota` 对象，全部可选；**限额全是 `0` 或不写 = 不限**）：
+
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `agent.quota.enabled` | 开关 | 关 | **分群额度总开关**：打开后才记。默认关，不配就是不限。 |
-| `agent.quota.unit` | 字符串 | token | **额度口径**：`token` = 输入+缓存+输出合算（不区分输入输出）；`cost` = 按下面自填单价折钱。 |
-| `agent.quota.tokensPerDay` | 数字 | 0 | **每日 token 上限**：按本地自然日重置；0 = 不限。 |
-| `agent.quota.tokensPerMonth` | 数字 | 0 | **每月 token 上限**：按本地自然月重置；0 = 不限。日与月谁先到听谁的。 |
-| `agent.quota.costPerDay` | 数字 | 0 | **每日花费上限**：`unit:'cost'` 时才看，单位是 `currency` 那个币种；0 = 不限。 |
-| `agent.quota.costPerMonth` | 数字 | 0 | **每月花费上限**：同上，按本地自然月重置；0 = 不限。 |
-| `agent.quota.currency` | 字符串 | CNY | **币种**：只影响账本显示与文案，不做换算。 |
-| `agent.quota.price.input` | 数字 | 0 | **输入单价（每百万 token）**：群里自填；改了自动按新价重算历史账。 |
-| `agent.quota.price.cache` | 数字 | 0 | **缓存单价（每百万 token）**：命中缓存那部分的单价。 |
-| `agent.quota.price.output` | 数字 | 0 | **输出单价（每百万 token）**：通常最贵的一项。 |
-| `agent.quota.notice` | 字符串 | detail | **报数口径**：`detail` = 每批末尾给已用/限额/剩余；`percent` = 只给剩余百分比；`off` = 不出声。 |
-| `agent.quota.noticeHint` | 开关 | 开 | **顺带提醒模型省着点**：剩余不足时在给模型的指导里提一句，让它自己收着回话。 |
-| `agent.quota.onExhaust` | 字符串 | notice | **用尽后的行为**：`notice` = 被 @ 时回一句额度用完；`silent` = 一个字都不发。 |
-| `agent.quota.exhaustedReply` | 字符串 | 本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。 | **用尽时的回话**：额度用完且有人 @ 时，替模型发出去的那句固定话术（受 `noticeCooldownMs` 限流）。 |
-| `agent.quota.noticeCooldownMs` | 数字 | 600000 | **报数冷却（ms）**：两次报数之间至少隔这么久，防话痨群刷屏；快用完/已用完时豁免。 |
-| `agent.quota.superuserBypass` | 开关 | 关 | **超管 @ 也照常记**：默认关——超管 @ 不绕过额度；打开后超管 @ 照常调模型（记账照旧）。 |
+| `agent.groups[].quota.enabled` | 开关 | 关 | **这一行要不要记账**：关着就是不设额度（面板里的值会被收起来不写进 JSON）。 |
+| `agent.groups[].quota.unit` | 字符串 | token | **计算方法**：`token` = 输入+缓存+输出合算（不区分输入输出）；`cost` = 按下面自填单价折钱。 |
+| `agent.groups[].quota.tokensPerDay` | 数字 | 0 | **每日 token 上限**：按本地自然日重置；0 = 不限。 |
+| `agent.groups[].quota.tokensPerMonth` | 数字 | 0 | **每月 token 上限**：按本地自然月重置；0 = 不限。日与月谁先到听谁的。 |
+| `agent.groups[].quota.costPerDay` | 数字 | 0 | **每日花费上限**：`unit:'cost'` 时才看，单位是 `currency` 那个币种；0 = 不限。 |
+| `agent.groups[].quota.costPerMonth` | 数字 | 0 | **每月花费上限**：同上，按本地自然月重置；0 = 不限。 |
+| `agent.groups[].quota.currency` | 字符串 | CNY | **币种**：只影响账本显示与文案，不做换算。 |
+| `agent.groups[].quota.price.input` | 数字 | 0 | **输入单价（每百万 token）**：群里自填；改了自动按新价重算历史账。 |
+| `agent.groups[].quota.price.cache` | 数字 | 0 | **缓存单价（每百万 token）**：命中缓存那部分的单价。 |
+| `agent.groups[].quota.price.output` | 数字 | 0 | **输出单价（每百万 token）**：通常最贵的一项。 |
+| `agent.groups[].quota.notice` | 字符串 | detail | **报数口径**：`detail` = 每批末尾给已用/限额/剩余；`percent` = 只给剩余百分比；`off` = 不出声。 |
+| `agent.groups[].quota.noticeHint` | 开关 | 开 | **顺带提醒模型省着点**：剩余不足时在给模型的指导里提一句，让它自己收着回话。 |
+| `agent.groups[].quota.onExhaust` | 字符串 | notice | **用尽后的行为**：`notice` = 被 @ 时回一句额度用完；`silent` = 一个字都不发。 |
+| `agent.groups[].quota.exhaustedReply` | 字符串 | 本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。 | **用尽时的回话**：额度用完且有人 @ 时，替模型发出去的那句固定话术（受 `noticeCooldownMs` 限流）。 |
+| `agent.groups[].quota.noticeCooldownMs` | 数字 | 600000 | **报数冷却（ms）**：两次报数之间至少隔这么久，防话痨群刷屏；快用完/已用完时豁免。设置页里填的是**秒**。 |
+| `agent.groups[].quota.superuserBypass` | 开关 | 关 | **超管 @ 也照常记**：默认关——超管 @ 不绕过额度；打开后超管 @ 照常调模型（记账照旧）。 |
+
+`agent.privates` 里的 `quota` 结构一模一样。私聊同样支持额度（配在 `agent.privates` 行里）。
 
 ## 能力闸门（谁能写、能不能探测）
 

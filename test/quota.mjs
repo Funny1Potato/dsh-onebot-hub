@@ -17,10 +17,10 @@ import {
   formatQuotaValue,
   localDayKey,
   localMonthKey,
-  mergeQuota,
   normalizeQuota,
   quotaConfigured,
   quotaLimit,
+  quotaOfEntry,
   quotaValue,
 } from '../lib/quota.js';
 
@@ -113,21 +113,22 @@ t('normalizeQuota：容忍字符串数字、负数归零、非法枚举回退', 
   assert.deepEqual(q.price, { input: 3, cache: 0, output: 0 });
 });
 
-t('mergeQuota：会话条目按字段级覆盖全局默认（没写的字段留着）', () => {
-  const globalQuota = normalizeQuota({
-    enabled: true,
-    tokensPerDay: 100000,
-    currency: 'USD',
-    price: { input: 2, cache: 0.2, output: 8 },
-    noticeHint: false,
-  });
-  const merged = mergeQuota(globalQuota, { tokensPerDay: 5000 });
-  assert.equal(merged.tokensPerDay, 5000, '条目写的字段生效');
-  assert.equal(merged.currency, 'USD', '条目没写的字段留着全局的');
-  assert.equal(merged.price.input, 2);
-  assert.equal(merged.noticeHint, false);
-  // 没有条目覆盖时就是全局默认本身
-  assert.equal(mergeQuota(globalQuota, null).tokensPerDay, 100000);
+t('quotaOfEntry：额度只认白名单条目里那一份，没写就是不限（m14190）', () => {
+  const entry = { quota: { enabled: true, unit: 'cost', currency: 'USD', costPerDay: 5, price: { input: 2 } } };
+  const q = quotaOfEntry(entry);
+  assert.equal(q.enabled, true);
+  assert.equal(q.unit, 'cost');
+  assert.equal(q.costPerDay, 5);
+  assert.equal(q.currency, 'USD');
+  assert.equal(q.price.input, 2);
+  assert.equal(q.price.output, 0, '没写的补默认，不留上一份的值');
+  assert.equal(q.notice, 'detail', '报数口径没写就用默认');
+  // 条目里压根没 quota（没勾"启用额度"）＝ `enabled:false`＝不限
+  assert.equal(quotaOfEntry({}).enabled, false);
+  assert.equal(quotaOfEntry(null).enabled, false);
+  assert.equal(quotaOfEntry({ quota: '写坏了' }).enabled, false, '写坏了也别炸，降级成不限');
+  // 写坏了的字段照旧能救回来（宽松解析，跟面板里手输的值对得上）
+  assert.equal(quotaOfEntry({ quota: { enabled: true, tokensPerDay: '5000' } }).tokensPerDay, 5000);
 });
 
 t('quotaValue：token 口径合算三元组，cost 口径按每百万单价折算', () => {

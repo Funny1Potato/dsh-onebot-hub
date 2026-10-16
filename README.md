@@ -57,7 +57,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | --- | --- |
 | `agent.groups` / `agent.privates` | **白名单**。写了的群/QQ 才调模型，没写的连 `@` 都不理；两张都不写 = 不过滤。条目可带 `mode`（`observer` 只看不答） |
 | `agent.mode` | 平时是 `assist`（被叫到才醒、参与完自己睡回去），`active` 更活跃。名单里的某一类会话可在条目上单独覆盖 |
-| `chatCommands.superUsers` | 谁能用那 12 条管理命令（`help` `status` `memes` `perm`…，前缀见 `chatCommands.prefix`）。**留空 = 整条命令链沉默**（不猜谁是管理员） |
+| `chatCommands.superUsers` | 谁能用那 13 条管理命令（`help` `status` `memes` `perm`…，前缀见 `chatCommands.prefix`）。**留空 = 整条命令链沉默**（不猜谁是管理员） |
 | `probe.isolation` | 测试用命令时注入给下游的账号：`link`（默认，另开一个探针账号，真人消息进不去）或 `time` |
 | `vision.mode` | 看图方式：`describe`（把图交给视觉模型写成人话，默认）/ `segment`（把图本身给模型）/ `off` |
 | `persona.presets` | 群里的角色设定（名字、性格、说话风格），可按群名套用 |
@@ -69,7 +69,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | `agent.speakAssistantText` | 默认 `false`：**普通回复文本只是内部草稿，只有 `onebot_reply` 会真的发进聊天** |
 | `retention.days` | 原始报文与媒体保留天数（默认 7） |
 | `agent.replyGapMs` / `agent.replyMaxText` / `agent.replyMaxImages` | 一次回复发多条时的间隔（默认 400ms）、文字条数上限（默认 3，图另算）、图片上限（默认 9） |
-| `agent.quota` | 分群额度（**默认关、示例阈值全 0 ＝ 不限**）：`unit:'token'` 按输入+缓存+输出合算，`unit:'cost'` 按本群自填的每百万单价折钱（默认 CNY）；单群要单独定就在 `groups`/`privates` 条目里写同样的 `quota` 字段。用尽后那一批**只进记忆不调模型**（被 @ 兜一句固定话术，可关），恢复后下一轮补注入期间攒的最近 20 条原话；`/quota` 查、`/quota reset` 解限 |
+| `agent.groups` / `agent.privates` 里的 `quota` | **分群额度，逐行配**（m14190：额度不再有全局块，这一行不写 `quota` 就是不限）。设置页每行一张「额度」折叠面板：计算方法 `unit:'token'`（输入+缓存+输出合算）或 `unit:'cost'`（按本行自填的每百万单价折钱，默认 CNY）、日/月上限、报数口径 `notice`、用尽回话等。用尽后那一批**只进记忆不调模型**（被 @ 兜一句固定话术，可关），恢复后下一轮补注入期间攒的最近 20 条原话；`/quota` 查、`/quota reset` 解限 |
 
 ## 聊天里的命令（13 条）
 

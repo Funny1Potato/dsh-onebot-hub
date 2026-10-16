@@ -431,6 +431,102 @@ await check('多下游列表编辑器：「以 JSON 编辑」能切出去再切�
   assert.equal(urlInputsIn(listControl(app.render())).length, 2, '能切回行编辑');
 });
 
+await check('群白名单：额度按行配，「额度」面板里填口径/单价/限额/报数口径，写回同一串 JSON（m14190）', async () => {
+  const groups = JSON.stringify([
+    { id: '617770183', mode: 'active' },
+    {
+      id: '55555',
+      mode: 'assist',
+      quota: { enabled: true, unit: 'cost', currency: 'CNY', costPerDay: 5, price: { input: 3, cache: 0.3, output: 15 }, notice: 'percent', noticeCooldownMs: 300000 },
+    },
+  ]);
+  const app = boot({ ...BASE_VALUE, agent: { mode: 'assist', groups, privates: '[]' } });
+  const control = () => controlsFor(app.render()).get('agent.groups');
+  assert.ok(control(), '群白名单必须渲染');
+  const quotaToggles = () => buttonsOf(control()).filter((button) => textOf(button) === '额度' || textOf(button) === '收起额度');
+  assert.equal(quotaToggles().length, 2, '每行一个「额度」开关（而不是把口径平铺成八列）');
+  // 徽标：不配的那行说"不限额"，配了的那行一眼看出按钱、每日 5 CNY
+  const spans = () => inList(control(), (inner) => inner.type === 'span' && typeof textOf(inner) === 'string');
+  assert.ok(spans().some((span) => textOf(span).includes('不限额')), '没配的行要明说是不限额');
+  assert.ok(spans().some((span) => textOf(span).includes('按钱') && textOf(span).includes('每日 5 CNY')), `配了的行要写出按钱与限额：${spans().map(textOf).join(' | ')}`);
+
+  // 展开第二行：面板里现值如实显示
+  quotaToggles()[1].props.onClick();
+  const panel = () => inList(control(), (inner) => inner.type === 'label');
+  const field = (name) => {
+    const row = panel().find((label) => textOf(label.children[0] ?? {}) === name);
+    assert.ok(row, `面板里找不到「${name}」这一行：${panel().map((label) => textOf(label.children[0] ?? {})).join(' | ')}`);
+    return (row.children || [])[1];
+  };
+  assert.equal(field('启用额度').props.checked, true);
+  assert.equal(field('计算方法').props.value, 'cost');
+  assert.deepEqual(field('计算方法').children.map((option) => option.props.value), ['token', 'cost'], '口径只有这两个选项');
+  assert.equal(field('每日上限（CNY）').props.value, '5', '按钱口径的每日上限读的是 costPerDay（输入框里是字符串）');
+  assert.equal(field('输入单价（每百万 token）').props.value, '3');
+  assert.equal(field('缓存单价（每百万 token）').props.value, '0.3');
+  assert.equal(field('输出单价（每百万 token）').props.value, '15');
+  assert.equal(field('报数口径').props.value, 'percent');
+  assert.deepEqual(field('报数口径').children.map((option) => option.props.value), ['detail', 'percent', 'off']);
+  assert.equal(field('报数冷却（秒）').props.value, '300', '毫秒 ↔ 秒换算给的是人能填的单位');
+  assert.equal(field('超管 @ 豁免额度').props.checked, false);
+  assert.equal(field('用尽后的行为').props.value, 'notice');
+
+  // 改限额 → 保存 → 写回同一个 JSON 字符串，quota 挂在那一行上
+  field('每日上限（CNY）').props.onChange({ target: { value: '9' } });
+  field('报数冷却（秒）').props.onChange({ target: { value: '45' } });
+  buttonsOf(app.render()).find((button) => textOf(button).startsWith('保存')).props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const op = JSON.parse(JSON.stringify(app.mutations.at(-1))).find((row) => row.path.join('.') === 'agent.groups');
+  assert.ok(op, '要写回 agent.groups');
+  assert.equal(typeof op.value, 'string', 'schema 是字符串，写回的也必须是字符串');
+  const parsed = JSON.parse(op.value);
+  assert.ok(!('quota' in parsed[0]), '没勾启用的那一行不许带 quota（JSON 保持干净）');
+  assert.equal(parsed[1].quota.costPerDay, 9, '数字要落成真数字');
+  assert.equal(parsed[1].quota.noticeCooldownMs, 45000, '秒 → 毫秒');
+  assert.equal(parsed[1].quota.price.output, 15, '没碰的单价照旧');
+  assert.equal(parsed[1].mode, 'assist', 'mode 不受影响');
+});
+
+await check('群白名单：第一行没配额度，展开后勾上启用＋填上限就写进 quota（token 口径）', async () => {
+  const groups = JSON.stringify([{ id: '617770183', mode: 'active' }, { id: '55555' }]);
+  const app = boot({ ...BASE_VALUE, agent: { mode: 'assist', groups, privates: '[]' } });
+  const control = () => controlsFor(app.render()).get('agent.groups');
+  buttonsOf(control()).find((button) => textOf(button) === '额度').props.onClick();
+  const panelRows = () => inList(control(), (inner) => inner.type === 'label');
+  const field = (name) => {
+    const row = panelRows().find((label) => textOf(label.children[0] ?? {}) === name);
+    assert.ok(row, `找不到「${name}」：${panelRows().map((label) => textOf(label.children[0] ?? {})).join(' | ')}`);
+    return (row.children || [])[1];
+  };
+  assert.equal(field('启用额度').props.checked, false, '默认没勾＝不限');
+  assert.equal(field('计算方法').props.value, 'token', '默认按 token');
+  assert.equal(field('每日上限（token）').props.value, '', '没配就是空的');
+  field('启用额度').props.onChange({ target: { checked: true } });
+  field('每日上限（token）').props.onChange({ target: { value: '200000' } });
+  // 切成按钱：标签跟着换口径，写入的键也跟着换（tokensPerDay → costPerDay）
+  field('计算方法').props.onChange({ target: { value: 'cost' } });
+  assert.ok(panelRows().some((label) => textOf(label.children[0] ?? {}) === '每日上限（CNY）'), '切按钱后标签要换成币种');
+  const costDay = panelRows().find((label) => textOf(label.children[0] ?? {}) === '每日上限（CNY）');
+  assert.equal(costDay.children[1].props.value, '', '切口径后原来那个 token 限额不带过来（钱那条仍空＝不限）');
+  costDay.children[1].props.onChange({ target: { value: '2.5' } });
+  buttonsOf(app.render()).find((button) => textOf(button).startsWith('保存')).props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const parsed = JSON.parse(JSON.parse(JSON.stringify(app.mutations.at(-1))).find((row) => row.path.join('.') === 'agent.groups').value);
+  assert.equal(parsed[0].quota.enabled, true);
+  assert.equal(parsed[0].quota.unit, 'cost');
+  assert.equal(parsed[0].quota.costPerDay, 2.5);
+  assert.equal(parsed[0].quota.tokensPerDay, 200000, '切口径不清掉另一条：改回去还能接着用');
+  assert.ok(!('quota' in parsed[1]), '没动过的第二行仍不带 quota');
+});
+
+await check('私聊白名单：额度面板同样在行内（和群一样，m14190）', () => {
+  const privates = JSON.stringify([{ id: '10001', quota: { enabled: true, tokensPerDay: 1000, notice: 'off' } }]);
+  const app = boot({ ...BASE_VALUE, agent: { mode: 'assist', groups: '[]', privates } });
+  const control = controlsFor(app.render()).get('agent.privates');
+  assert.ok(control, '私聊白名单必须渲染');
+  const text = (() => { let out = ''; walk(control, (node) => { out += textOf(node); }); return out; })();
+  assert.ok(text.includes('按 token · 每日 1000'), `私聊那行也要写出按 token 与限额：${text}`);});
+
 await check('没默认值的两项仍然渲染成空行（"没配"不等于"这一行不存在"）', () => {
   const withoutBoth = { ...BASE_VALUE };
   delete withoutBoth.upstreamListen;
