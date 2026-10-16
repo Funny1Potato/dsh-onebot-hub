@@ -4440,7 +4440,9 @@ async function scenarioChatFeatures() {
 // ------------------------------ 场景：分群额度用尽 → 退成 observer（第二期，m13831）
 
 async function scenarioQuotaGate() {
-  const { hub, sent } = makeHub({ chatCommands: { superUsers: ['10001'] } });
+  // 开着存储：额度用尽那批要能证明"L1 原始层照样落盘、agent 事后翻得到"（用户 m14113 问的）。
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-quota-'));
+  const { hub, sent } = makeHub({ chatCommands: { superUsers: ['10001'] }, storageDir: dir });
   const store = new MemoryStore({});
   const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 6, batchMs: 8000 });
   const at = Date.parse('2026-03-04T10:00:00');
@@ -4518,6 +4520,18 @@ async function scenarioQuotaGate() {
   await mind.flush('group:70001', { reason: 'test:quota' });
   say(70004, '第三条');
   await mind.flush('group:70001', { reason: 'test:quota' });
+
+  // 用户 m14113 问：用尽期间没进会话的那些，agent 之后还能不能翻出来？
+  // 闸门只挡"调模型"，**不挡记账**——L1 原始层（timeline jsonl + recall 索引）是入口层写的，与额度无关。
+  const heldRecall = await hub.recall.search({ query: '热闹', sessionKey: 'group:70001' });
+  const heldKinds = await hub.recall.search({ query: '第三条', sessionKey: 'group:70001' });
+  check('额度用尽期间的消息没丢：agent 事后能用 onebot_recall 翻出来', () => {
+    assert.equal(heldRecall.items.length, 1, '被闸门吃掉的那条原文要能检索到：');
+    assert.equal(heldRecall.items[0].refs.message_id, 70002);
+    assert.match(String(heldRecall.items[0].text ?? ''), /今天群里挺热闹/, '翻出来的是原文，不是摘要');
+    assert.equal(heldKinds.items.length, 1, '攒着的后两条也在：');
+    assert.equal(heldKinds.items[0].refs.message_id, 70004);
+  });
 
   ledger.waive('group:70001', { scope: 'day', by: '10001', amount: 5000 });
   say(70005, '我回来了');
