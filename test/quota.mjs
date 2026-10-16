@@ -21,6 +21,7 @@ import {
   quotaConfigured,
   quotaLimit,
   quotaOfEntry,
+  quotaKey,
   quotaValue,
 } from '../lib/quota.js';
 
@@ -231,6 +232,93 @@ t('记账按会话隔离：群与私聊各记各的', () => {
   assert.equal(ledger.usage('private:9').day.input, 999);
 });
 
+// ------------------------------------------------- 账键按群归一（m14570 真机 bug）
+
+t('quotaKey：去掉会话激活后缀，群与私聊的账只留一份', () => {
+  assert.equal(quotaKey('group:123'), 'group:123', '本来就是群键的照原样');
+  assert.equal(quotaKey('group:123.amvb5sjddkj1z'), 'group:123', '宿主会话键的后缀要去掉');
+  assert.equal(quotaKey('private:10001.amvb14ytmpev2'), 'private:10001');
+  assert.equal(quotaKey(''), '');
+  assert.equal(quotaKey(null), '');
+  assert.equal(quotaKey('other:message.friend'), 'other:message', '别的形态也只截第一个点');
+});
+
+t('同群换会话：账接着走，不是从零开始（m14570 报数行一直显示"已用 0"的根因）', () => {
+  const ledger = new QuotaLedger();
+  // 第一段会话记了一笔，宿主给的 sessionKey 带激活后缀
+  ledger.note('group:617770183.amvb5sjddkj1z', msg(1, { input: 7509, cache: 16384, output: 417, turn: 1 }), 'sid-a');
+  // 读侧拿的是批次侧的裸键（协议层的 sessionKey），也拿得到
+  assert.equal(ledger.usage('group:617770183').day.input, 7509, '裸键能读到带后缀那笔');
+  // 第二段会话（新激活）继续记，账要加在同一份上
+  ledger.note('group:617770183.amvb6582p0npd', msg(2, { input: 492, cache: 23872, output: 64, turn: 2 }), 'sid-b');
+  const { day } = ledger.usage('group:617770183');
+  assert.equal(day.input, 7509 + 492, '两段会话的用量合到同一行');
+  assert.equal(day.cache, 16384 + 23872);
+  assert.equal(day.turns, 2, '轮次也是两段各一轮');
+  const q = normalizeQuota({ enabled: true, tokensPerDay: 1e6 });
+  // token 口径 = input + cache + output = 8001 + 40256 + 481 = 48738
+  assert.match(ledger.render('group:617770183.amvb6582p0npd', q), /已用 48,738 token/, '报数行按群读，不再是 0');
+  assert.deepEqual(Object.keys(ledger.toJSON().agents), ['group:617770183'], '落盘只留归一后的一个键');
+});
+
+t('去重水位按 sessionId 分桶：同群两个会话各数各的 seq', () => {
+  const ledger = new QuotaLedger();
+  ledger.note('group:5', msg(30, { input: 100 }), 'sid-a');
+  // 同群另一段会话，seq 从头数：不能被当成 A 的旧事件丢掉
+  assert.ok(ledger.note('group:5', msg(2, { input: 200 }), 'sid-b'), '另一会话的 seq 2 照记');
+  assert.equal(ledger.usage('group:5').day.input, 300);
+  // 同一个会话里重复送的那条仍然要挡住
+  assert.equal(ledger.note('group:5', msg(2, { input: 200 }), 'sid-b'), null, '同会话同 seq 仍去重');
+});
+
+t('迁移：旧账本里带后缀的键并进群那一份，waivers 也跟着并', () => {
+  const at = Date.parse('2026-03-04T10:00:00');
+  const today = localDayKey(at);
+  const storage = fakeStorage({
+    'quota/ledger.json': {
+      version: 1,
+      agents: {
+        'group:617770183.amvb5sjddkj1z': {
+          days: { [today]: { input: 100, cache: 0, output: 0, turns: 1, firstAt: 111, lastAt: 111 } },
+          months: {},
+          waivers: [],
+        },
+        'group:617770183.amvb6582p0npd': {
+          days: { [today]: { input: 200, cache: 50, output: 20, turns: 1, firstAt: 222, lastAt: 999 } },
+          months: {},
+          waivers: [{ scope: 'day', key: today, by: '1', at: 5, amount: 50, note: '' }],
+        },
+      },
+    },
+  });
+  const ledger = new QuotaLedger({ storage, now: () => at });
+  const day = ledger.usage('group:617770183').day;
+  assert.equal(day.input, 300, '两段会话的账相加');
+  assert.equal(day.cache, 50);
+  assert.equal(day.turns, 2);
+  assert.equal(day.firstAt, 111, 'firstAt 取早');
+  assert.equal(day.lastAt, 999, 'lastAt 取晚');
+  assert.equal(ledger.waived('group:617770183', 'day', today), 50, '解限记录跟着并过来');
+  assert.deepEqual(Object.keys(ledger.toJSON().agents), ['group:617770183'], '旧键不再单独留着');
+  assert.ok(storage.files.has('quota/ledger.json'), '迁移过的账落回磁盘');
+});
+
+t('迁移：已经在裸键上记过账时，旧键并进来而不是覆盖', () => {
+  const at = Date.parse('2026-03-04T10:00:00');
+  const today = localDayKey(at);
+  const storage = fakeStorage({
+    'quota/ledger.json': {
+      version: 1,
+      agents: {
+        'group:9': { days: { [today]: { input: 10, cache: 0, output: 0, turns: 1, firstAt: 1, lastAt: 1 } }, months: {}, waivers: [] },
+        'group:9.amvbabc': { days: { [today]: { input: 20, cache: 0, output: 0, turns: 1, firstAt: 2, lastAt: 2 } }, months: {}, waivers: [] },
+      },
+    },
+  });
+  const ledger = new QuotaLedger({ storage, now: () => at });
+  assert.equal(ledger.usage('group:9').day.input, 30, '两份相加，不丢也不覆盖');
+});
+
 // ------------------------------------------------------------------ 解限
 
 t('waive：解限不减账，只让"剩余"变多；不给金额就是抹掉当期已用', () => {
@@ -362,7 +450,9 @@ t('describe：没配额度要说清怎么配，别只丢一句"没配"', () => {
   const out = ledger.describe('group:10', normalizeQuota({}));
   assert.match(out, /没配额度/);
   assert.match(out, /enabled:true/);
-  assert.match(out, /groups\/privates/);
+  // m14190 起额度只按群/私聊逐行配（全局 agent.quota 已删），提示得指向名单行里的「额度」面板。
+  assert.match(out, /名单.*这条.*额度/s);
+  assert.doesNotMatch(out, /agent\.quota/, '别再让用户去配一个已经不存在的全局块');
 });
 
 t('describe：配了就给已用/限额/剩余/原始计数与单价', () => {
