@@ -289,10 +289,10 @@ t('render：私聊口径说"本私聊"，cost 口径带币种，noticeHint 加�
   const out = ledger.render('private:7', cost, at);
   assert.match(out, /本私聊/);
   assert.match(out, /已用 ¥12\.00 \/ ¥20\.00/);
-  assert.match(out, /勿向群友播报额度/, '默认提醒模型这是内部参考');
+  assert.match(out, /仅内部参考，不要轻易播报额度/, '默认提醒模型这是内部参考、且别随口往外说（m14543）');
   assert.doesNotMatch(
     ledger.render('private:7', normalizeQuota({ ...cost, noticeHint: false }), at + 11 * 60 * 1000),
-    /勿向群友播报/,
+    /不要轻易播报/,
   );
 });
 
