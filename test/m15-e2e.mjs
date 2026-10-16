@@ -28,6 +28,7 @@ import { applyMemoryOps } from '../lib/memory/writer.js';
 import { PersonaStore } from '../lib/persona/store.js';
 import { MemeStore } from '../lib/memes/store.js';
 import { ChatCommands } from '../lib/chat-commands.js';
+import { QuotaLedger, normalizeQuota } from '../lib/quota.js';
 
 const results = [];
 const check = (name, fn) => {
@@ -4436,6 +4437,159 @@ async function scenarioChatFeatures() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+// ------------------------------ 场景：分群额度用尽 → 退成 observer（第二期，m13831）
+
+async function scenarioQuotaGate() {
+  const { hub, sent } = makeHub({ chatCommands: { superUsers: ['10001'] } });
+  const store = new MemoryStore({});
+  const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 6, batchMs: 8000 });
+  const at = Date.parse('2026-03-04T10:00:00');
+  const ledger = new QuotaLedger({ now: () => at });
+  // 同一个对象一路复用：下面改 `onExhaust` / `superuserBypass` 就是改闸门读的那份配置。
+  const quota = normalizeQuota({
+    enabled: true,
+    tokensPerDay: 1000,
+    noticeCooldownMs: 0,
+    exhaustedReply: '本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。',
+  });
+  const wakes = [];
+  const { host, created } = makeFakeHost({
+    script: async (agent) => {
+      wakes.push(agent.followups.at(-1)?.content?.map((p) => p.text ?? '').join('') ?? '');
+    },
+  });
+  const pool = new AgentPool({ policy, host, log: () => {} });
+  const mind = new Mind({
+    hub,
+    timeline: hub.timeline,
+    store,
+    policy,
+    pool,
+    quota: ledger,
+    quotaConfigFor: () => quota,
+    log: () => {},
+  });
+  hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+  // "我是谁"得先有：没连上游、也没配身份时 @ 叫不醒（闸门判"这批叫到了我"就靠这个）。
+  mind.setIdentity({ selfId: String(SELF_ID), nickname: 'dsh-hub' });
+
+  // `@` 在 OneBot 里是**段**（`{type:'at',data:{qq}}`），纯文本 `@昵称` 不算被叫到（policy.detectMention）。
+  const say = (messageId, text, extra = {}) => {
+    const atMe = text.startsWith('@');
+    return hub.handleUpstreamEvent(
+      groupMessage({
+        groupId: 70001,
+        messageId,
+        text,
+        segments: [
+          ...(atMe ? [{ type: 'at', data: { qq: String(SELF_ID) } }] : []),
+          { type: 'text', data: { text: atMe ? text.replace(/^@\S+\s*/, '') : text } },
+        ],
+        ...extra,
+      }),
+    );
+  };
+  // 宿主事件形状的 usage：一回合一条（`note` 按 `(sessionId, seq)` 去重）。
+  const spent = (seq, tokens) =>
+    ledger.note('group:70001', {
+      type: 'assistant/message',
+      seq,
+      data: { usage: { inputTokens: tokens, cacheReadTokens: 0, outputTokens: 0 }, turn: seq },
+    });
+
+  spent(1, 1100); // 今天已经聊掉 1100 > 1000：额度用尽
+  say(70002, '今天群里挺热闹');
+  const blocked = await mind.flush('group:70001', { reason: 'test:quota' });
+
+  check('额度用尽：这批只存不发，不叫模型（退成 observer）', () => {
+    assert.equal(blocked.woke, false);
+    assert.equal(blocked.reason, 'quota:exhausted');
+    assert.equal(blocked.scope, 'day');
+    assert.equal(created.size, 0, '不该建会话，更不该调模型');
+    assert.equal(sent.length, 0, '不该往群里发任何东西');
+    assert.equal(mind.stats.woken, 0);
+  });
+  check('额度用尽：这批消息仍然进了记忆存储（只存≠丢掉）', () => {
+    assert.ok(store.stats.total >= 1, '观察条目应已落库，否则这段群聊会被整段抹掉');
+  });
+
+  // 用尽期间继续攒（每批都被闸门吃掉，但原话留住了）
+  say(70003, '第二条');
+  await mind.flush('group:70001', { reason: 'test:quota' });
+  say(70004, '第三条');
+  await mind.flush('group:70001', { reason: 'test:quota' });
+
+  ledger.waive('group:70001', { scope: 'day', by: '10001', amount: 5000 });
+  say(70005, '我回来了');
+  const back = await mind.flush('group:70001', { reason: 'test:quota' });
+
+  check('解限后立刻恢复唤醒，并把期间攒的原话补进本轮（用户 m13831：最近 20 条）', () => {
+    assert.equal(back.woke, true);
+    const text = wakes.at(-1) ?? '';
+    assert.match(text, /【额度恢复：这期间攒下的 3 条】/);
+    assert.match(text, /今天群里挺热闹/);
+    assert.match(text, /第二条/);
+    assert.match(text, /第三条/);
+    assert.ok(text.indexOf('第三条') < text.indexOf('我回来了'), '补注入是背景，应在本批新消息之前');
+  });
+
+  say(70006, '再聊一句');
+  await mind.flush('group:70001', { reason: 'test:quota' });
+  check('补注入只发生一次（下一轮不再重复同一段）', () => {
+    const text = wakes.at(-1) ?? '';
+    assert.ok(!text.includes('【额度恢复'), '不该反复补同一段：');
+    assert.match(text, /再聊一句/);
+  });
+
+  // 再次用尽。被 @ 时 `observe()` 自己就会 `void flush(...)`（不阻塞事件转发），
+  // 所以这里不能手动 flush——那条路会把批取空，只能等一拍看结果。
+  const settle = () => new Promise((r) => setTimeout(r, 30));
+  spent(2, 99999);
+  sent.length = 0;
+  say(70007, '@dsh-hub 在吗');
+  await settle();
+
+  check('用尽时被 @ ：不调模型，但兜一句固定话术（onExhaust=notice）', () => {
+    assert.equal(created.size, 1, '全程只有解限后那一次建会话，@ 也没再叫模型');
+    assert.equal(wakes.length, 2, '@ 没有变成新的一轮');
+    const frame = sent.map((s) => JSON.stringify(s.params ?? {})).join('');
+    assert.match(frame, /额度已经用完/);
+  });
+
+  quota.onExhaust = 'silent';
+  sent.length = 0;
+  say(70008, '@dsh-hub 还在吗');
+  await settle();
+  check('onExhaust=silent：一个字都不发', () => {
+    assert.equal(sent.length, 0, '静默就是静默');
+    assert.equal(wakes.length, 2, '也照样不调模型');
+  });
+
+  say(70009, '@dsh-hub 超管叫你', { userId: 10001 });
+  await settle();
+  check('superuserBypass 默认关：超管 @ 也不绕过', () => {
+    assert.equal(wakes.length, 2, '默认不豁免——账对全群一视同仁（用户 m13404 定案）');
+    assert.equal(sent.length, 0, 'onExhaust=silent 仍然生效');
+  });
+
+  quota.superuserBypass = true;
+  quota.onExhaust = 'notice';
+  say(70010, '@dsh-hub 超管放行', { userId: 10001 });
+  await settle();
+  check('superuserBypass=true：超管 @ 照常跑模型', () => {
+    assert.equal(wakes.length, 3, '这一轮真的跑了：');
+    // 真正跑过的只有三次：解限恢复、恢复后的下一轮、这次超管 @。
+    assert.equal(mind.stats.woken, 3);
+  });
+
+  quota.enabled = false;
+  say(70011, '随便聊');
+  const free = await mind.flush('group:70001', { reason: 'test:quota' });
+  check('没配额度就是没闸门（第一期行为原样）', () => {
+    assert.equal(free.woke, true);
+  });
+}
+
 // ------------------------------------------------------------------ 主流程
 
 const main = async () => {
@@ -4475,6 +4629,7 @@ const main = async () => {
   await scenarioMembers();
   await scenarioVision();
   await scenarioChatFeatures();
+  await scenarioQuotaGate();
 
   check('记忆写入全量：scope/visibility 只是标记，不丢条目', () => {
     assert.equal(first.store.stats.total >= 1, true);

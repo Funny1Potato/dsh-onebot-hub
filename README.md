@@ -69,7 +69,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | `agent.speakAssistantText` | 默认 `false`：**普通回复文本只是内部草稿，只有 `onebot_reply` 会真的发进聊天** |
 | `retention.days` | 原始报文与媒体保留天数（默认 7） |
 | `agent.replyGapMs` / `agent.replyMaxText` / `agent.replyMaxImages` | 一次回复发多条时的间隔（默认 400ms）、文字条数上限（默认 3，图另算）、图片上限（默认 9） |
-| `agent.quota` | 分群额度（**默认关、示例阈值全 0 ＝ 不限**）：`unit:'token'` 按输入+缓存+输出合算，`unit:'cost'` 按本群自填的每百万单价折钱（默认 CNY）；单群要单独定就在 `groups`/`privates` 条目里写同样的 `quota` 字段。第一期只记不拦，`/quota` 查、`/quota reset` 解限 |
+| `agent.quota` | 分群额度（**默认关、示例阈值全 0 ＝ 不限**）：`unit:'token'` 按输入+缓存+输出合算，`unit:'cost'` 按本群自填的每百万单价折钱（默认 CNY）；单群要单独定就在 `groups`/`privates` 条目里写同样的 `quota` 字段。用尽后那一批**只进记忆不调模型**（被 @ 兜一句固定话术，可关），恢复后下一轮补注入期间攒的最近 20 条原话；`/quota` 查、`/quota reset` 解限 |
 
 ## 聊天里的命令（13 条）
 

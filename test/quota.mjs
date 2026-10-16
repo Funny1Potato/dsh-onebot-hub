@@ -220,15 +220,17 @@ t('记账按会话隔离：群与私聊各记各的', () => {
 // ------------------------------------------------------------------ 解限
 
 t('waive：解限不减账，只让"剩余"变多；不给金额就是抹掉当期已用', () => {
-  const ledger = new QuotaLedger({ now: () => Date.parse('2026-03-04T10:00:00') });
+  const at = Date.parse('2026-03-04T10:00:00');
+  const ledger = new QuotaLedger({ now: () => at });
   ledger.note('group:5', msg(1, { input: 1000, output: 500 }));
   const cfg = normalizeQuota({ enabled: true, tokensPerDay: 10000 });
-  assert.match(ledger.render('group:5', cfg), /剩余 85\.0%/);
+  assert.match(ledger.render('group:5', cfg, at), /剩余 85\.0%/);
 
   ledger.waive('group:5', { scope: 'day', by: '123', amount: 1500 });
   assert.equal(ledger.usage('group:5').day.input, 1000, '原始账不动');
-  assert.equal(ledger.waived('group:5', 'day', localDayKey(Date.parse('2026-03-04T10:00:00'))), 1500);
-  assert.match(ledger.render('group:5', cfg), /剩余 100\.0%/, '解掉 1500 正好补回');
+  assert.equal(ledger.waived('group:5', 'day', localDayKey(at)), 1500);
+  // 第二句报数要越过冷却（默认 10 分钟）才准出。
+  assert.match(ledger.render('group:5', cfg, at + 11 * 60 * 1000), /剩余 100\.0%/, '解掉 1500 正好补回');
   assert.match(ledger.describe('group:5', cfg), /已解限 1,500 token/, '解限在明细里如实写出');
   assert.equal(ledger.waiversOf('group:5').length, 1);
 });
@@ -258,7 +260,8 @@ t('render：detail / percent / off 三种口径', () => {
   const detail = ledger.render('group:8', normalizeQuota(base), at);
   assert.match(detail, /^\[额度\] 本群 /);
   assert.match(detail, /今日 已用 1,000 token \/ 10,000 token（剩余 90\.0%）· 明日 00:00 重置/);
-  const percent = ledger.render('group:8', normalizeQuota({ ...base, notice: 'percent' }), at);
+  const later = at + 11 * 60 * 1000;
+  const percent = ledger.render('group:8', normalizeQuota({ ...base, notice: 'percent' }), later);
   assert.match(percent, /今日剩余 90\.0%/);
   assert.doesNotMatch(percent, /明日 00:00/);
   assert.equal(ledger.render('group:8', normalizeQuota({ ...base, notice: 'off' }), at), '');
@@ -273,7 +276,62 @@ t('render：私聊口径说"本私聊"，cost 口径带币种，noticeHint 加�
   assert.match(out, /本私聊/);
   assert.match(out, /已用 ¥12\.00 \/ ¥20\.00/);
   assert.match(out, /勿向群友播报额度/, '默认提醒模型这是内部参考');
-  assert.doesNotMatch(ledger.render('private:7', normalizeQuota({ ...cost, noticeHint: false }), at), /勿向群友播报/);
+  assert.doesNotMatch(
+    ledger.render('private:7', normalizeQuota({ ...cost, noticeHint: false }), at + 11 * 60 * 1000),
+    /勿向群友播报/,
+  );
+});
+
+t('render：冷却挡得住话痨群，但"快到/已经超"不挡（要超了正是模型该知道的时候）', () => {
+  const at = Date.parse('2026-03-04T10:00:00');
+  const ledger = new QuotaLedger({ now: () => at });
+  ledger.note('group:12', msg(1, { input: 1000 }));
+  const q = normalizeQuota({ enabled: true, tokensPerDay: 100000, noticeCooldownMs: 600000 });
+  assert.match(ledger.render('group:12', q, at), /剩余 99\.0%/);
+  assert.equal(ledger.render('group:12', q, at + 60 * 1000), '', '冷却期内不出声');
+  assert.match(ledger.render('group:12', q, at + 601 * 1000), /剩余 99\.0%/, '过了冷却再说');
+  assert.match(
+    ledger.render('group:12', normalizeQuota({ ...q, noticeCooldownMs: 0 }), at + 602 * 1000),
+    /剩余 99\.0%/,
+    '冷却设 0 = 每批都报',
+  );
+  // 逼近限额（剩余 ≤ 10%）不受冷却限制
+  const hot = normalizeQuota({ enabled: true, tokensPerDay: 1050, noticeCooldownMs: 600000 });
+  assert.match(ledger.render('group:12', hot, at), /剩余 4\.8%/);
+  assert.match(ledger.render('group:12', hot, at + 60 * 1000), /剩余 4\.8%/, '快超了每批都报');
+  // 已经超了更不能被冷却盖住
+  const over = normalizeQuota({ enabled: true, tokensPerDay: 1000, noticeCooldownMs: 600000 });
+  assert.match(ledger.render('group:12', over, at), /剩余 0\.0%/);
+  assert.match(ledger.render('group:12', over, at + 60 * 1000), /剩余 0\.0%/, '已超：每批都报');
+});
+
+t('state：日/月的 used/left/over 如实，解限后立刻不再超（不用清零）', () => {
+  const at = Date.parse('2026-03-04T10:00:00');
+  const ledger = new QuotaLedger({ now: () => at });
+  ledger.note('group:13', msg(1, { input: 1000 }));
+  const q = normalizeQuota({ enabled: true, tokensPerDay: 1000, tokensPerMonth: 100000 });
+  const before = ledger.state('group:13', q, at);
+  assert.equal(before.exhausted, true);
+  assert.equal(before.scope, 'day');
+  assert.equal(before.day.used, 1000);
+  assert.equal(before.day.left, 0);
+  assert.equal(before.day.over, true);
+  assert.equal(before.month.over, false);
+  assert.equal(before.month.left, 99000);
+
+  ledger.waive('group:13', { scope: 'day', by: '1', amount: 400 });
+  const after = ledger.state('group:13', q, at);
+  assert.equal(after.day.used, 600, '已用里减掉解限额');
+  assert.equal(after.day.left, 400);
+  assert.equal(after.exhausted, false, '解限即恢复，不需要清零');
+  assert.equal(after.scope, null);
+  assert.equal(ledger.usage('group:13', at).day.input, 1000, '原始账仍然不动');
+});
+
+t('state：没配额度一律不算超（默认关闭＝不拦）', () => {
+  const ledger = new QuotaLedger();
+  assert.equal(ledger.state('group:14', normalizeQuota({})).exhausted, false);
+  assert.equal(ledger.state('group:14', normalizeQuota({ enabled: true })).exhausted, false);
 });
 
 t('render：日月两条限额都在就都报，谁先到听谁的文案由限额各自给', () => {
