@@ -131,6 +131,19 @@ t('quotaOfEntry：额度只认白名单条目里那一份，没写就是不限�
   assert.equal(quotaOfEntry({ quota: { enabled: true, tokensPerDay: '5000' } }).tokensPerDay, 5000);
 });
 
+t('用尽话术：不填用默认，清空（空串/空白）也回默认，不该说出字面量 "0"（m14469）', () => {
+  const def = quotaOfEntry({ quota: {} }).exhaustedReply;
+  assert.equal(def, '本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。');
+  assert.equal(quotaOfEntry({ quota: { exhaustedReply: '' } }).exhaustedReply, def, '清空＝不填＝默认');
+  assert.equal(quotaOfEntry({ quota: { exhaustedReply: '   ' } }).exhaustedReply, def, '纯空白也当没填');
+  assert.equal(quotaOfEntry({ quota: { exhaustedReply: 0 } }).exhaustedReply, def, '数字 0 不是话术（设置页清空框曾写成 0）');
+  assert.equal(quotaOfEntry({ quota: { exhaustedReply: null } }).exhaustedReply, def);
+  assert.equal(quotaOfEntry({ quota: { exhaustedReply: '  明天见～  ' } }).exhaustedReply, '明天见～', '写了就用写的，顺手 trim 掉前后空格');
+  assert.equal(quotaOfEntry({ quota: { exhaustedReply: 'x'.repeat(400) } }).exhaustedReply.length, 300, '超长截断，别拿一整屏糊群');
+  // 想彻底闭嘴是另一件事：onExhaust:'silent'（面板上"用尽后的行为"）
+  assert.equal(quotaOfEntry({ quota: { onExhaust: 'silent' } }).onExhaust, 'silent');
+});
+
 t('quotaValue：token 口径合算三元组，cost 口径按每百万单价折算', () => {
   const row = { input: 1e6, cache: 2e6, output: 0.5e6 };
   assert.equal(quotaValue(row, { unit: 'token' }), 3.5e6);

@@ -474,6 +474,7 @@ await check('群白名单：额度按行配，「额度」面板里填口径/单
   // 改限额 → 保存 → 写回同一个 JSON 字符串，quota 挂在那一行上
   field('每日上限（CNY）').props.onChange({ target: { value: '9' } });
   field('报数冷却（秒）').props.onChange({ target: { value: '45' } });
+  field('用尽时的回话').props.onChange({ target: { value: '' } });   // 清空不该写出数字 0（那会真发一个字面量"0"）
   buttonsOf(app.render()).find((button) => textOf(button).startsWith('保存')).props.onClick();
   await new Promise((resolve) => setImmediate(resolve));
   const op = JSON.parse(JSON.stringify(app.mutations.at(-1))).find((row) => row.path.join('.') === 'agent.groups');
@@ -484,7 +485,9 @@ await check('群白名单：额度按行配，「额度」面板里填口径/单
   assert.equal(parsed[1].quota.costPerDay, 9, '数字要落成真数字');
   assert.equal(parsed[1].quota.noticeCooldownMs, 45000, '秒 → 毫秒');
   assert.equal(parsed[1].quota.price.output, 15, '没碰的单价照旧');
+  assert.equal(parsed[1].quota.exhaustedReply, '', '清空就是空串（归一那一步再回默认，不是 0）');
   assert.equal(parsed[1].mode, 'assist', 'mode 不受影响');
+  assert.equal(field('用尽时的回话').props.value, '', '设置页不替用户补默认值：框里就是空的，等重载配置时归一才回默认话术');
 });
 
 await check('群白名单：第一行没配额度，展开后勾上启用＋填上限就写进 quota（token 口径）', async () => {

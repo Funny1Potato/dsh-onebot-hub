@@ -147,7 +147,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `agent.groups[].quota.notice` | 字符串 | detail | **报数口径**：`detail` = 每批末尾给已用/限额/剩余；`percent` = 只给剩余百分比；`off` = 不出声。 |
 | `agent.groups[].quota.noticeHint` | 开关 | 开 | **顺带提醒模型省着点**：剩余不足时在给模型的指导里提一句，让它自己收着回话。 |
 | `agent.groups[].quota.onExhaust` | 字符串 | notice | **用尽后的行为**：`notice` = 被 @ 时回一句额度用完；`silent` = 一个字都不发。 |
-| `agent.groups[].quota.exhaustedReply` | 字符串 | 本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。 | **用尽时的回话**：额度用完且有人 @ 时，替模型发出去的那句固定话术（受 `noticeCooldownMs` 限流）。 |
+| `agent.groups[].quota.exhaustedReply` | 字符串 | 本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。 | **用尽时的回话**：额度用完且有人 @ 时，替模型发出去的那句固定话术（受 `noticeCooldownMs` 限流）。**不填或留空 = 用上面那句默认**；想彻底闭嘴请把 `onExhaust` 设成 `silent`。 |
 | `agent.groups[].quota.noticeCooldownMs` | 数字 | 600000 | **报数冷却（ms）**：两次报数之间至少隔这么久，防话痨群刷屏；快用完/已用完时豁免。设置页里填的是**秒**。 |
 | `agent.groups[].quota.superuserBypass` | 开关 | 关 | **超管 @ 也照常记**：默认关——超管 @ 不绕过额度；打开后超管 @ 照常调模型（记账照旧）。 |
 
