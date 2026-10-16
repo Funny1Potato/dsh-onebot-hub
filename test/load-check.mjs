@@ -413,6 +413,16 @@ check('Config schema 能填默认值', () => {
   assert.equal(plainConfig(filled.imageGen.delivery), 'agent');
   assert.equal(plainConfig(filled.imageGen.plugin.tool), '');
   assert.equal(plainConfig(filled.imageGen.plugin.timeoutMs), 180000);
+  // 分群额度（m13404）：默认关 + 示例阈值全 0 —— 不配就是不限，所以别哪天手滑填了示例数字。
+  assert.equal(plainConfig(filled.agent.quota.enabled), false);
+  assert.equal(plainConfig(filled.agent.quota.unit), 'token');
+  assert.equal(plainConfig(filled.agent.quota.tokensPerDay), 0);
+  assert.equal(plainConfig(filled.agent.quota.tokensPerMonth), 0);
+  assert.equal(plainConfig(filled.agent.quota.costPerDay), 0);
+  assert.equal(plainConfig(filled.agent.quota.costPerMonth), 0);
+  assert.equal(plainConfig(filled.agent.quota.currency), 'CNY');
+  assert.equal(plainConfig(filled.agent.quota.notice), 'detail');
+  assert.equal(plainConfig(filled.agent.quota.superuserBypass), false);
 });
 
 check('设置页文字：每一个配置项在 client.js 里都有中文名与说明，且不多不少', () => {

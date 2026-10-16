@@ -124,6 +124,29 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `agent.replyMaxText` | 数字 | 3 | **一次回复最多几条文字**：只限文字消息的条数——图片不占额度（图另有上限）。超出部分不发送，并在工具回执里如实告知模型。 |
 | `agent.replyMaxImages` | 数字 | 9 | **一次回复最多几张图**：图片/表情包的条数上限（每张各自发一条消息）。0 = 不限。 |
 
+### 分群额度（每个群/私聊各记各的）
+
+第一期（m13404）**只记不拦**：把每个会话的 token/花费按本地日与月记账，在每批末尾给模型报一行数，`.quota` 命令随时能查；**不会**因为超限而拒绝回复。限额全是 `0` = 不限（默认如此，不配就是不限）。单个会话要单独定额度，就在 `groups`/`privates` 条目里写同样的字段（字段级覆盖全局默认）。账本只存输入/缓存/输出三元组原值，**钱是读取时现算的**——改单价、换口径都自动重算。
+
+| 键 | 类型 | 默认 | 作用 |
+| --- | --- | --- | --- |
+| `agent.quota.enabled` | 开关 | 关 | **分群额度总开关**：打开后才记。默认关，不配就是不限。 |
+| `agent.quota.unit` | 字符串 | token | **额度口径**：`token` = 输入+缓存+输出合算（不区分输入输出）；`cost` = 按下面自填单价折钱。 |
+| `agent.quota.tokensPerDay` | 数字 | 0 | **每日 token 上限**：按本地自然日重置；0 = 不限。 |
+| `agent.quota.tokensPerMonth` | 数字 | 0 | **每月 token 上限**：按本地自然月重置；0 = 不限。日与月谁先到听谁的。 |
+| `agent.quota.costPerDay` | 数字 | 0 | **每日花费上限**：`unit:'cost'` 时才看，单位是 `currency` 那个币种；0 = 不限。 |
+| `agent.quota.costPerMonth` | 数字 | 0 | **每月花费上限**：同上，按本地自然月重置；0 = 不限。 |
+| `agent.quota.currency` | 字符串 | CNY | **币种**：只影响账本显示与文案，不做换算。 |
+| `agent.quota.price.input` | 数字 | 0 | **输入单价（每百万 token）**：群里自填；改了自动按新价重算历史账。 |
+| `agent.quota.price.cache` | 数字 | 0 | **缓存单价（每百万 token）**：命中缓存那部分的单价。 |
+| `agent.quota.price.output` | 数字 | 0 | **输出单价（每百万 token）**：通常最贵的一项。 |
+| `agent.quota.notice` | 字符串 | detail | **报数口径**：`detail` = 每批末尾给已用/限额/剩余；`percent` = 只给剩余百分比；`off` = 不出声。 |
+| `agent.quota.noticeHint` | 开关 | 开 | **顺带提醒模型省着点**：剩余不足时在给模型的指导里提一句，让它自己收着回话。 |
+| `agent.quota.onExhaust` | 字符串 | notice | **用尽后的行为（第二期才生效）**：`notice` = 回一句额度用完；`silent` = 不吭声。 |
+| `agent.quota.exhaustedReply` | 字符串 | 本群今天的额度已经用完了，我先歇会儿，明天 00:00 自动恢复。 | **用尽时的回话（第二期才生效）**：额度用完时替模型发出去的那句固定话术。 |
+| `agent.quota.noticeCooldownMs` | 数字 | 600000 | **报数冷却（ms）**：两次报数之间至少隔这么久，防话痨群刷屏。 |
+| `agent.quota.superuserBypass` | 开关 | 关 | **超管 @ 也照常记（第二期才生效）**：默认关——超管 @ 不绕过额度。 |
+
 ## 能力闸门（谁能写、能不能探测）
 
 安全面：写操作与危险 action 默认**拒绝**，工具不能绕过这里的闸门。

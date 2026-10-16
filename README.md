@@ -69,8 +69,9 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | `agent.speakAssistantText` | 默认 `false`：**普通回复文本只是内部草稿，只有 `onebot_reply` 会真的发进聊天** |
 | `retention.days` | 原始报文与媒体保留天数（默认 7） |
 | `agent.replyGapMs` / `agent.replyMaxText` / `agent.replyMaxImages` | 一次回复发多条时的间隔（默认 400ms）、文字条数上限（默认 3，图另算）、图片上限（默认 9） |
+| `agent.quota` | 分群额度（**默认关、示例阈值全 0 ＝ 不限**）：`unit:'token'` 按输入+缓存+输出合算，`unit:'cost'` 按本群自填的每百万单价折钱（默认 CNY）；单群要单独定就在 `groups`/`privates` 条目里写同样的 `quota` 字段。第一期只记不拦，`/quota` 查、`/quota reset` 解限 |
 
-## 聊天里的命令（12 条）
+## 聊天里的命令（13 条）
 
 只有 `chatCommands.superUsers` 里的账号能用（**留空 = 整条命令链沉默**）。别人敲同样的字，枢纽一声不吭——回一句"你没权限"等于告诉全群这里有个能管事的 bot。
 
@@ -78,7 +79,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 
 | 命令 | 别名 | 作用 |
 | --- | --- | --- |
-| `help` | `帮助` `?` | 列出这 12 条 |
+| `help` | `帮助` `?` | 列出这 13 条 |
 | `status` | `状态` | 链路、模式、时间线、运行时长、人设、表情包一屏概览 |
 | `presets` | `preset` `预设` | 列出可用人设预设（`→` 表示本会话在用） |
 | `set_preset <预设名>` | `set_presets` `设置预设` | 把本会话切到某个预设 |
@@ -90,6 +91,7 @@ pnpm add github:Funny1Potato/dsh-onebot-hub
 | `model [provider/model｜编号｜default]` | `模型` `聊天模型` | 看 / 换本会话的聊天模型 |
 | `vmodel [provider/model｜编号｜default]` | `视觉模型` `识图模型` | 看 / 换本会话的识图模型 |
 | `reset` | `重置` | 本会话的人设绑定与模型选择回初始（**不动长期记忆**） |
+| `quota [reset [额度]]` | `额度` | 查本群/私聊今天与本月的额度用量；`reset` 把今天已用抹掉（解限到当期结束，带数字＝追加额度） |
 
 三条要知道的语义：
 
