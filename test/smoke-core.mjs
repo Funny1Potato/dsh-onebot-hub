@@ -401,7 +401,8 @@ t('每条消息行都带日期和时间（只有 HH:MM 分不清跨天）', () =
     payload: { post_type: 'message', message_type: 'group', group_id: 55555 },
   }];
   const win = renderWindow(events, { selfId: 20002000 });
-  assert.match(win, /^01-09 08:12 小明：你还在吗$/m, `窗口行没带日期：\n${win}`);
+  // 显示名口径（`m15264`）：昵称 + QQ 号，群名片只作同群附注。
+  assert.match(win, /^01-09 08:12 小明\(10001\)：你还在吗$/m, `窗口行没带日期：\n${win}`);
   const card = renderDigest(buildDigest(events));
   assert.match(card, /^- 01-09 08:12 小明\(10001\)：你还在吗$/m, `会话卡行没带日期：\n${card}`);
   const resumed = { ...buildDigest(events), resumed: true, savedAt: at };
@@ -953,14 +954,17 @@ t('档案：名字跟着群走、档案跟着人走；系统字段与禁区不�
   profiles.noteName('10001', '明哥', 'group:77777', at + 2000);
   profiles.noteGroupCard('10001', 'group:55555', { card: '小明同学', role: 'admin', title: '课代表' }, at + 3000);
   const p = profiles.person('10001');
-  assert.equal(p.names.length, 3, '群名片也算一个名字');
-  assert.equal(nameIn(p, 'group:55555'), '小明同学', '同一个群里有名片就用名片');
+  // `m15264`：昵称才是跨群唯一的身份，名片是**每个群各一份**的观测，不再并进 `names[]`
+  // （否则"这个人是谁"会在 A 群/B 群之间来回飘）。名片留在同群档案里按需附注。
+  assert.equal(p.names.length, 2, '群名片不算一个名字（它是同群附注，不是身份）');
+  assert.equal(nameIn(p, 'group:55555'), '小明', '同一个群里用昵称，名片不顶替');
+  assert.equal(p.groups['group:55555'].card, '小明同学', '名片仍在群档案里没丢');
   assert.equal(nameIn(p, 'group:77777'), '明哥', '名字跟着群走');
   assert.equal(p.groups['group:55555'].role, 'admin');
 
   // 模型改不了系统字段：`upsertPerson` 只认白名单（names/groups 不在其中）。
   profiles.upsertPerson('10001', { names: [{ name: '假名字' }], groups: {}, impression: '话不多' }, at + 4000);
-  assert.equal(profiles.person('10001').names.length, 3);
+  assert.equal(profiles.person('10001').names.length, 2);
   assert.equal(profiles.person('10001').impression, '话不多');
   // 亲近度夹在 -5..5
   profiles.upsertPerson('10001', { relationship: { closeness: 99 } }, at + 5000);
@@ -1056,8 +1060,8 @@ t('本群认识的人：一行一人、只列本群、排除当前对话者与 b
   });
   assert.match(text, /【本群认识的人】/);
   assert.match(text, /onebot_person/, '得告诉模型细节去哪儿查');
-  assert.match(text, /- 老张（10002）｜印象：话不多但靠谱｜知道 2 件事｜有 1 件没兑现的承诺/, '名片与名字相同时不重复写（真机上一半人名片＝昵称）');
-  assert.match(text, /- 10003（10003）/, '没内容的人也列，只是信息少——这是"我认识他"的事实');
+  assert.match(text, /- 老张\(10002\)｜印象：话不多但靠谱｜知道 2 件事｜有 1 件没兑现的承诺/, '名片与名字相同时不重复写（真机上一半人名片＝昵称）');
+  assert.match(text, /^- 10003$/m, '没内容的人也列，只是信息少——这是"我认识他"的事实（只有 QQ 号时不重复包一层括号）');
   assert.ok(!text.includes('10001'), '当前对话对象有自己的完整卡片，不重复列');
   assert.ok(!text.includes('30001'), 'bot 自己不是"认识的人"');
   assert.ok(!text.includes('张工') && !text.includes('20002'), '别的群的人不进这个群的名单');
@@ -1122,7 +1126,8 @@ t('本群认识的人：同一天里谁又冒泡，名单文本必须逐字不�
   p3.noteGroupCard('10003', 'group:55555', { card: '小王', lastSentAt: base }, base);
   p3.noteGroupCard('10004', 'group:55555', { card: '小李', lastSentAt: base - 20 * 3600_000 }, base);
   const days = renderPeopleRoster(p3.persons(), { worldKey: 'group:55555', sessionKey: 'group:55555', limit: 20 });
-  const order = [...days.matchAll(/^- ([^（]+)/gm)].map((m) => m[1]);
+  // 显示名是 `昵称(QQ)`（半角括号，`m15264`），取到 `(` 之前就是名字本身。
+  const order = [...days.matchAll(/^- ([^(（｜]+)/gm)].map((m) => m[1]);
   assert.deepEqual(order, ['老张', '小王', '小李'], '跨天时按最近露面的先后排');
 });
 

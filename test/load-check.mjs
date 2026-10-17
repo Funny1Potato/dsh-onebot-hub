@@ -23,6 +23,8 @@ import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientRe
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
 import { COMMAND_SPECS } from '../lib/chat-commands.js';
+import { filterForScope, resolveIsolation, setGroupMembershipProvider } from '../lib/memory/isolation.js';
+import { inferWriteVisibility } from '../lib/memory/writer.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1718,6 +1720,92 @@ async function runAsyncChecks() {
     assert.equal(typeof list.count, 'number');
     const unknown = JSON.parse(await toolOf('onebot_person').execute({ userId: '99999999', sessionKey: 'group:55555' }));
     assert.equal(unknown.empty, true, '没观测到的人应明确回 empty，而不是给一个空壳档案');
+  });
+
+  // `m15264`：长期记忆不该因为"进了长期库"就变成跨群可念的公共知识。
+  // 以前 `long_term.add` 一律盖 shareable，A 群"小张下周离职"到 B 群照样原样说出来。
+  await checkAsync('记忆的「讲的是谁」：写进去就带上、点名错了会说、跨群按成员表放行或拦截', async () => {
+    const t = toolOf('onebot_memory');
+    const ctxArg = { sessionKey: 'group:55555', actorId: '10002' };
+
+    // ① 模型点名了"这条讲的是谁" → 落盘带上 relatedUsers，且**不再是** shareable。
+    const r = JSON.parse(
+      await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '小张下周离职', related_users: ['10002'] }] } } }),
+    );
+    assert.equal(r.applied.long_term.add, 1, JSON.stringify(r));
+    const rec = hub.store.all().find((e) => e.text === '小张下周离职');
+    assert.deepEqual(rec.relatedUsers, ['10002'], 'related_users 必须落盘，读取侧才拦得住');
+    assert.notEqual(rec.visibility, 'shareable', '点了名的记忆不能是 shareable');
+
+    // ② 写了名字而不是 QQ 号 → 照落盘，但要说出来（不静默）：模型得知道 QQ 号才拦得住。
+    const rn = JSON.parse(
+      await t.execute({ ...ctxArg, ops: { short_term: { add: [{ text: '老王会修车', related_users: ['老王'] }] } } }),
+    );
+    assert.ok(
+      rn.rejected.some((x) => /related_users/.test(x.path) && /QQ 号/.test(x.reason)),
+      JSON.stringify(rn.rejected),
+    );
+    assert.equal(hub.store.all().find((e) => e.text === '老王会修车').relatedUsers, null);
+
+    // ③ 人物档案的 fact 自动等于"讲的是这个人"，不用模型点名（档案本身就是按人存的）。
+    const rf = JSON.parse(
+      await t.execute({ ...ctxArg, ops: { persons: { 10003: { facts: [{ text: '他养了三只猫' }] } } } }),
+    );
+    assert.equal(rf.applied.persons, 1, JSON.stringify(rf));
+    const pFact = hub.profiles.person('10003').facts.find((f) => f.text === '他养了三只猫');
+    assert.deepEqual(pFact.relatedUsers, ['10003']);
+    assert.notEqual(pFact.visibility, 'shareable');
+
+    // ---- 读取侧：闸门本体（用 open 级别，才能看清"点名的人"这一层自己放不放行）----
+    const open = resolveIsolation({ level: 'open', crossGroupFacts: 'all', crossGroupIdentity: true });
+    const named = { id: 'e1', kind: 'fact', scope: 'group:55555', visibility: 'group:55555', text: '小张下周离职', relatedUsers: ['10002'] };
+    const plain = { id: 'e2', kind: 'fact', scope: 'group:55555', visibility: 'shareable', text: '这个群爱聊硬件' };
+
+    setGroupMembershipProvider(null);
+    assert.equal(
+      filterForScope([named, plain], { sessionKey: 'group:66666', isolation: open }).visible.map((e) => e.id).join(','),
+      'e2',
+      '没有成员表时：有名字的拦掉、没名字的照旧放行',
+    );
+    assert.equal(filterForScope([named], { sessionKey: 'group:55555', isolation: open }).visible.length, 1, '同群不受这条闸门影响');
+
+    const withMembers = (ids) => setGroupMembershipProvider((gid) => (gid === 'group:66666' ? { ids: new Set(ids), complete: true, at: Date.now() } : null));
+    withMembers(['10002', '10001']);
+    assert.equal(filterForScope([named], { sessionKey: 'group:66666', isolation: open }).visible.length, 1, '这些人都在这个群里 → 放行');
+    withMembers(['10001']);
+    assert.equal(filterForScope([named], { sessionKey: 'group:66666', isolation: open }).visible.length, 0, '人不在这个群 → 拦');
+
+    // 不完整的成员表不能当"人不在"的证据，但也别当成"人在"：一律拦。
+    setGroupMembershipProvider((gid) => (gid === 'group:66666' ? { ids: new Set(['10002']), complete: false, at: Date.now() } : null));
+    assert.equal(filterForScope([named], { sessionKey: 'group:66666', isolation: open }).visible.length, 0, '表不完整 → 拦');
+
+    // ---- 群档案里的成员表本身 ----
+    const now = hub.profiles.now();
+    hub.profiles.noteGroupMembers('group:77777', ['1', '2', '3'], { at: now });
+    assert.equal(hub.profiles.inGroupMembers('group:77777', '2'), true);
+    assert.equal(hub.profiles.inGroupMembers('group:77777', '9'), false);
+    assert.equal(
+      hub.profiles.groupMembers('group:77777', { now: now + 8 * 24 * 60 * 60 * 1000 }),
+      null,
+      '成员表过期后按"查不到"处理，不能一直当证据用',
+    );
+    hub.profiles.markGroupMembersStale('group:77777', now);
+    assert.equal(hub.profiles.inGroupMembers('group:77777', '2'), null, '失效的表 → 查不到（三态里的 null，不是 false）');
+
+    // 写侧单测：点名的长期记忆一定不是 shareable。
+    assert.equal(inferWriteVisibility({ block: 'long_term', scope: 'group:55555', sessionKey: 'group:55555', text: 'x' }), 'shareable');
+    assert.notEqual(
+      inferWriteVisibility({ block: 'long_term', scope: 'group:55555', sessionKey: 'group:55555', text: 'x', relatedUsers: ['10002'] }),
+      'shareable',
+    );
+    assert.equal(
+      inferWriteVisibility({ block: 'long_term', scope: 'private:10002', sessionKey: 'private:10002', text: 'x', relatedUsers: ['10002'] }),
+      'private',
+      '私聊来源仍然一票 private',
+    );
+
+    // 复原成插件自己装的那个 provider，别把后面的用例带偏。
+    setGroupMembershipProvider((gid) => hub.profiles?.groupMembers?.(gid) ?? null);
   });
 
   await checkAsync('onebot_recall：没开存储时说明原因，而不是假装"没搜到"', async () => {

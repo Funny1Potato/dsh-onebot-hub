@@ -263,7 +263,7 @@ async function scenarioReply() {
   check('消息只在批次 user message 出现一次，且按说话人标注（不把自己标成"我"）', () => {
     // 入站事件的 self_id 就是本 bot 账号，早期用 e.selfId 判"我"会把别人的话标成"我：…"。
     assert.ok(!/我：hub 你在吗/.test(followup), `批次把自己收到的消息标成了"我"：\n${followup}`);
-    assert.match(followup, /小明(?:\(member\))?：hub 你在吗/);
+    assert.match(followup, /小明\(10001\)\(member\)：hub 你在吗/);
     const hits = followup.split('hub 你在吗').length - 1;
     assert.equal(hits, 1, `"hub 你在吗" 在批次里出现 ${hits} 次（镜像重复注入=真机事故 #3）：\n${followup}`);
   });
@@ -353,7 +353,7 @@ async function scenarioReply() {
   const withRoster = mind.liveContext('group:55555');
   check('本群认识的人进上下文：只列本群、不展开别人 facts、不写相对时间（m09409）', () => {
     assert.match(withRoster, /【本群认识的人】/);
-    assert.match(withRoster, /- 老张（10002）｜印象：话不多但靠谱｜知道 1 件事/);
+    assert.match(withRoster, /- 老张\(10002\)｜印象：话不多但靠谱｜知道 1 件事/);
     assert.ok(!withRoster.includes('张工'), '别的群认识的人不进这个群的名单');
     assert.ok(!withRoster.includes('做后端'), '别人的 facts 正文不展开（只给条数，细节走 onebot_person）');
     assert.ok(!/张工?\D{0,20}\d+ (分钟|小时|天)前/.test(withRoster), '不渲染相对时间：它一变整份快照就被判成新的一份');
@@ -3828,10 +3828,11 @@ async function scenarioMembers() {
     assert.equal(snap.pending, 0);
   });
 
-  check('成员解析·写档案：问回来的群名片进了档案（走的是同一条观测路）', () => {
+  check('成员解析·写档案：问回来的昵称/群名片各进各的（走的是同一条观测路）', () => {
     const person = hub.profiles.person('10002');
-    assert.equal(nameIn(person, 'group:55555'), '刚哥', '群名片优先');
-    assert.equal(person.names.some((n) => n.scope === 'group:55555' && n.name === '刚哥'), true);
+    // `m15264`：昵称是跨群身份（`names`），名片是这个群的叫法（`groups[world].card`）。
+    assert.equal(nameIn(person, 'group:55555'), '小刚', '昵称才是身份');
+    assert.equal(person.groups['group:55555'].card, '刚哥', '名片留在同群档案里');
   });
 
   // 再 @ 一次：这次档案里有名字了，段语义化应当直接叫名字，且不再打上游。
@@ -3842,7 +3843,9 @@ async function scenarioMembers() {
 
   check('成员解析·下一句就叫得出名字（这一条也不再问上游）', () => {
     assert.equal(asked.length, before, '已经认识的人不再打扰实现端');
-    assert.match(entry.text, /@刚哥/, '渲染成人话时用的是档案里的名字');
+    // @ 别人保持 `@名字` 原样（`m15264` 用户拍板）：@ 只用来指人，不必把 QQ 号和名片都塞进来。
+    assert.match(entry.text, /@小刚(?!·)/, '渲染成人话时用昵称，而不是群名片');
+    assert.doesNotMatch(entry.text, /@刚哥/);
     assert.doesNotMatch(entry.text, /@用户10002/);
   });
 
