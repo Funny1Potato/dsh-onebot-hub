@@ -581,8 +581,8 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 - **发到 npm**：`.github/workflows/publish.yml`，走 **npm Trusted Publishing**（OIDC 免 token，provenance 自动附带，仓库里不需要任何 npm secret）。`git push origin vX.Y.Z` 触发——先校验 tag 与 `package.json` 版本一致，再跑一遍测试，然后 `npm publish`；发布成功后自动建同名 GitHub Release（自动生成 notes，附上与 npm 同一内容的 tarball）。前置条件：包已在 npmjs.com 上存在，并且在 npmjs.com → 包 → Settings → Trusted publishing 里登记本仓库为 trusted publisher（repository `Funny1Potato/dsh-onebot-hub`，workflow 文件名填 `publish.yml`；2026-09 之后新建的配置默认只允许 `npm stage publish`，要手动勾上直接 `npm publish` 的许可）。**首发例外**：包还不存在时 OIDC 无处落地，先用本地登录的 npm 把 0.1.0 发出去（或 `npm stage publish`），登记好配置后，之后的版本才由 CI 发。手动触发默认只 dry-run，只跑测试和 `npm pack --dry-run`。
 - 本机 `npm publish` 如果报 `DEPTH_ZERO_SELF_SIGNED_CERT`（公司/杀软 TLS 拦截），加 `NODE_OPTIONS=--use-system-ca`；CI 上不受影响。
 
-- **版本号规则：`0.x.y-z`（`m16688` 用户定案，2026-10-17）**。`x` = 大版本，只在**重大功能改动**时才加；`y` = 小版本，有**新功能、较大的修复或调整**时加；`z` = 补丁，用于**小改动与小 bug 修复**。落到动作上：小补丁不碰 `y`，只往 `z` 上爬（`0.1.9` → `0.1.9-1` → `0.1.9-2`）；攒到够分量的一次才轮到 `y`（`0.1.9-x` → `0.2.0`）。**发版前必须先问用户要哪个号，不许自己拍**——2026-10-17 那次就是自作主张把 `0.1.10` 推上 tag，被叫停（好在 npm 那步被取消，没发出去）。
-  两点技术事实要记住：①`0.1.9-1` 在 semver 里是**预发布**，排序**低于** `0.1.9`，所以 `^0.1.9` 这类范围匹配不到它，装它得用**精确版本**（`dsh plugin add dsh-onebot-hub@0.1.9-1`）；②发布后要确认 `latest` 真的指向它（`npm view dsh-onebot-hub dist-tags`）——npm 对预发布号的 dist-tag 行为一直不稳定，必要时在 `publish.yml` 里显式 `--tag latest`。`publish.yml` 的"tag 与 package.json 一致"校验照旧，tag 写成 `v0.1.9-1`。
+- **发版前先问用户要哪个版本号，不许自己拍**（2026-10-17 的教训：自作主张把 `0.1.10` 推上 tag，被叫停）。具体编号方案还没有定，等用户定下来再写进这里。
+
 
 ### 示例值约定
 
