@@ -55,17 +55,17 @@ Everything else in this README is in Chinese.
 
 ## 3. 安装
 
-插件就是一个普通 npm 包（无构建步骤，纯 ESM；唯一的运行时依赖是 `ws`）。DSH 的插件管理器用 `pnpm add <spec>` 把它装进当前 profile，所以 **Git 源直接可用**：
+插件就是一个普通 npm 包（无构建步骤，纯 ESM；唯一的运行时依赖是 `ws`；**包内自带编译好的 `lib/`**），已发布到 npm。DSH 的插件管理器本质就是 `pnpm add <spec>` 装进当前 profile，所以首选 npm 源装：
 
 ```sh
-# 1) 装进 profile（DSH 插件管理器的等价命令）
-cd ~/.dsh/profiles/<你的 profile>
-pnpm add github:Funny1Potato/dsh-onebot-hub
+# 1) 装进 profile（DSH 插件管理器把参数转给该 profile 目录下的 pnpm）
+dsh plugin --profile <你的 profile> add dsh-onebot-hub
+# 等价写法：cd ~/.dsh/profiles/<你的 profile> && pnpm add dsh-onebot-hub
 # 本地开发：pnpm add file:D:/path/to/dsh-onebot-hub
+# 或 Git 源：pnpm add github:Funny1Potato/dsh-onebot-hub（拉的是源码，需要 prepare 脚本并放行构建）
 
-# 2) 装配：把插件加进 profile 的 cordis 补丁
-#    本包自带的 cordis.patch.yml 内容等价于下面三行
-#    （DSH 设置页里改配置同样会即时重挂，不用手改）
+# 2) 装配：包内声明了 dsh.bundle（指向自带的 cordis.patch.yml），装好即并入 profile 插件层，
+#    默认不需要手改配置；个别版本没自动并入时，再把下面三行追加到 profile 的 cordis.patch.yml
 - insert:
     - id: onebot-hub
       name: 'dsh-onebot-hub'
@@ -744,6 +744,8 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 - **额度提示的措辞从"硬禁令"降成"看场合"（用户 m14543"给 agent 播报额度时的'勿向群友播报额度'改成'不要轻易播报额度'"）**：`noticeHint` 那句提示原文是 `（仅内部参考，勿向群友播报额度）`，改成 `（仅内部参考，不要轻易播报额度）`，只动这一句（`lib/quota.js` 的 `render()`）。理由：额度**该不该说、什么时候说本来就是模型看场合的判断**——被直接问"今天花了多少"、或者需要为"我得省着点回话"找理由时，说出来恰恰是对的；"勿"这个字读起来像外部禁令，模型可能因此在该说的时候也不敢说（"不轻易"≠"禁止"）。前半句"仅内部参考"保持不变——那半句才是硬信息（这行是给你看的参考，不是要你复述给群友），后半句负责留出判断余地。`test/quota.mjs` 那两条正则（断言出现 / `noticeHint:false` 时不出现）跟着改文案，没变语义。
 
 - **账键从"会话"归一成"群/私聊"：额度按群设，账也必须按群记（用户 m14570"看新日志，已用额度并没有统计进去"）**：真机现象是报数行连着 4 次都写「已用 0 token / 1,000,000 token（剩余 100.0%）」，而 `/quota` 也查不到。取证发现**记账本身没丢**——同一个群 617770183 在 `quota/ledger.json` 里躺着两份账 `group:617770183.amvb5sjddkj1z` 与 `group:617770183.amvb6582p0npd`，把日志里 4 条带 `usage` 的 `assistant/message` 求和（input 8531 / cache 89152 / output 642 / turns 2）跟其中一份**逐项吻合**。根因在**键形有两套**：`lib/index.js` 的 `sessionIdOf()` 给每次激活的 sessionId 追加 `.a<base36><rand>` 后缀（为了"每次激活一个全新会话、永不 resume 旧转录"，见其 `:4647-4649`），`quotaLedger.note()` 拿宿主会话 id 反解出来的 agentKey 就带着这个后缀；而读侧（`lib/mind.js` 的报数行与额度闸门、`commandServices.quota` 的 view/reset）拿的是批次侧的裸键 `group:123`（`lib/protocol.js` 的 `sessionKey()`）。于是同群每换一次会话（预设切换、休眠退役、active/observer 并行）就是一份全新的空账，用户看两个入口都只看得见当前那一小段。修法：新增导出 `quotaKey(sessionKey)`（截掉第一个点号之后的会话短 id），在 `#entry/usage/waived/waiversOf/render/describe` **与 `note()` 落键**六处统一归一；`load()` 顺带做**旧账迁移**——按归一键落盘、已存在则 `mergeEntry` 相加（days/months 逐期 `mergeRow` 相加、firstAt 取早、lastAt 取晚，waivers 跟着并），`migrated` 时立刻 `#scheduleSave()` 落回磁盘，免得每晚都并一次同一份历史。三条边界：①**配置匹配一律不动**——`quotaConfigFor` 走 `sessionOverrideOf(完整 sessionKey)`，白名单条目 id 是群号/QQ 号，那条路的键形跟账本不是一回事，跟着归一会把白名单匹配也弄坏；②`note()` 的**去重水位必须按 `sessionId` 分桶**（不是按群）：账归一之后若水位还按群，同群两个会话各数各的 seq，B 会话的事件会被当成 A 的旧事件丢掉；③`lib/mind.js` 的 `#quotaHeld`（用尽期间攒的原话）与 `#quotaSaid`（兜底话术冷却）也一并改成按 `quotaKey` 存——额度按群设，会话中途换一次时攒下的原话不该跟着会话丢（换会话后新会话的开局快照已覆盖这段群聊，所以 `#retireAfterDormant` 里的 `delete` 也照旧要留，只是键换了）。回归：`test/quota.mjs` +5 例（`quotaKey` 各种形态含 null/空串、同群换会话账接着走且落盘只剩一个键、水位按 sid 分桶、迁移时两旧键相加且 waivers 跟着并、裸键已存在时并入不覆盖）。排查期写的两个临时脚本 `test/_quota-log.mjs`（解 `session.v4.jsonl.zstd` 逐帧 `zstdDecompressSync` 后 grep `[额度]`／usage）与 `test/_quota-repro.mjs`（用真 ledger + 假 storage 直接渲染）已删；顺带记一条它们的教训：`JsonStore.read` 是**同步**的（`lib/storage.js`），假 storage 要同步返回**已 parse 的对象**，`async` 或返回原始字符串都会让 `load()` 静默当成"没有历史"。
+
+- **安装方式从 Git 源改成 npm 源（用户 m15174"把readme中的安装方法改成用npm安装吧"）**：README 的「安装」与本文 §3 原先都写 `pnpm add github:Funny1Potato/dsh-onebot-hub`，卖点是"Git 源直接可用"。改成首选 npm 包名 `dsh plugin --profile <你的 profile> add dsh-onebot-hub`（`dsh plugin` 只是把参数转给该 profile 目录下的 pnpm——实测 `dsh plugin --profile desktop --help` 直接吐出 pnpm 自己的帮助；等价的手写形式是 `cd ~/.dsh/profiles/<profile> && pnpm add dsh-onebot-hub`）。理由两条：①**npm 包里已经带了编译产物**（`files` 里有 `lib/**/*.js`，包本身无构建步骤），装完即用；Git 源拿到的是源码，要自带可跑的 `prepare` 脚本、还要用户 profile 的 `pnpm-workspace.yaml` 里 `allowBuilds` 放行，多两道坎；②npm 发布走 Trusted Publishing，带 provenance 签名，来得可核。**装配那一步的性质也变了**：包内声明了 `dsh.bundle.patch: ./cordis.patch.yml`（内容就是插入 `- id: onebot-hub / name: 'dsh-onebot-hub'`），`dsh plugin add` 跑完 profile 的 `dsh.profile.bundles` 会把带 `dsh.bundle` 的依赖并进插件层，所以**手改 `cordis.patch.yml` 从"必做"降级为"兜底"**（文档里仍留着那三行，写明"万一个别版本没自动并入"）。真机 profile `desktop` 正好是同一条路的两半：`dependencies` 里是 `dsh-onebot-hub: link:D:/DSH-workspace/DSH-QQ/dsh-onebot-hub`（本地开发版），`dsh.profile.bundles` 里有 `dsh-onebot-hub`，而实例配置写在 profile 自己的 `cordis.patch.yml`（覆盖 bundle 补丁插进来的默认行）。开发版两条路（`file:` 本地路径、Git 源）在 README 里保留成一句话提示，没删——自测插件的人还是得走它们。
 
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）

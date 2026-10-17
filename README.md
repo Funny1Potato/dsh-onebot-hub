@@ -23,22 +23,32 @@ Install, configure and behavior notes are in Chinese below.
 
 ## 安装
 
-插件是纯 ESM、无构建步骤，运行时只依赖 `ws`。DSH 用 `pnpm add` 把它装进 profile，**Git 源直接可用**：
+插件已发布到 npm：[`dsh-onebot-hub`](https://www.npmjs.com/package/dsh-onebot-hub)。包是纯 ESM、运行时只依赖 `ws`，并且**自带编译好的 `lib/`**——从 npm 装完即用，不需要构建。
+
+用 DSH 的插件管理器装进某个 profile（`<你的 profile>` 换成 profile 名，如 `desktop`）：
+
+```sh
+dsh plugin --profile <你的 profile> add dsh-onebot-hub
+```
+
+这条命令把参数转给该 profile 目录下的 pnpm，所以等价的写法是：
 
 ```sh
 cd ~/.dsh/profiles/<你的 profile>
-pnpm add github:Funny1Potato/dsh-onebot-hub
+pnpm add dsh-onebot-hub
 ```
 
-再往该 profile 的 `cordis.patch.yml` 追加（不要动已有条目）：
+包内声明了 `dsh.bundle`，装好后会被并入 profile 的插件层，**默认不需要手改 `cordis.patch.yml`**。然后**重启 DSH**（或直接在设置页 →「OneBot 枢纽」里配置并保存，效果与手改配置后重挂一致）。
 
-```yaml
-- insert:
-  - id: onebot-hub
-    name: 'dsh-onebot-hub'
-```
-
-然后**重启 DSH**（或直接在设置页 →「OneBot 枢纽」里配置并保存，效果与手改配置后重挂一致）。
+> 万一个别版本的 DSH 没有自动并入插件层，就在该 profile 的 `cordis.patch.yml` 追加下面三行（不要动已有条目）再重启：
+>
+> ```yaml
+> - insert:
+>   - id: onebot-hub
+>     name: 'dsh-onebot-hub'
+> ```
+>
+> 想用仓库里的开发版，把上面 `add` 的包名换成 Git 源或本地路径即可：`pnpm add github:Funny1Potato/dsh-onebot-hub` / `pnpm add file:D:/path/to/dsh-onebot-hub`（Git 源是拉源码，需要 prepare 脚本并放行构建）。
 
 ## 最少要配的两项
 
