@@ -2098,13 +2098,30 @@ async function scenarioReplyBufferSurvivesSecondWake() {
     assert.equal(mind.stats.lastTurn.spokeFrom, 'tool');
   });
 
-  // 同一个场景顺带验记忆去重：每轮 flush 都会把观测到的身份重新喂一遍（`buildObservedEntries`），
-  // 线上不去重就是"唤醒几轮就堆几条"（真机同一个人的身份条目堆过 3 条）。
-  check('记忆去重：连唤醒两轮，同一个人的身份条目只留一条', () => {
+  // 身份观测只进人物档案、不进记忆库（`m16530`）：以前每轮 flush 都会把"谁说过话"写成
+  // `kind:'identity'` 的记忆条目（还要靠去重压住膨胀）。那批数据和人物档案完全重复，
+  // 占着记忆块的序号，跨到别的群还会以"长期记忆"的形态出现——现在只走档案这一条路。
+  check('身份观测不再进记忆库：两轮唤醒后一条身份条目都没有', () => {
     const identity = mind.store.query({ kind: 'identity' });
-    assert.equal(identity.length, 1, `期望 1 条，实得 ${identity.length}：${JSON.stringify(identity.map((e) => e.text))}`);
-    assert.match(identity[0].text, /小明/);
-    assert.equal(mind.store.stats.deduped >= 1, true, '第二轮的重复写入要记在 deduped 上');
+    assert.equal(identity.length, 0, `不该再有身份条目：${JSON.stringify(identity.map((e) => e.text))}`);
+    assert.equal(mind.store.all().length, 0, `这个场景没有模型写入，记忆库该是空的：${JSON.stringify(mind.store.all().map((e) => e.text))}`);
+  });
+
+  check('观测没有丢：昵称与本群名片仍然写进人物档案', () => {
+    const person = hub.profiles.person('10001');
+    assert.ok(person, '没建出人物档案');
+    const names = (person.names ?? []).map((n) => n.name);
+    assert.ok(names.includes('小明'), `档案里没有昵称：${JSON.stringify(names)}`);
+    assert.ok(person.groups?.['group:77777'], '本群的名片/角色记录没写进档案');
+  });
+
+  // 去重本身还得管用：模型的重复写入仍然只留一条（身份条目没了，这条契约不能跟着丢）。
+  check('记忆去重仍然有效：同文本写两次只留一条', () => {
+    const first = mind.store.add({ text: '小明喜欢喝美式', scope: 'group:77777', source: 'model' });
+    const again = mind.store.add({ text: '小明喜欢喝美式', scope: 'group:77777', source: 'model' });
+    assert.equal(first.id, again.id, '同文本第二次写入应命中已有条目，而不是再堆一条');
+    assert.equal(mind.store.all().length, 1, `期望 1 条，实得 ${mind.store.all().length}`);
+    assert.equal(mind.store.stats.deduped, 1, '去重计数要记下来');
   });
 }
 
@@ -4514,8 +4531,11 @@ async function scenarioQuotaGate() {
     assert.equal(sent.length, 0, '不该往群里发任何东西');
     assert.equal(mind.stats.woken, 0);
   });
-  check('额度用尽：这批消息仍然进了记忆存储（只存≠丢掉）', () => {
-    assert.ok(store.stats.total >= 1, '观察条目应已落库，否则这段群聊会被整段抹掉');
+  // 额度用尽期间的批次**不再写记忆条目**（`m16530`）：那条路径以前补的是身份观测
+  // （`buildObservedEntries`），而身份观测现在只进人物档案。消息本身仍在 L1 时间线里
+  // ——下一条用例会验证"agent 事后能翻出来"。
+  check('额度用尽：这批消息不写记忆条目（身份观测已不再进记忆库）', () => {
+    assert.equal(store.stats.total ?? 0, 0, `不该有记忆条目落库：${JSON.stringify(store.all().map((e) => e.text))}`);
   });
 
   // 用尽期间继续攒（每批都被闸门吃掉，但原话留住了）
