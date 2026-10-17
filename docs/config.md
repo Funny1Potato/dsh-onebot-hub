@@ -312,7 +312,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `memory.reminders.max` | 数字 | 200 | **最多存几条提醒**：超过淘汰最旧的。 |
 | `memory.isolation.level` | 字符串 | scoped | **隔离级别**：strict 只在本会话 / scoped 按会话可见（默认）/ balanced 折中 / open 最松。 |
 | `memory.isolation.crossGroupIdentity` | 开关 | 开 | **跨群认同一个人**：打开后同一个人在不同群共用一个档案。 |
-| `memory.isolation.crossGroupFacts` | 字符串 | shareable | **跨群事实**：shareable 标记过的可跨群（默认）/ never 永不 / all 全部。 |
+| `memory.isolation.crossGroupFacts` | 字符串 | shareable | **跨群事实**：shareable 标记过的，以及点了名、人都在本群的，可跨群（默认）/ never 永不 / all 全部（连没点名的群内事实也跨）。 |
 | `memory.isolation.privateFacts` | 字符串 | never | **私聊事实**：never 私聊内容不出私聊（默认）/ sameActor 同一个人可见 / all 全部。 |
 | `memory.isolation.sensitivityAlwaysLocal` | 开关 | 开 | **敏感内容永远本地**：打开后敏感事实不参与跨会话装配（不看 level）。 |
 | `memory.isolation.overrides` | 字符串 | [] | **逐项覆盖（JSON）**：JSON 数组：给单条记忆指定可见范围。 |

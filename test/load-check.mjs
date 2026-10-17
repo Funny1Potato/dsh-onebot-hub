@@ -1808,6 +1808,46 @@ async function runAsyncChecks() {
     setGroupMembershipProvider((gid) => hub.profiles?.groupMembers?.(gid) ?? null);
   });
 
+  await checkAsync('跨群事实 shareable 档：点了名且人都在本群的可跨群，没点名的照旧拦（m16688）', async () => {
+    // 用户要的语义：`crossGroupFacts: shareable` 不只是"shareable 条目"，还包含
+    // "点了名、且点的人此刻都在本群"的群内事实——按人放行，人一散自动收回。
+    const iso = resolveIsolation({ level: 'balanced', crossGroupFacts: 'shareable' });
+    const ctx = { sessionKey: 'group:66666', isolation: iso };
+    const named = { id: 'n1', kind: 'fact', scope: 'group:55555', visibility: 'group:55555', text: '小张下周离职', relatedUsers: ['10002'] };
+    const plain = { id: 'n2', kind: 'fact', scope: 'group:55555', visibility: 'group:55555', text: '这个群爱聊硬件' };
+    const members = (ids, complete = true) =>
+      setGroupMembershipProvider((gid) => (gid === 'group:66666' ? { ids: new Set(ids), complete, at: Date.now() } : null));
+
+    members(['10002']);
+    const r1 = filterForScope([named, plain], ctx);
+    assert.equal(r1.visible.map((e) => e.id).join(','), 'n1', '点名且人在本群 → 放行；没点名的不能搭便车');
+    assert.match(String(r1.audit[0]?.reason), /shareable\|relatedUsers:in-group/, String(r1.audit[0]?.reason));
+
+    members(['10001']);
+    assert.equal(filterForScope([named], ctx).visible.length, 0, '人不在这个群 → 拦');
+    members(['10002'], false);
+    assert.equal(filterForScope([named], ctx).visible.length, 0, '成员表不完整 → 拦（fail-closed，不拿半张表当证据）');
+
+    // never 档：点名也不放（用户明确关掉跨群时，别偷偷按人放行）。
+    const never = resolveIsolation({ level: 'balanced', crossGroupFacts: 'never' });
+    members(['10002']);
+    assert.equal(filterForScope([named], { sessionKey: 'group:66666', isolation: never }).visible.length, 0, 'never 档点名也不放');
+
+    // all 档语义不变：连没点名的群内事实也跨。
+    const all = resolveIsolation({ level: 'balanced', crossGroupFacts: 'all' });
+    assert.equal(filterForScope([plain], { sessionKey: 'group:66666', isolation: all }).visible.length, 1, 'all 档照旧全放');
+
+    // 敏感闸在配置之前：点了名也照样拦。
+    members(['10002']);
+    assert.equal(
+      filterForScope([{ ...named, id: 'n3', sensitive: true }], ctx).visible.length,
+      0,
+      '敏感条目不看档位',
+    );
+
+    setGroupMembershipProvider((gid) => hub.profiles?.groupMembers?.(gid) ?? null);
+  });
+
   await checkAsync('onebot_recall：没开存储时说明原因，而不是假装"没搜到"', async () => {
     // 本用例的 hub 配的是 persist:false —— 检索关掉时必须回一句人话，否则模型会把
     // "翻不到" 读成 "历史上没发生过"。
