@@ -299,6 +299,46 @@ await check('每个配置项都有人话：中文名 + 完整配置键 + 一句�
   assert.ok(labels.get('upstreamListen').includes('反向监听'), 'upstreamListen 要讲清"是上游拨进来的"');
 });
 
+await check('布局自适应：标签列按比例分、窄容器整栏堆叠（别再写死 260px）', () => {
+  const app = boot(BASE_VALUE);
+  const tree = app.render();
+  const clsOf = (node) => String((node && node.props && node.props.className) || '');
+
+  // ① 容器查询需要有个容器：页面根上挂 `oh-page`，并注入那张自适应样式表。
+  let root;
+  walk(tree, (node) => { if (!root && node.type === 'div' && clsOf(node) === 'oh-page') root = node; });
+  assert.ok(root, '页面根上要有 oh-page（容器查询得先有个容器）');
+  const sheet = textOf((root.children || []).find((child) => child && child.type === 'style'));
+  assert.ok(sheet.includes('@container'), `样式表里要有容器查询：${sheet}`);
+  assert.ok(/\.oh-row\{flex-direction:column/.test(sheet), '窄版要把整行竖排');
+  assert.ok(/\.oh-control\{width:100%/.test(sheet), '窄版输入框要拿到整栏宽度');
+  assert.ok(/\.oh-sub\{flex-direction:column/.test(sheet), '子面板（额度/行编辑器）窄了也要叠');
+
+  // ② 行内那一版是"宿主不认容器查询"时的兜底：必须按比例，不能是写死的像素。
+  const rows = [];
+  walk(tree, (node) => {
+    if (node.type !== 'div' || !Array.isArray(node.children)) return;
+    if (node.children[0] && node.children[0].type === 'div' && clsOf(node.children[0]) === 'oh-label') rows.push(node);
+  });
+  assert.ok(rows.length > 0, '一行配置都没渲染出来');
+  for (const row of rows) {
+    const label = row.children[0].props.style;
+    assert.ok(!/0 0 \d+px/.test(String(label.flex)), `标签列还是写死的：${label.flex}`);
+    assert.ok(Number(label.maxWidth) <= 240, `标签列封顶不该超过 240px：${label.maxWidth}`);
+    assert.ok(clsOf(row.children[1]) === 'oh-control', '控件格要带 oh-control');
+    assert.ok(clsOf(row.children[2]) === 'oh-actions', '按钮格要带 oh-actions');
+  }
+
+  // ③ 子面板同理：额度面板与行编辑器的列标签自适应，不是 148/72 写死。
+  const subs = [];
+  walk(tree, (node) => { if (node.type === 'label' && clsOf(node) === 'oh-sub') subs.push(node); });
+  assert.ok(subs.length > 0, '没找到子面板行（额度/行编辑器）');
+  for (const sub of subs) {
+    const span = sub.children[0];
+    assert.ok(!/0 0 \d+px/.test(String(span.props.style.flex)), `子面板标签还是写死的：${span.props.style.flex}`);
+  }
+});
+
 await check('过滤框同时认配置键与中文名（记得住"看图"记不住 vision.mode）', () => {
   const app = boot(BASE_VALUE);
   const box = () => {
