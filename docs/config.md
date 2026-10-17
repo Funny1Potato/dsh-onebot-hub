@@ -322,6 +322,44 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `memory.isolation.audit` | 开关 | 开 | **留审计**：每次放行/拦截都记一条，可用 onebot_memory_audit 查。 |
 | `memory.isolation.auditRetain` | 数字 | 200 | **审计保留条数**：账本最多留多少条。 |
 
+### 谁能看见什么（放行表）
+
+跨会话装配记忆时，`isolation` 实际怎么判定。**同会话、同世界一律可见**，不看下面任何一档（敏感条目与"点的人已不在群"也一样）——它们连闸门都走不到，早退发生在那之前。
+
+| 条目类型（跨群时） | strict | scoped | balanced | open |
+| --- | --- | --- | --- | --- |
+| 身份条目（`X 是 QQ Y`；现在只剩存量与导入数据） | 拦 | 放 | 放 | 放 |
+| 私聊事实（`visibility: private:*`） | 拦 | 拦 | 拦 | 拦 |
+| 可共享事实（`visibility: shareable`） | 拦 | 拦 | 放 | 放 |
+| 群内事实 · 点了名且人都在本群 | 拦 | 拦 | 放 | 放 |
+| 群内事实 · 没点名 | 拦 | 拦 | 拦 | 放 |
+| 敏感条目（任何 `visibility`） | 拦 | 拦 | 拦 | 拦 |
+| 点了名但有人不在本群 / 成员表不全 | 拦 | 拦 | 拦 | 拦 |
+
+三点容易误解的地方：
+
+1. **档位只切 `level`，不改四个子开关。** 上表是四个子开关取默认值（`crossGroupIdentity` 开、`crossGroupFacts` shareable、`privateFacts` never、`sensitivityAlwaysLocal` 开）的结果。所以 `open` **也不放**私聊事实与敏感条目——想放得单独改那两个开关。
+2. **`level` 不是"档位名越大越宽松"的单一旋钮**：`open` 与 `balanced` 的差别只有"没点名的群内事实"和"点了个不在群的人"这两类（后者在 open 下由闸门先拦，档位管不到）。
+3. **点名闸门排在 `level:open` 之前**：只要「讲的是谁」里的人此刻不在本群，`open` 也放不出去。
+
+### `crossGroupFacts` 到底管哪几格
+
+它只作用于两类条目（`shareable` 与 `group:x`），而且**要么完全无效、要么就是唯一决定因素**：
+
+| `level` · `crossGroupFacts` | 可共享事实 | 群内事实·点名·人在本群 | 群内事实·没点名 | 身份条目 |
+| --- | --- | --- | --- | --- |
+| `scoped` · 任意值 | 拦 | 拦 | 拦 | 放 |
+| `balanced` · `never` | 拦 | 拦 | 拦 | 放 |
+| `balanced` · `shareable`（默认） | 放 | 放 | 拦 | 放 |
+| `balanced` · `all` | 放 | 放 | 放 | 放 |
+| `open` · `never` | 拦 | 放 | 放 | 放 |
+| `open` · `shareable` / `all` | 放 | 放 | 放 | 放 |
+
+- **`scoped` 下它完全无效**（三种取值结果一模一样，那两类条目本来就不放）；**只有 `balanced` 是它真正决定结果的档位**。
+- **它不动身份条目与私聊事实**——那两类分别由 `crossGroupIdentity`、`privateFacts` 管。
+- `all` 与 `shareable` 的**唯一差别**就是"没点名的群内事实"那一格：`all` 放开全部群内事实（实测一个群几百条），`shareable` 只放点了名、且人确实在本群的。
+- 已知不自洽：`open · never` 那一行，可共享事实被 `never` 拦住、群内事实却照样放行——两条分支的返回顺序不同（可共享事实先查 `never` 再看档位，群内事实先看 `open` 再查 `never`）。
+
 ## 排查用的落盘物
 
 - `<storageDir>/startup.log`：启动逐阶段标记与失败堆栈，插件起不来先看它。
