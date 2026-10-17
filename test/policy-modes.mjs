@@ -194,12 +194,17 @@ check('B2 both = **同时**广播给其它下游（B 收到 %s 的 action 请求
     JSON.stringify(B.requests[0].params).includes('bridge 一句话') &&
     A.requests.length === 0,
   { b: B.requests.map((r) => r.action), a: A.requests.length });
+// 期望 id 按"假上游当时给这一条分配的号"算，而不是拿检查时刻的 `upActions.length` 现算：
+// 只要有任何 action 插在应答与检查之间，后者就会错位（CI 上真红过一次，本地/别的平台复现不出来）。
+const sendIdx = upActions.findIndex((f) => f.action === 'send_msg');
+const expectedUpId = sendIdx >= 0 ? 90000 + sendIdx + 1 : null;
 check('B3 both 的应答：真上游的 message_id 保留，并报出镜像条数',
   bothReply?.retcode === 0 &&
-    bothReply?.data?.message_id === 90000 + upActions.length &&
+    expectedUpId !== null &&
+    bothReply?.data?.message_id === expectedUpId &&
     bothReply?.data?.mirrored === 1 &&
     bothReply?.data?.mirroredTotal === 1,
-  bothReply);
+  { reply: bothReply, expectedUpId });
 hub1.stop();
 await sleep(200);
 
