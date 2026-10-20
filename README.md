@@ -2,6 +2,8 @@
 
 **[English](#english) | 中文**
 
+[![](https://img.shields.io/badge/powered_by-dsh-4D6BFE?style=flat-square&logo=deepseek&logoColor=white)](https://github.com/deepseek-ai/deepseek-harness)
+
 把 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 接到 **OneBot v11**（QQ）上：DSH 既是下游 bot 的协议上游，也是群里的一个 bot。
 
 ## English
