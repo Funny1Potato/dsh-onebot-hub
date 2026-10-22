@@ -310,7 +310,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `memory.reminders.windowHours` | 数字 | 24 | **提醒窗口（小时）**：到期前后多久内算"该提了"。 |
 | `memory.reminders.limit` | 数字 | 5 | **一次提几条**：单轮最多提醒几条。 |
 | `memory.reminders.max` | 数字 | 200 | **最多存几条提醒**：超过淘汰最旧的。 |
-| `memory.isolation.level` | 字符串 | scoped | **隔离级别**：strict 只在本会话 / scoped 按会话可见（默认）/ balanced 折中 / open 最松。 |
+| `memory.isolation.level` | 字符串 | balanced | **隔离级别**：strict 只在本会话 / scoped 按会话可见 / balanced 折中（默认：活跃层能在共享会话之间看见彼此进行中的话题）/ open 最松。**注意**：改松不只放活跃层，长期事实的跨群放行也会一起放松。 |
 | `memory.isolation.crossGroupIdentity` | 开关 | 开 | **跨群认同一个人**：打开后同一个人在不同群共用一个档案。 |
 | `memory.isolation.crossGroupFacts` | 字符串 | shareable | **跨群事实**：shareable 标记过的，以及点了名、人都在本群的，可跨群（默认）/ never 永不 / all 全部（连没点名的群内事实也跨）。 |
 | `memory.isolation.privateFacts` | 字符串 | never | **私聊事实**：never 私聊内容不出私聊（默认）/ sameActor 同一个人可见 / all 全部。 |
@@ -321,6 +321,26 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `memory.isolation.recallEscapeNeedsApproval` | 开关 | 开 | **越界要确认**：打开后越界检索要显式 confirm 才给。 |
 | `memory.isolation.audit` | 开关 | 开 | **留审计**：每次放行/拦截都记一条，可用 onebot_memory_audit 查。 |
 | `memory.isolation.auditRetain` | 数字 | 200 | **审计保留条数**：账本最多留多少条。 |
+| `memory.active.enabled` | 开关 | 开 | **活跃层**：记录"进行中的话题"和"agent 正在做的事"，做完由 agent 结算；关闭则这一段整段不注入。 |
+| `memory.active.activeWindowDays` | 数字 | 30 | **活跃层保留天数**：多久没动过的条目就不进上下文；0 = 不过滤（会留下早就结束的僵尸条目）。 |
+| `memory.active.injectLimit` | 数字 | 8 | **一次注入几条**：最多列几条进行中的事（话题在前、任务在后，组内新的在前）；0 = 不注入。 |
+| `memory.active.maxPerOrigin` | 数字 | 20 | **每个会话最多存几条**：防止某个群把活跃层塞满，超了淘汰该会话最旧的（只防跑偏，不代替结算）。 |
+| `memory.active.dailySettleReminder` | 开关 | 开 | **每天提醒结算**：开了超过一天还没结算的条目，会在下一次会话活动时被提一句（每天最多一次）。 |
+
+### 活跃层怎么共享
+
+活跃层**不套用**下面那张记忆放行表，单独一套（群档案不进共享）：
+
+| 隔离级别 | 群来源的条目 | 私聊来源的条目 |
+| --- | --- | --- |
+| strict 严格 | 只在来源会话 | 只在那个私聊 |
+| scoped 按会话 | 只在来源群 | 按 `memory.isolation.privateFacts` |
+| balanced 折中（默认） | 白名单内 + 至少 1 个共同活跃群友 | 按 `memory.isolation.privateFacts` |
+| open 开放 | 白名单内全部 | 按 `memory.isolation.privateFacts` |
+
+- **白名单**＝`agent.groups` ∪ `agent.privates`：来源与目标都得在名单里，任何档位先被它卡住（两张名单都没配＝不限）。
+- **共同活跃群友**：候选＝人物档案里两边都见过的人 ∪ 两边新鲜成员表交集；再滤掉"只在名单里、从没说过话"的僵尸。取不到证据就不共享（fail-closed）。
+- **敏感条目**任何档位都只在本会话；**群档案**（culture／观测字段）永远只在自己那个群。
 
 ### 谁能看见什么（放行表）
 

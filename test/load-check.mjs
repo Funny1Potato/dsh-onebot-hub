@@ -377,7 +377,14 @@ check('Config schema 能填默认值', () => {
   const filled = Config({});
   assert.equal(plainConfig(filled.agent.mode), 'assist');
   assert.equal(plainConfig(filled.agent.batchSize), 6);
-  assert.equal(plainConfig(filled.memory.isolation.level), 'scoped');
+  // `m18072` 用户定案：默认档位由 scoped 改 balanced（活跃层要开箱能跨共享会话看见彼此的话题）。
+  assert.equal(plainConfig(filled.memory.isolation.level), 'balanced');
+  // 活跃层（`m17909`）默认开着，「待结算」每天提一次。
+  assert.equal(plainConfig(filled.memory.active.enabled), true);
+  assert.equal(plainConfig(filled.memory.active.activeWindowDays), 30);
+  assert.equal(plainConfig(filled.memory.active.injectLimit), 8);
+  assert.equal(plainConfig(filled.memory.active.maxPerOrigin), 20);
+  assert.equal(plainConfig(filled.memory.active.dailySettleReminder), true);
   // 【本群认识的人】默认列 20 人（`m09409` 用户要求"不写死"→ 走配置项，0 才是关）
   assert.equal(plainConfig(filled.memory.peopleRoster), 20);
   assert.equal(plainConfig(filled.media.enabled), true);
@@ -1613,30 +1620,69 @@ async function runAsyncChecks() {
     const t = toolOf('onebot_memory');
     const ctxArg = { sessionKey: 'group:55555', actorId: '10001' };
 
-    const r1 = JSON.parse(await t.execute({ ...ctxArg, ops: { short_term: { add: [{ text: '他喜欢喝美式' }] } } }));
-    assert.equal(r1.applied.short_term.add, 1);
-    assert.equal(hub.store.all().length, 1);
+    // 活跃层（`m17909`）：短期记忆的职能搬到这里，写入只认当前会话。
+    const r1 = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { add: [{ kind: 'topic', text: '在讨论喝什么' }] } } }));
+    assert.equal(r1.applied.active.add, 1, JSON.stringify(r1));
+    assert.equal(hub.active.all().length, 1);
+    const activeRec = hub.active.all()[0];
+    assert.equal(activeRec.originScope, 'group:55555', '来源会话必须落盘，跨会话可见性靠它算');
+    assert.equal(activeRec.status, 'open');
+
+    // `short_term.add` 退役：不是静默忽略，而是明说"用 active"。
+    const retired = JSON.parse(await t.execute({ ...ctxArg, ops: { short_term: { add: [{ text: '他喜欢喝美式' }] } } }));
+    assert.equal(retired.applied.short_term.add, 0);
+    assert.ok(retired.rejected.some((x) => /active/.test(x.reason) && /短期记忆已改为/.test(x.reason)), JSON.stringify(retired.rejected));
 
     // 模型自己声明可见性 → 记一条 rejection，但**仍按代码推断落盘**（硬边界，不是报错退出）。
     const r2 = JSON.parse(
-      await t.execute({ ...ctxArg, ops: { short_term: { add: [{ text: '他今天心情不好', visibility: 'shareable' }] } } }),
+      await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '他今天心情不好', visibility: 'private', related_users: ['10001'] }] } } }),
     );
-    assert.equal(r2.applied.short_term.add, 1);
+    assert.equal(r2.applied.long_term.add, 1, `R2 ${JSON.stringify(r2.applied)} / ${JSON.stringify(r2.rejected)}`);
     assert.ok(r2.rejected.some((x) => /visibility/.test(x.path) && x.reason.includes('由代码')), JSON.stringify(r2.rejected));
     const stored = hub.store.all().find((e) => e.text === '他今天心情不好');
-    assert.equal(stored.visibility, 'group:55555', '模型给的 shareable 不该被采纳');
+    assert.equal(stored.visibility, 'group:55555', '模型给的 private 不该被采纳，代码按"点了名"收敛回本群');
 
-    // modify 先于 add：序号指向的是**改动前**的第 0 条，不该被同批 add 顶掉。
+    // 活跃层的 update 按"看得见的那份列表"的序号走；同批 add 不会让序号错位。
     const r3 = JSON.parse(
-      await t.execute({ ...ctxArg, ops: { short_term: { modify: [{ index: 0, content: '他喜欢喝拿铁' }], add: [{ text: '新事' }] } } }),
+      await t.execute({ ...ctxArg, ops: { active: { update: [{ index: 0, text: '在讨论买哪款咖啡机' }], add: [{ kind: 'task', text: '正在整理型号对比' }] } } }),
     );
-    assert.equal(r3.blocks.short_term.modify, 1);
-    assert.equal(hub.store.all().find((e) => e.text === '他喜欢喝美式'), undefined);
-    assert.ok(hub.store.all().some((e) => e.text === '他喜欢喝拿铁'));
+    assert.equal(r3.applied.active.update, 1, JSON.stringify(r3));
+    assert.equal(r3.applied.active.add, 1);
+    assert.ok(hub.active.all().some((e) => e.text === '在讨论买哪款咖啡机'));
+    assert.ok(hub.active.all().some((e) => e.kind === 'task'));
 
     // 越界序号不静默：报"当前 N 条"让人照着改。
-    const r4 = JSON.parse(await t.execute({ ...ctxArg, ops: { short_term: { modify: [{ index: 99, content: 'x' }] } } }));
+    const r4 = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { update: [{ index: 99, text: 'x' }] } } }));
     assert.ok(r4.rejected.some((x) => /序号越界/.test(x.reason)));
+
+    // 结算（`m17909`）：keep 必须给 summary——那一行才是"以后还记得发生过这件事"的唯一证据；
+    // 细节按 keep_as 落档案（这里落到话题归档）。结算完这条就从活跃层消失。
+    const rk = JSON.parse(
+      await t.execute({
+        ...ctxArg,
+        ops: {
+          active: {
+            settle: [
+              { index: 0, outcome: 'keep', summary: '群里最后定了磨豆机买哪款', keep_as: { target: 'topic', title: '咖啡机选购', conclusion: '选了磨豆机 A' } },
+            ],
+          },
+        },
+      }),
+    );
+    assert.equal(rk.applied.active.settle.keep, 1, JSON.stringify(rk));
+    const indexLine = hub.store.all().find((e) => e.text === '群里最后定了磨豆机买哪款');
+    assert.ok(indexLine, 'keep 必须写一行长期记忆索引');
+    assert.equal(indexLine.term, 'long');
+    assert.ok(!hub.active.all().some((e) => e.text === '在讨论买哪款咖啡机'), '结算后活跃层不留"已完成"条目');
+    assert.equal(hub.profiles.topic('咖啡机选购').status, 'closed');
+
+    // drop 就是直接删，不留痕。
+    const dropIdx = hub.mind.snapshot('group:55555', { actorId: '10001', audit: false }).active;
+    const rd = JSON.parse(
+      await t.execute({ ...ctxArg, ops: { active: { settle: [{ index: 0, outcome: 'drop' }] } } }),
+    );
+    assert.equal(rd.applied.active.settle.drop, 1, JSON.stringify(rd));
+    assert.ok(!hub.active.all().some((e) => e.id === dropIdx.entries[0].id));
 
     // 人物档案：facts 与 corrections 分开落，`impression` 更新。
     const r5 = JSON.parse(
@@ -1664,6 +1710,7 @@ async function runAsyncChecks() {
       await t.execute({
         ...ctxArg,
         ops: {
+          // `highlights` 在 `m17909` 删掉了：写它现在会被当成未知字段拒绝。
           groups: { 'group:55555': { culture: '爱聊硬件，不喜欢刷屏', memberCount: 999, highlights: [{ text: '上次抽奖取消了' }] } },
           topics: { '散热改装': { title: '散热改装', worldKeys: ['group:55555'], events: [{ text: '讨论到风扇型号' }] } },
         },
@@ -1672,24 +1719,25 @@ async function runAsyncChecks() {
     assert.equal(r6.applied.groups, 1);
     assert.equal(r6.applied.topics, 1);
     assert.ok(r6.rejected.some((x) => /memberCount/.test(x.path) && /未知字段/.test(x.reason)), JSON.stringify(r6.rejected));
+    assert.ok(r6.rejected.some((x) => /highlights/.test(x.path) && /未知字段/.test(x.reason)), JSON.stringify(r6.rejected));
     const group = hub.profiles.group('group:55555');
     assert.match(group.culture, /爱聊硬件/);
     assert.equal(group.memberCount, null, '人数是观测字段，模型写不进来');
+    assert.equal(group.highlights, undefined, 'highlights 已删除，不该再落盘');
 
     // 不是 JSON / 不是对象 → 给出可读回执，不抛。
     const bad = JSON.parse(await t.execute({ ...ctxArg, ops: '这不是 JSON' }));
     assert.equal(bad.applied.short_term.add, 0);
     assert.match(String(bad.note ?? bad.rejected[0]?.reason), /必须是对象/);
 
-    // 同文本写进 long_term ＝ **提升**（`m08521`）：就地升格为长期并移到长期块。
-    const rp = JSON.parse(await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '他喜欢喝拿铁' }] } } }));
-    assert.equal(rp.blocks.long_term.promoted, 1, JSON.stringify(rp.blocks));
-    const promotedRec = hub.store.all().find((e) => e.text === '他喜欢喝拿铁');
+    // 同文本再写一次 `long_term`：它已经是长期了，直接说清楚（不再假装"提升成功"）。
+    // 注：`short_term.add` 退役后，工具侧已经造不出"短期→长期"的提升场景；
+    // `tryPromote` 那条路径留给历史残留条目（见 writer 的 `short_term` 说明）。
+    const rp = JSON.parse(await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '他今天心情不好' }] } } }));
+    assert.equal(rp.blocks.long_term.promoted, 0);
+    assert.ok(rp.rejected.some((x) => /已经是长期记忆/.test(x.reason)), JSON.stringify(rp.rejected));
+    const promotedRec = hub.store.all().find((e) => e.text === '他今天心情不好');
     assert.equal(promotedRec.term, 'long');
-    assert.equal(promotedRec.visibility, 'shareable');
-    const rp2 = JSON.parse(await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '他喜欢喝拿铁' }] } } }));
-    assert.equal(rp2.blocks.long_term.promoted, 0);
-    assert.ok(rp2.rejected.some((x) => /已经是长期记忆/.test(x.reason)), JSON.stringify(rp2.rejected));
   });
 
   await checkAsync('onebot_topic：单条读得到，列表按最近活动倒序', async () => {
@@ -1739,7 +1787,7 @@ async function runAsyncChecks() {
 
     // ② 写了名字而不是 QQ 号 → 照落盘，但要说出来（不静默）：模型得知道 QQ 号才拦得住。
     const rn = JSON.parse(
-      await t.execute({ ...ctxArg, ops: { short_term: { add: [{ text: '老王会修车', related_users: ['老王'] }] } } }),
+      await t.execute({ ...ctxArg, ops: { long_term: { add: [{ text: '老王会修车', related_users: ['老王'] }] } } }),
     );
     assert.ok(
       rn.rejected.some((x) => /related_users/.test(x.path) && /QQ 号/.test(x.reason)),

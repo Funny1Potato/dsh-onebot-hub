@@ -56,6 +56,7 @@ import {
 import { MemoryStore, memoryDedupeKey, normalizeMemoryText } from '../lib/memory/store.js';
 import { resolveIsolation } from '../lib/memory/isolation.js';
 import { applyMemoryOps, memoryBlocks } from '../lib/memory/writer.js';
+import { ActiveStore, buildShareContext, filterActive, renderActive } from '../lib/memory/active.js';
 import { tokenize, RecallStore } from '../lib/memory/recall.js';
 import { decayStrength, isWeak, weakMessageIds } from '../lib/memory/decay.js';
 import { collectCues, cueKey, Reminders } from '../lib/memory/cues.js';
@@ -779,25 +780,30 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
     isolation: resolveIsolation({ level: 'scoped' }),
   };
   const r5 = applyMemoryOps(
-    { short_term: { add: [{ text: '一句话' }] }, long_term: { add: [{ text: '一句话' }] } },
+    { long_term: { add: [{ text: '一句话' }] } },
     wbase,
   );
   assert.equal(w.all().length, 1, '同一句话不该在库里存两份');
-  assert.equal(r5.blocks.short_term.add + r5.blocks.long_term.add, 1);
-  // 紧接着把同一句话写进 long_term ＝ **提升**（`m08521` 用户定案）：就地翻成长期，
+  assert.equal(r5.blocks.long_term.add, 1);
+  // 短期条目（旧版本写进来的）被同文本重写进 long_term ＝ **提升**（`m08521` 用户定案）：就地翻成长期，
   // 而不是像以前那样"已有同一条"顶回去（那样模型以为提升了，库里其实什么都没变）。
-  assert.equal(r5.blocks.long_term.promoted, 1, '同文本重写进长期要就地提升');
-  const promoted = w.all()[0];
+  // `short_term.add` 已退役，所以这里用 store 直接造一条历史短期条目。
+  const w2 = new MemoryStore({});
+  w2.add({ text: '一句话', scope: 'group:55555', term: 'short' }, { sessionKey: 'group:55555', worldKey: 'group:55555' });
+  assert.equal(w2.all()[0].term, 'short');
+  const promote = applyMemoryOps({ long_term: { add: [{ text: '一句话' }] } }, { ...wbase, store: w2 });
+  assert.equal(promote.blocks.long_term.promoted, 1, '同文本重写进长期要就地提升');
+  const promoted = w2.all()[0];
   assert.equal(promoted.term, 'long');
   assert.equal(promoted.visibility, 'shareable', '公开群里提升后就能跨会话说');
-  const afterPromote = memoryBlocks(w.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: resolveIsolation({ level: 'scoped' }) });
+  const afterPromote = memoryBlocks(w2.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: resolveIsolation({ level: 'scoped' }) });
   assert.equal(afterPromote.shortTerm.length, 0, '提升后要离开短期块');
   assert.equal(afterPromote.longTerm.length, 1, '提升后就该在长期块里');
 
   // 私聊里学到的升不动（硬边界）：写 long_term 只换回一条说明，条目还是短期、还是 private。
   const wp = new MemoryStore({});
+  wp.add({ text: '他说他明天要去医院', scope: 'private:10001', term: 'short' }, { sessionKey: 'private:10001', worldKey: 'private:10001' });
   const pbase = { ...wbase, store: wp, sessionKey: 'private:10001', worldKey: 'private:10001' };
-  assert.equal(applyMemoryOps({ short_term: { add: [{ text: '他说他明天要去医院' }] } }, pbase).blocks.short_term.add, 1);
   const refused = applyMemoryOps({ long_term: { add: [{ text: '他说他明天要去医院' }] } }, pbase);
   assert.equal(refused.blocks.long_term.promoted, 0);
   assert.ok(refused.rejected.some((x) => /没能提升为长期/.test(x.reason)), JSON.stringify(refused.rejected));
@@ -874,35 +880,98 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
 t('记忆写入：modify 优先于 add、越界与未知字段不静默、可见性由代码判定', () => {
   const store = new MemoryStore({});
   const profiles = new Profiles({ storage: null });
-  const base = { store, profiles, sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'scoped' }), now: 1_700_000_000_000 };
+  const active = new ActiveStore({ storage: null });
+  const base = { store, profiles, active, sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'scoped' }), now: 1_700_000_000_000 };
 
+  // 短期记忆的职能搬到了活跃层（`m17909`）：进行中的话题 / 正在做的事。
   const r1 = applyMemoryOps(
-    { short_term: { add: [{ text: '第一件事' }, { text: '第二件事' }] } },
+    { active: { add: [{ kind: 'topic', text: '第一件事' }, { kind: 'task', text: '第二件事' }] } },
     base,
   );
-  assert.equal(r1.blocks.short_term.add, 2);
-  assert.equal(store.all().length, 2);
+  assert.equal(r1.blocks ? r1.applied.active.add : 0, 2);
+  assert.equal(active.all().length, 2);
+  assert.ok(active.all().every((e) => e.originScope === 'group:55555'));
+
+  // `short_term.add` 退役：明说"用 active"，而不是静默忽略。
+  const r1b = applyMemoryOps({ short_term: { add: [{ text: '旧的短期' }] } }, base);
+  assert.equal(r1b.blocks.short_term.add, 0);
+  assert.ok(r1b.rejected.some((x) => /活跃层/.test(x.reason)), JSON.stringify(r1b.rejected));
 
   // 模型给 visibility：记一条 rejection，但条目仍按代码推断落盘（不能静默采纳，也不能静默丢弃）。
-  const r2 = applyMemoryOps({ short_term: { add: [{ text: '私事', visibility: 'shareable' }] } }, base);
-  assert.equal(r2.applied.short_term.add, 1);
+  const r2 = applyMemoryOps({ long_term: { add: [{ text: '私事', visibility: 'shareable' }] } }, base);
+  assert.equal(r2.applied.long_term.add, 1);
   assert.ok(r2.rejected.some((x) => x.path.endsWith('visibility')), JSON.stringify(r2.rejected));
-  assert.equal(store.all().find((e) => e.text === '私事').visibility, 'group:55555');
+  assert.equal(store.all().find((e) => e.text === '私事').visibility, 'shareable', '没点名的长期事实按 shareable 落');
 
-  // modify 先于 add：同批里"改第 0 条"必须打到**改之前**的第 0 条。
-  const r3 = applyMemoryOps({ short_term: { modify: [{ index: 0, content: '第一件事（已更正）' }], add: [{ text: '新加的' }] } }, base);
-  assert.equal(r3.blocks.short_term.modify, 1);
-  assert.equal(store.all().filter((e) => e.text === '第一件事').length, 0);
-  assert.ok(store.all().some((e) => e.text === '第一件事（已更正）'));
+  // 活跃层的 update 序号指向**改之前**那份列表；同批 add 不会让序号错位。
+  const snapshot = { entries: filterActive(active.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: resolveIsolation({ level: 'scoped' }), now: base.now }).visible };
+  assert.equal(snapshot.entries.length, 2, '本会话自己写的两条都该看得见');
+  const r3 = applyMemoryOps(
+    { active: { update: [{ index: 0, text: '第一件事（已更正）' }], add: [{ kind: 'topic', text: '新加的' }] } },
+    { ...base, activeBlocks: snapshot },
+  );
+  assert.equal(r3.applied.active.update, 1);
+  assert.ok(active.all().some((e) => e.text === '第一件事（已更正）'));
+  assert.ok(!active.all().some((e) => e.text === '第一件事'));
 
-  const r4 = applyMemoryOps({ short_term: { modify: [{ index: 99, content: 'x' }], 未知操作: [] }, 未知顶层: {} }, base);
+  const r4 = applyMemoryOps({ active: { update: [{ index: 99, text: 'x' }], 未知操作: [] }, 未知顶层: {} }, { ...base, activeBlocks: snapshot });
   assert.ok(r4.rejected.some((x) => /序号越界/.test(x.reason)));
   assert.ok(r4.rejected.some((x) => /未知操作/.test(x.reason)));
   assert.ok(r4.rejected.some((x) => /未知字段/.test(x.reason)));
   assert.equal(applyMemoryOps('不是对象', base).ok, false);
 });
 
+t('活跃层：跨群共享要同时过白名单与"共同活跃群友"两关，私聊来源另按 privateFacts', () => {
+  const now = 1_800_000_000_000;
+  const a = new ActiveStore({ storage: null });
+  a.add({ kind: 'topic', text: '讨论换显卡', originScope: 'group:55555', participants: ['10002'] }, now);
+  a.add({ kind: 'task', text: '替小张列清单', originScope: 'group:55555' }, now);
+  a.add({ kind: 'topic', text: '帮我改配置', originScope: 'private:10001' }, now);
+  // 10002 在两个群都露过面 ⇒ 群 55555 与 77777 有"共同活跃群友"；99999 一个人都不认识。
+  const persons = [{ userId: '10002', groups: { 'group:55555': { lastSentAt: now - 3600e3 }, 'group:77777': { lastSentAt: now - 7200e3 } } }];
+  const whitelist = new Set(['group:55555', 'group:77777', 'private:10001']);
+  const share = buildShareContext({ persons, whitelist, windowDays: 30, now });
+  const iso = resolveIsolation({ level: 'balanced', privateFacts: 'never' });
+  const view = (target) => filterActive(a.all(), {
+    sessionKey: target, worldKey: target, actorId: '10001', isolation: iso, share, whitelist, activeWindowDays: 30, now,
+  });
+  assert.equal(view('group:55555').visible.length, 2, '自己的群两条都看得见');
+  assert.equal(view('group:77777').visible.length, 2, 'balanced + 有共同活跃群友 ⇒ 跨群可共享');
+  assert.equal(view('group:99999').visible.length, 0, '不在白名单里的群一条都拿不到');
+  assert.ok(view('group:99999').denied.every((d) => /not-in-whitelist/.test(d.reason)));
+  assert.equal(view('private:10001').visible.length, 1, '私聊来源默认 privateFacts=never ⇒ 只在本私聊');
+
+  // 同一条在 scoped 档就不许跨群（想共享必须动全局 level，这是 `m17922` 选的 A 方案代价）。
+  const scoped = filterActive(a.all(), {
+    sessionKey: 'group:77777', worldKey: 'group:77777', actorId: '10001',
+    isolation: resolveIsolation({ level: 'scoped' }), share, whitelist, activeWindowDays: 30, now,
+  });
+  assert.equal(scoped.visible.length, 0);
+  assert.ok(scoped.denied.filter((d) => /level:scoped/.test(d.reason)).length === 2, JSON.stringify(scoped.denied));
+  // 没有 share 上下文（判据取不到）必须 fail-closed，不能"猜着放"。
+  const blind = filterActive(a.all(), {
+    sessionKey: 'group:77777', worldKey: 'group:77777', actorId: '10001', isolation: iso, whitelist, activeWindowDays: 30, now,
+  });
+  assert.equal(blind.visible.length, 0);
+
+  // 渲染：序号跨两段连续（模型要靠它写 update/settle），出处永远在行首。
+  const shown = view('group:77777').visible;
+  const text = renderActive(shown, { limit: 8, settle: false, now });
+  assert.match(text, /^【进行中的话题】$/m);
+  assert.match(text, /^0\. \[群 55555\] 讨论换显卡$/m);
+  assert.match(text, /^1\. \[群 55555\] 替小张列清单$/m);
+  assert.ok(text.indexOf('【我正在做的事】') > text.indexOf('【进行中的话题】'), '话题在前、任务在后');
+  // 开着超过一天才有【待结算】提醒（只报事实，不下命令）。
+  const later = renderActive(shown, { limit: 8, settle: true, now: now + 25 * 3600e3 });
+  assert.match(later, /【待结算】/);
+  assert.ok(!renderActive(shown, { limit: 8, settle: true, now }).includes('【待结算】'), '刚写的不该催结算');
+  // 过了活跃窗口就不注入（0 = 不过滤）。
+  assert.equal(filterActive(a.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso, now: now + 31 * 86400e3 }).visible.length, 0);
+  assert.equal(filterActive(a.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso, activeWindowDays: 0, now: now + 31 * 86400e3 }).visible.length, 2);
+});
+
 t('曾用名与话题关联：改名之后还认得出人，引用关系才接线（§24.11/§24.4）', () => {
+
   const profiles = new Profiles({ storage: null, now: () => 1_700_000_000_000 });
   const at = 1_700_000_000_000;
   profiles.noteName('10001', '小明', 'group:55555', at);

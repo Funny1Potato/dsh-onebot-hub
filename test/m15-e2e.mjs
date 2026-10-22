@@ -308,19 +308,15 @@ async function scenarioReply() {
    * append 成一条 user message。真机日志实测 seq 9 / seq 19 两份 3649/3619 字符的快照，
    * 唯一差异是模型自己删掉一条短期记忆——为了这一行重注 3.6KB。
    */
-  const frozenWrite = () => applyMemoryOps(
-    { short_term: { add: [{ text: '回合中途记下的一句' }] } },
-    {
-      store,
-      profiles: hub.profiles,
-      sessionKey: 'group:55555',
-      worldKey: 'group:55555',
-      actorId: '10001',
-      isolation,
-      now: Date.now(),
-      source: 'test',
-    },
-  );
+  // `short_term.add` 已退役（短期记忆改成活跃层，见 `m17909`），但"短期块仍可读可渲染"这条兼容性
+  // 还要验：所以这里用 store 直接造一条历史短期条目（真机上老库就长这样）。
+  const frozenWrite = () => {
+    store.add(
+      { text: '回合中途记下的一句', scope: 'group:55555', term: 'short' },
+      { sessionKey: 'group:55555', worldKey: 'group:55555' },
+    );
+    return { applied: { short_term: { add: 1 } } };
+  };
   check('回合中改记忆不会让 live 上下文变（冻结，m09285 方案 A）', () => {
     const t0 = mind.liveContext('group:55555');
     const r = frozenWrite();
@@ -2767,9 +2763,14 @@ async function scenarioProfiles() {
     now: Date.now(),
     source: 'test',
   });
+  // `short_term.add` 已退役（`m17909`：短期记忆改成活跃层），短期块只保留"读老数据"的兼容路径，
+  // 所以这条历史短期条目用 store 直接造。
+  store.add(
+    { text: '他说过在写机器人', scope: 'group:55555', term: 'short' },
+    { sessionKey: 'group:55555', worldKey: 'group:55555' },
+  );
   const applied = applyMemoryOps(
     {
-      short_term: { add: [{ text: '他说过在写机器人' }] },
       persons: { 10001: { facts: [{ text: '在写一个 QQ 机器人' }], impression: '话不多，技术问题问得准' } },
     },
     writeCtx('group:55555'),
@@ -2781,7 +2782,7 @@ async function scenarioProfiles() {
   const snap = mind.snapshot('group:55555', { actorId: '10001' });
 
   check('M16 装配：人物卡、长期/短期分块、序号与写入侧同一份列表', () => {
-    assert.equal(applied.applied.short_term.add, 1);
+    assert.equal(applied.applied.persons >= 1, true, '人物档案要真的写进去了');
     assert.match(snap.text, /【人物卡】/);
     assert.match(snap.text, /印象：话不多，技术问题问得准/);
     assert.match(snap.text, /【短期记忆/);
