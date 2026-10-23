@@ -2687,7 +2687,8 @@ t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m0
 
   return recall.ensure().then(async () => {
     assert.equal((await recall.rawIndex({ limit: 10 })).entries.length, 2, '清理前两条都在');
-    const out = recall.prune({ days: 7 });
+    // `m21653`：`prune` 改成异步（fs.promises + 批量事务），因为它是 O(数据量) 的 IO。
+    const out = await recall.prune({ days: 7 });
     assert.equal(out.removedFiles, 1, '超期的日文件要删掉');
     assert.equal(out.removedRows, 1, '内存与索引里的旧行也要掉');
     assert.equal(fs.existsSync(oldFile), false);
@@ -2695,20 +2696,24 @@ t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m0
     assert.equal(after.entries.length, 1);
     assert.equal(after.entries[0].ref, 'tnew');
     // days: 0 = 不清理
-    assert.equal(recall.prune({ days: 0 }).skipped, true);
+    assert.equal((await recall.prune({ days: 0 })).skipped, true);
+    // 删完还得搜得到（`m21653`）：过期行占多数时 prune 会走"清表重灌"那条快路，
+    // 这条路要保证索引与留在内存里的行一致——否则删完就搜不到任何东西了。
+    const hit = await recall.search({ query: '刚刚', limit: 5, sessionKey: 'group:1' });
+    assert.ok((hit?.items ?? []).length >= 1, `删完之后剩下的行还得能搜到：${JSON.stringify(hit?.items ?? hit)}`);
 
     // 媒体 blob 同样的保留期：blob 的 mtime 与索引里的 at 都要看
     const store = new JsonStore({ dir, debounceMs: 0 });
     const media = new MediaStore({ storage: store, linkId: 'up:test', log: () => {} });
     return media
       .saveBytes(Buffer.from('hello'), { mediaType: 'text/plain', name: 'a.txt', kind: 'file' })
-      .then((ref) => {
+      .then(async (ref) => {
         assert.ok(fs.existsSync(ref.blob));
         assert.ok(media.find(ref.id), 'find 能按 hub-media id 取回引用');
         assert.equal(media.find('hub-media:nope'), null);
         fs.utimesSync(ref.blob, new Date(old), new Date(old));
         ref.at = old;
-        const pruned = media.prune({ days: 7 });
+        const pruned = await media.prune({ days: 7 });
         assert.equal(pruned.removed, 1);
         assert.equal(pruned.dropped, 1);
         assert.equal(fs.existsSync(ref.blob), false);
@@ -2717,6 +2722,36 @@ t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m0
         fs.rmSync(dir, { recursive: true, force: true });
       });
   });
+});
+
+t('保留期清理：过期行占多数时走「清表重灌」，删完索引仍然可用（`m21653`）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-prune-rebuild-'));
+  const recall = new RecallStore({ dir, linkId: 'up:test', log: () => {} });
+  const dayOf = (ts) => {
+    const d = new Date(ts);
+    return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const old = Date.now() - 40 * 86400000;
+  const oldFile = path.join(dir, 'up_test', `${dayOf(old)}.jsonl`);
+  fs.mkdirSync(path.dirname(oldFile), { recursive: true });
+  // 120 条旧行 + 1 条新行：过期行占绝大多数 → 触发 rebuild（清表重灌）那条快路。
+  const lines = [];
+  for (let i = 0; i < 120; i += 1) lines.push(JSON.stringify({ id: `old${i}`, ts: old, sessionKey: 'group:1', text: `很久以前第${i}条` }));
+  fs.writeFileSync(oldFile, `${lines.join('\n')}\n`, 'utf8');
+  recall.append({ id: 'fresh', ts: Date.now(), sessionKey: 'group:1', text: '刚刚发生的事' });
+  try {
+    await recall.ensure();
+    const out = await recall.prune({ days: 7 });
+    assert.equal(out.removedRows, 120, `旧行要全删掉：${JSON.stringify(out)}`);
+    // 慢路是逐条 DELETE，快路是 `DELETE FROM rt` + 重灌——后者必须把留下的行灌回去，
+    // 否则"清完表就什么都搜不到了"（索引与内存对不上，而且这种错不会报错）。
+    const hit = await recall.search({ query: '刚刚发生的事', limit: 5, sessionKey: 'group:1' });
+    assert.equal(hit.items.length, 1, `清表重灌之后剩下的行还得搜得到：${JSON.stringify(hit.items)}`);
+    assert.ok(JSON.stringify(hit.items[0]).includes('fresh'), `搜到的该是新那条：${JSON.stringify(hit.items[0])}`);
+  } finally {
+    recall.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 t('saveBytes：声明类型与字节魔数打架时信字节（生成图上游标错类型的兜底）', async () => {
