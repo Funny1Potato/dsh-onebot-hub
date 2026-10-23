@@ -1690,6 +1690,21 @@ async function runAsyncChecks() {
     const indexLine = hub.store.all().find((e) => e.text === '群里最后定了磨豆机买哪款');
     assert.ok(indexLine, 'keep 必须写一行长期记忆索引');
     assert.equal(indexLine.term, 'long');
+    // 档案指针（`m20216`）：索引行只给一句话，模型得知道细节在哪儿。话题归档的 id 是模型给的
+    // 标题（`咖啡机选购`），指针就指它——没有这一条，模型只记得"发生过"，查不到详情。
+    assert.deepEqual(indexLine.archive, [{ target: 'topic', id: '咖啡机选购' }], JSON.stringify(indexLine));
+    assert.ok(
+      hub.mind.snapshot('group:55555', { actorId: '10001', audit: false }).blocks.longTerm.some((e) => Array.isArray(e.archive) && e.archive.length),
+      '长期块里的条目要带着指针（渲染层靠它出〔详见 …〕）',
+    );
+    // 回执里也要带一份最新的长期记忆序号表（`m20216`）：长期块的号同样会漂，
+    // 只回活跃层不够——模型照样会照着旧号 `long_term.modify`。
+    assert.ok(Array.isArray(rk.long_term_list), '回执里要有长期记忆的最新序号表');
+    assert.ok(rk.long_term_list.every((x, i) => x.index === i), '长期记忆序号也要连着编');
+    assert.ok(
+      rk.long_term_list.some((x) => x.text === '群里最后定了磨豆机买哪款'),
+      '刚写进去的那一行要在表里',
+    );
     assert.ok(!hub.active.all().some((e) => e.text === '在讨论买哪款咖啡机'), '结算后活跃层不留"已完成"条目');
     assert.equal(hub.profiles.topic('咖啡机选购').status, 'closed');
     // 回执带一份**最新序号**：结算掉一条，后面的号会前移，模型得知道现在几号对应哪一条。

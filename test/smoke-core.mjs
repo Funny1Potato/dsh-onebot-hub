@@ -36,7 +36,7 @@ import {
   toWireResponse,
   ttlOf,
 } from '../lib/capability.js';
-import { renderPerson, renderMemoryBlocks, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
+import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
 import { full, mdhm } from '../lib/stamp.js';
 import { Cards } from '../lib/memory/cards.js';
@@ -712,6 +712,19 @@ t('记忆条目落盘：合并写、重启读回、一行脏数据不废整份�
     assert.equal(s3.all().length, 1);
     assert.equal(s3.all()[0].text, '他今天心情不错');
 
+    // 档案指针也要过重启（`m20216`）：`#hydrate` 是白名单式读回，漏一个字段指针就没了，
+    // 模型重启后只知道"发生过这件事"，查不到细节在哪份档案里。
+    s3.add({
+      text: '换显卡定了 850W',
+      scope: 'group:55555',
+      term: 'long',
+      archive: [{ target: 'topic', id: '显卡选购' }, { target: 'person', id: '10001' }],
+    });
+    storage.flush();
+    const s3b = new MemoryStore({ storage, log: () => {} });
+    const withPtr = s3b.all().find((e) => e.text === '换显卡定了 850W');
+    assert.deepEqual(withPtr.archive, [{ target: 'topic', id: '显卡选购' }, { target: 'person', id: '10001' }]);
+
     // 脏数据：没有 id/text 的坏条目跳过，好的照常读回。
     fs.writeFileSync(
       path.join(dir, 'memory', 'store.json'),
@@ -830,6 +843,38 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   );
   assert.ok(renderMemoryBlocks({ longTerm: [{ text: '只有长期' }] }).startsWith('【长期记忆'), '只有长期时开头就是长期标题');
   assert.equal(renderMemoryBlocks({}), '', '没有记忆时渲染为空串，不留孤零零的标题');
+  // 档案指针（`m20216`）：长期记忆是索引，细节在档案里——没有指针，模型只知道发生过，
+  // 不知道去哪儿看细节。指针只跟**真的落成**的目标走（写入侧只 push 成功的）。
+  assert.equal(
+    renderMemoryBlocks({ longTerm: [{ text: '换显卡定了 850W', archive: [{ target: 'topic', id: '显卡选购' }] }] }),
+    '【长期记忆（跨会话；序号可用于 modify/delete）】\n0. 换显卡定了 850W〔详见 话题：显卡选购〕',
+    '长期索引行要带档案指针，否则模型找不到细节',
+  );
+  assert.equal(
+    renderMemoryBlocks({ longTerm: [{ text: '两处都落了', archive: [{ target: 'topic', id: 'T1' }, { target: 'person', id: '10001' }] }] }),
+    '【长期记忆（跨会话；序号可用于 modify/delete）】\n0. 两处都落了〔详见 话题：T1、人物：10001〕',
+    '一次结算落两处时，两条指针都要写出来',
+  );
+  assert.equal(renderMemoryBlocks({ longTerm: [{ text: '没有档案' }] }).includes('〔'), false, '没有档案就不加方括号');
+
+  // 自述档案（`m20216`）：`self.json` 以前只写不读——`profiles.self()` 有、`upsertSelf` 写，
+  // 可装配层没 self 段、也没工具暴露它。这里只渲染稳定的一小撮，别的群的昵称不许串进来。
+  const self = {
+    myNames: { 'group:55555': '小助', 'group:77777': '阿助' },
+    myStatements: [{ what: '一' }, { what: '二' }, { what: '三' }, { what: '四' }],
+    mistakes: [{ what: '把 A 当成了 B' }],
+    preferences: [{ text: '少用感叹号' }],
+  };
+  const selfText = renderSelf(self, { sessionKey: 'group:55555', worldKey: 'group:55555' });
+  assert.match(selfText, /【关于我自己】/);
+  assert.match(selfText, /我在这里叫：小助/, '只渲染本会话那个昵称');
+  assert.equal(selfText.includes('阿助'), false, '别的群的昵称不该串进来');
+  assert.match(selfText, /我的偏好：少用感叹号/);
+  assert.match(selfText, /我说过的话（别自相矛盾）：\n- 二\n- 三\n- 四/, '说过的话只留最后 3 条');
+  assert.equal(selfText.includes('- 一'), false, '更早的说过的话不占上下文');
+  assert.match(selfText, /我犯过的错（别再犯）：\n- 把 A 当成了 B/);
+  assert.equal(renderSelf(null), '', '没有档案就整段不渲染');
+  assert.equal(renderSelf({}), '', '空档案也整段不渲染');
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-dedupe-'));
   try {
@@ -1062,6 +1107,11 @@ t('曾用名与话题关联：改名之后还认得出人，引用关系才接�
   // 人物卡里要写出来，否则模型会把同一个人当两个。
   const card = renderPerson(profiles.person('10001'), { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'balanced' }) });
   assert.match(card, /也曾叫过：小明/);
+  // `interests` 以前只写不读（`m20216`）：能写、能落盘、`onebot_person` 读得到，
+  // 但装配层从来没渲染过——模型写了等于只写进了文件。
+  profiles.upsertPerson('10001', { interests: [{ text: '显卡' }, { text: '机械键盘' }, { text: '显卡' }] }, at + 10);
+  const cardWithInterests = renderPerson(profiles.person('10001'), { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'balanced' }) });
+  assert.match(cardWithInterests, /爱聊：显卡、机械键盘/, '兴趣要进人物卡，且同一条不重复');
 
   // 话题关联：只认明写的引用（events 里的时间线 id / refs 里的消息 id），不做关键词猜测。
   const topic = profiles.upsertTopic('t1', { title: '那个 bug', refs: [{ messageId: '9001' }], members: ['10002'] }, at);
