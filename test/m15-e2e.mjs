@@ -2786,7 +2786,12 @@ async function scenarioProfiles() {
     assert.match(snap.text, /【人物卡】/);
     assert.match(snap.text, /印象：话不多，技术问题问得准/);
     assert.match(snap.text, /【短期记忆/);
-    assert.match(snap.text, /0\. 他说过在写机器人/, '序号要从 0 开始，模型才能照着改');
+    // `m20892`：每行都带出处与日期。原来只有正文，模型分不清"这是哪个群的事、什么时候的事"。
+    assert.match(
+      snap.text,
+      /0\. \[群 55555\] 他说过在写机器人（\d{4}-\d{2}-\d{2}）/,
+      '序号要从 0 开始，且行首带出处、行尾带日期',
+    );
     assert.equal(snap.blocks.shortTerm.length, 1);
     assert.equal(snap.blocks.longTerm.length, 1);
     assert.ok(snap.sections.some((s) => s.name === 'person' && s.chars > 0), '装配段里要有 person 一段');

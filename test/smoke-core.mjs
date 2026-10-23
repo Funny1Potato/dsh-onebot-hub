@@ -856,6 +856,44 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
     '一次结算落两处时，两条指针都要写出来',
   );
   assert.equal(renderMemoryBlocks({ longTerm: [{ text: '没有档案' }] }).includes('〔'), false, '没有档案就不加方括号');
+  // 出处／日期／相关人（`m20892`）：以前一行只有正文——模型分不清"这是哪个群的事、什么时候的事、
+  // 跟谁有关"。出处用与活跃层同一套记号，日期取**天粒度**（取时分会让快照每回合重注一次）。
+  assert.equal(
+    renderMemoryBlocks(
+      { longTerm: [{ text: '定了磨豆机', scope: 'group:55555', ts: new Date(2026, 9, 22, 15, 30).getTime() }] },
+      { sessionKey: 'group:55555', worldKey: 'group:55555' },
+    ),
+    '【长期记忆（跨会话；序号可用于 modify/delete）】\n0. [群 55555] 定了磨豆机（2026-10-22）',
+    '行首要带出处、行尾要带日期（天粒度，不带时分）',
+  );
+  {
+    const people = [{ userId: '10001', names: [{ name: '小张', scope: 'group:55555', at: 1 }] }];
+    const line = renderMemoryBlocks(
+      {
+        longTerm: [
+          {
+            text: '定了磨豆机',
+            scope: 'group:55555',
+            ts: new Date(2026, 9, 22).getTime(),
+            relatedUsers: ['10001', '10002'],
+          },
+        ],
+      },
+      { people, sessionKey: 'group:55555', worldKey: 'group:55555' },
+    );
+    assert.match(line, /（2026-10-22；相关：小张、10002）/, '相关群友要显示名字，解析不到退回 QQ 号');
+    // 私聊来源：能解析出名字就写名字，解析不出退回号——否则出现"[与 10001 的私聊]"这种读不出人的行。
+    const dm = renderMemoryBlocks(
+      { longTerm: [{ text: '他说要换键盘', scope: 'private:10001', ts: new Date(2026, 9, 22).getTime() }] },
+      { people, sessionKey: 'private:10001', worldKey: 'private:10001' },
+    );
+    assert.match(dm, /0\. \[与 小张 的私聊\] 他说要换键盘/, '私聊出处解析得出名字就用名字');
+    const dm2 = renderMemoryBlocks(
+      { longTerm: [{ text: '他说要换键盘', scope: 'private:99999', ts: new Date(2026, 9, 22).getTime() }] },
+      { sessionKey: 'private:99999' },
+    );
+    assert.match(dm2, /0\. \[与 99999 的私聊\] 他说要换键盘/, '解析不出就退回 QQ 号，别丢出处');
+  }
 
   // 自述档案（`m20216`）：`self.json` 以前只写不读——`profiles.self()` 有、`upsertSelf` 写，
   // 可装配层没 self 段、也没工具暴露它。这里只渲染稳定的一小撮，别的群的昵称不许串进来。
