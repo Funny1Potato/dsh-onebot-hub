@@ -73,6 +73,9 @@ function makeGen(overrides = {}) {
     model: 'seedream',
     baseUrl: 'https://api.example.com/v1',
     apiKey: 'sk-secret',
+    // 显式钉住上限：配置默认值 `m22311` 起是 2560x1440，而这个文件里的断言写的都是
+    // 1024 框下的期望值——不钉住就会随默认值变化而红（不是实现坏了，是测试没声明前提）。
+    maxSize: '1024x1024',
     fetchImpl,
     ...overrides,
   });
@@ -203,7 +206,7 @@ t('generate：watermark 显式开启才透传；size 对齐官方 16 步进', as
     bodies.push(JSON.parse(init.body));
     return jsonResponse({ data: [{ b64_json: SIGNATURE.toString('base64') }] });
   };
-  const base = { enabled: true, model: 'm', baseUrl: 'https://api.example.com', apiKey: 'k', fetchImpl };
+  const base = { enabled: true, model: 'm', baseUrl: 'https://api.example.com', apiKey: 'k', maxSize: '1024x1024', fetchImpl };
   const plain = await new ImageGen(base).generate({ prompt: 'x', size: '3:2' });
   assert.equal(plain.ok, true, plain.error ?? '');
   assert.equal('watermark' in bodies[0], false, '默认不发 watermark');
@@ -413,6 +416,7 @@ t('stats：baseUrl 只留 host 不含密钥，requests/ok/failed 计数正确', 
     model: 'm',
     baseUrl: 'https://api.example.com/v1?token=sk-secret',
     apiKey: 'sk-secret',
+    maxSize: '1024x1024',
     now: () => 777,
     fetchImpl: async () => {
       n += 1;

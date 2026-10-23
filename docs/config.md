@@ -102,8 +102,8 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `agent.mode` | 字符串 | assist | **代理模式**：assist 平时休眠、被叫到才醒（醒了就持续参与一会儿）/ observer 只看不说（不喂模型）/ active 休眠时每 5 分钟看一眼有没有新消息。 |
-| `agent.batchSize` | 数字 | 6 | **一批最多几条**：激活状态下攒够这么多条就唤醒一次；休眠时收到的话只是攒着（下次醒来一起看）。 |
-| `agent.batchMs` | 数字 | 8000 | **攒批等待（ms）**：激活状态下从第一条新消息算起，等这么久就把这一批交给模型。 |
+| `agent.batchSize` | 数字 | 10 | **一批最多几条**：激活状态下攒够这么多条就唤醒一次；休眠时收到的话只是攒着（下次醒来一起看）。 |
+| `agent.batchMs` | 数字 | 20000 | **攒批等待（ms）**：激活状态下从第一条新消息算起，等这么久就把这一批交给模型。 |
 | `agent.maxActive` | 数字 | 8 | **同时活跃的会话数**：超过就按最近活跃淘汰，防会话池无限涨。 |
 | `agent.idleDisposeMs` | 数字 | 1800000 | **空闲回收（ms）**：会话多久没动静就释放它的 agent（下次再建）。 |
 | `agent.tickMs` | 数字 | 1000 | **调度节拍（ms）**：批量窗口、激活超时与社交能量的检查频率。 |
@@ -249,7 +249,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `chatCommands.prefix` | 字符串 | / | **命令前缀**：命令名本身固定，前缀换成什么都能用（配成 `!` 就敲 `!help`）；只认**句首**前缀。它是公共前缀，下游有同名命令也照常触发，枢纽不抢。 |
 | `chatCommands.bypassPrefix` | 字符串 | !! | **让路前缀**：加在原命令前面，枢纽连那条回话都不要、当普通消息走（默认前缀下如 `!!/reset`）。 |
 | `chatCommands.superUsers` | 字符串 | [] | **超管名单（JSON）**：JSON 数组，如 ["10001"]；空 = 整条链沉默（不猜谁是管理员）。 |
-| `chatCommands.maxReplyChars` | 数字 | 800 | **回话长度上限**：超长就截断，防刷屏。 |
+| `chatCommands.maxReplyChars` | 数字 | 1500 | **回话长度上限**：超长就截断，防刷屏。 |
 
 ## 表情包库
 
@@ -258,7 +258,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `memes.enabled` | 开关 | 开 | **表情包库**：关掉后不收集也不发送表情。 |
-| `memes.topK` | 数字 | 8 | **上下文里列几张**：装配 prompt 时最多列几个候选 id。 |
+| `memes.topK` | 数字 | 50 | **上下文里列几张**：装配 prompt 时最多列几个候选 id。 |
 | `memes.maxSend` | 数字 | 3 | **一次最多发几张**：单条回复里的表情数量上限。 |
 | `memes.maxCount` | 数字 | 200 | **库容量上限（张）**：超过后自动淘汰最少用、最久未用的；最近用过的几张受保护。改动重启后生效。 |
 | `memes.autoCollect` | 开关 | 开 | **允许收录**：关掉后 agent 也不许收录表情包（库只读）。收集本身由 agent 判断，不自动收。 |
@@ -289,7 +289,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `imageGen.model` | 字符串 | 空 | **模型名**：OpenAI 兼容生图接口的模型 id。 |
 | `imageGen.baseUrl` | 字符串 | 空 | **接口地址**：形如 https://…/v1（不要带 /images/generations）。 |
 | `imageGen.apiKey` | 字符串 | 空 | **API Key（凭据）**：留空 = 不改。不回显明文。 |
-| `imageGen.maxSize` | 字符串 | 1024x1024 | **尺寸上限**：形如 1024x1024；请求的 size 会等比内缩到它以内。 |
+| `imageGen.maxSize` | 字符串 | 2560x1440 | **尺寸上限**：形如 2560x1440；请求的 size 会等比内缩到它以内。 |
 | `imageGen.minSize` | 字符串 | 空 | **尺寸下限**：留空 = 不设下限。 |
 | `imageGen.watermark` | 开关 | 关 | **加水印**：非 OpenAI 官方参数，默认不发；显式开启才透传 watermark 给支持它的中转接口。 |
 | `imageGen.timeoutMs` | 数字 | 120000 | **超时（ms）**：生图等待上限（图确实慢，默认给得很宽）。 |
@@ -314,7 +314,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `memory.isolation.level` | 字符串 | balanced | **隔离级别**：strict 只在本会话 / scoped 按会话可见 / balanced 折中（默认：活跃层能在共享会话之间看见彼此进行中的话题）/ open 最松。**注意**：改松不只放活跃层，长期事实的跨群放行也会一起放松。 |
 | `memory.isolation.crossGroupIdentity` | 开关 | 开 | **跨群认同一个人**：打开后同一个人在不同群共用一个档案。 |
 | `memory.isolation.crossGroupFacts` | 字符串 | shareable | **跨群事实**：shareable 标记过的，以及点了名、人都在本群的，可跨群（默认）/ never 永不 / all 全部（连没点名的群内事实也跨）。 |
-| `memory.isolation.privateFacts` | 字符串 | never | **私聊事实**：never 私聊内容不出私聊（默认）/ sameActor 同一个人可见 / all 全部。 |
+| `memory.isolation.privateFacts` | 字符串 | sameActor | **私聊事实**：never 私聊内容不出私聊 / sameActor 同一个人可见（默认）/ all 全部。 |
 | `memory.isolation.sensitivityAlwaysLocal` | 开关 | 开 | **敏感内容永远本地**：打开后敏感事实不参与跨会话装配（不看 level）。 |
 | `memory.isolation.overrides` | 字符串 | [] | **逐项覆盖（JSON）**：JSON 数组：给单条记忆指定可见范围。 |
 | `memory.isolation.trustedGroups` | 字符串 | [] | **可信群（JSON）**：JSON 数组：这些群之间可以互相看见（仍受 level 约束）。 |
@@ -365,7 +365,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 三点容易误解的地方：
 
-1. **档位只切 `level`，不改四个子开关。** 上表是四个子开关取默认值（`crossGroupIdentity` 开、`crossGroupFacts` shareable、`privateFacts` never、`sensitivityAlwaysLocal` 开）的结果。所以 `open` **也不放**私聊事实与敏感条目——想放得单独改那两个开关。
+1. **档位只切 `level`，不改四个子开关。** 上表是四个子开关取默认值（`crossGroupIdentity` 开、`crossGroupFacts` shareable、`privateFacts` sameActor、`sensitivityAlwaysLocal` 开）的结果。所以 `open` **也不放**私聊事实与敏感条目——想放得单独改那两个开关。
 2. **`level` 不是"档位名越大越宽松"的单一旋钮**：`open` 与 `balanced` 的差别只有"没点名的群内事实"和"点了个不在群的人"这两类（后者在 open 下由闸门先拦，档位管不到）。
 3. **点名闸门排在 `level:open` 之前**：只要「讲的是谁」里的人此刻不在本群，`open` 也放不出去。
 

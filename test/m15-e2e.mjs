@@ -39,6 +39,19 @@ const check = (name, fn) => {
     results.push({ name, ok: false, error: String(err?.message ?? err) });
   }
 };
+// 少数用例内部要 `await`（比如再发一次检索）；返回 Promise 的一律先挂到 `pending`，
+// 外层等全部落地再统计，否则这里的 async 回调会被当成同步函数、异常静默丢失。
+const pending = [];
+const asyncCheck = (name, fn) => {
+  pending.push(
+    Promise.resolve()
+      .then(() => fn())
+      .then(
+        () => results.push({ name, ok: true }),
+        (err) => results.push({ name, ok: false, error: String(err?.message ?? err) }),
+      ),
+  );
+};
 
 const SELF_ID = 30001000;
 
@@ -2820,16 +2833,25 @@ async function scenarioProfiles() {
     assert.ok(again.rejected.some((x) => /已经是长期记忆/.test(x.reason)), JSON.stringify(again.rejected));
   });
 
-  check('M16 人物卡里的私事跨群仍被隔离规则挡下（可见性由代码判定）', () => {
-    // 同一个人，在私聊里说过一件私事：写进档案后，群视角下不该出现。
+  check('M16 人物卡里的私事：本人说话时可见、别人说话时不给、敏感的一律不给', () => {
+    // 同一个人，在私聊里说过一件私事。
     applyMemoryOps(
       { persons: { 10001: { facts: [{ text: '他住在某个具体地址' }] } } },
       { store, profiles: hub.profiles, sessionKey: 'private:10001', worldKey: 'private:10001', actorId: '10001', isolation, now: Date.now(), source: 'test' },
     );
-    const inGroup = mind.snapshot('group:55555', { actorId: '10001' });
-    assert.ok(!inGroup.text.includes('某个具体地址'), '私聊里的事实不该出现在群里的上下文');
+    // `m22465` 用户定案：`privateFacts: sameActor`（现在的默认）＝**私聊来源人正在这个会话里说话**时可见。
+    // 所以他自己在群里说话的那一轮，这条进得来——"某人既在私聊里、又在群里，在群里应该能看见"。
+    const selfSpeaking = mind.snapshot('group:55555', { actorId: '10001' });
+    assert.ok(selfSpeaking.text.includes('某个具体地址'), '本人说话的回合，他的私聊事实应当进这个群');
+    // 别人说话的那一轮不给：那时上下文是别人的，把张三的私事塞进去更容易被当着别人复述。
+    const otherSpeaking = mind.snapshot('group:55555', { actorId: '10009' });
+    assert.ok(!otherSpeaking.text.includes('某个具体地址'), '别人说话的回合不该把他私聊里的事带上');
+    // 敏感条目永远留在本会话，`sameActor` 也不放。
+    store.add({ text: '他的银行卡号是某个东西', scope: 'private:10001', real: true }, { sessionKey: 'private:10001', worldKey: 'private:10001' });
+    const sensitive = mind.snapshot('group:55555', { actorId: '10001' });
+    assert.ok(!sensitive.text.includes('银行卡号'), '敏感内容在群里一律不可见');
     const inPrivate = mind.snapshot('private:10001', { actorId: '10001' });
-    assert.ok(inPrivate.text.includes('某个具体地址'), '但私聊视角下应当记得');
+    assert.ok(inPrivate.text.includes('某个具体地址'), '私聊视角下当然记得');
   });
 
   // 2.5) 话题关联（§24.4）：**"在聊同一件事"是语义判断，代码不做**；代码只接明写的引用关系。
@@ -3030,13 +3052,18 @@ async function scenarioRecall() {
   const weather = await hub.recall.search({ query: '天气', ...in55555 });
   const examInGroup = await hub.recall.search({ query: '考试', ...in55555 });
   const examInPrivate = await hub.recall.search({ query: '考试', sessionKey: 'private:10001', actorId: '10001', isolation });
-  check('M17 中文两字词命中四字句；私聊里的话翻不出来但报得出被挡了几条', () => {
+  asyncCheck('M17 中文两字词命中四字句；私聊里的话只对来源人自己翻得出来', async () => {
     assert.equal(weather.items.length, 1, '同群里搜"天气"要搜到"今天天气不错"，别群的记录不算');
     assert.equal(weather.items[0].refs.message_id, 101);
     assert.ok(weather.denied >= 1, '别群的记录被隔离挡下，条数必须报出来');
     assert.ok(['sqlite', 'memory'].includes(weather.mode));
-    assert.deepEqual(examInGroup.items, []);
-    assert.ok(examInGroup.denied >= 1);
+    // `m22465`：`privateFacts: sameActor`（现在的默认）＝私聊来源人**正在这个会话里说话**时可见。
+    // 所以 actorId=10001 在群里搜得到他自己私聊里的话；换成别人当 actor 就搜不到。
+    assert.equal(examInGroup.items.length, 1, '本人当 actor 时，他的私聊记录在群里也翻得出来');
+    assert.equal(examInGroup.items[0].sessionKey, 'private:10001');
+    const examAsOther = await hub.recall.search({ query: '考试', sessionKey: 'group:55555', actorId: '10002', isolation });
+    assert.deepEqual(examAsOther.items, [], '别人当 actor 时不该翻出他的私聊');
+    assert.ok(examAsOther.denied >= 1, '被挡的条数要说出来');
     assert.equal(examInPrivate.items.length, 1, '私聊视角下自己的话当然看得见');
     assert.equal(examInPrivate.items[0].sessionKey, 'private:10001');
   });
@@ -4682,6 +4709,7 @@ const main = async () => {
     assert.equal(first.store.stats.total >= 1, true);
   });
 
+  await Promise.all(pending);
   const failed = results.filter((r) => !r.ok);
   for (const r of results) {
     console.log(`${r.ok ? 'PASS' : 'FAIL'}  ${r.name}${r.ok ? '' : `  ← ${r.error}`}`);

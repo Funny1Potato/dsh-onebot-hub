@@ -376,9 +376,12 @@ const plainConfig = (value) => (value && typeof value.get === 'function' ? value
 check('Config schema 能填默认值', () => {
   const filled = Config({});
   assert.equal(plainConfig(filled.agent.mode), 'assist');
-  assert.equal(plainConfig(filled.agent.batchSize), 6);
+  assert.equal(plainConfig(filled.agent.batchSize), 10);
+  assert.equal(plainConfig(filled.agent.batchMs), 20000);
   // `m18072` 用户定案：默认档位由 scoped 改 balanced（活跃层要开箱能跨共享会话看见彼此的话题）。
   assert.equal(plainConfig(filled.memory.isolation.level), 'balanced');
+  // `m22311` 用户定案：私聊事实默认改 sameActor（同一个人在别的私聊里能看见）。
+  assert.equal(plainConfig(filled.memory.isolation.privateFacts), 'sameActor');
   // 活跃层（`m17909`）默认开着，「待结算」每天提一次。
   assert.equal(plainConfig(filled.memory.active.enabled), true);
   assert.equal(plainConfig(filled.memory.active.activeWindowDays), 30);
