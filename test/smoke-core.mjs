@@ -2724,8 +2724,7 @@ t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m0
   });
 });
 
-t('保留期清理：过期行占多数时走「清表重灌」，删完索引仍然可用（`m21653`）', async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-prune-rebuild-'));
+t('保留期清理：过期行占多数时走「清表重灌」，删完索引仍然可用（`m21653`）', async () => {  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-prune-rebuild-'));
   const recall = new RecallStore({ dir, linkId: 'up:test', log: () => {} });
   const dayOf = (ts) => {
     const d = new Date(ts);
