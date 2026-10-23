@@ -823,6 +823,34 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   assert.equal(wp.all()[0].term, 'short');
   assert.equal(wp.all()[0].visibility, 'private');
 
+  // 敏感标记（`m20991` 用户要求）：这条敏不敏感，模型也应该能说。它只会**收窄**（锁进本会话），
+  // 所以交给模型判断是安全的；反过来「声明 false 解锁」必须被拒——词表命中的内容不能被一句话放出去。
+  const ws = new MemoryStore({});
+  const sbase = { ...wbase, store: ws };
+  const mark = applyMemoryOps(
+    { long_term: { add: [{ text: '他欠了外面一笔钱', sensitive: true, related_users: ['10001'] }] } },
+    sbase,
+  );
+  assert.equal(mark.blocks.long_term.add, 1);
+  const marked = ws.all()[0];
+  assert.equal(marked.sensitive, true, '模型带的 sensitive:true 要落库');
+  // 标了敏感就锁在本会话：别的群一律不可见，跟档位无关。
+  const asOther = memoryBlocks(ws.all(), { sessionKey: 'group:99999', worldKey: 'group:99999', isolation: resolveIsolation({ level: 'open' }) });
+  assert.equal(asOther.longTerm.length, 0, '标了敏感就锁在本会话，open 档也不跨群');
+  // 反向声明不生效，且要明确说为什么不生效。
+  const unlock = applyMemoryOps({ long_term: { add: [{ text: '他欠了外面一笔钱', sensitive: false }] } }, sbase);
+  assert.ok(unlock.rejected.some((x) => /只能标成 true/.test(x.reason)), JSON.stringify(unlock.rejected));
+  assert.equal(ws.all()[0].sensitive, true, 'false 不得把 sensitive 抹掉');
+  // 事后补标：`long_term.sensitive:[序号]`，按当轮渲染的序号定位。
+  const ws2 = new MemoryStore({});
+  ws2.add({ text: '他家里最近不太顺', scope: 'group:55555', term: 'long' }, { sessionKey: 'group:55555', worldKey: 'group:55555' });
+  const late = applyMemoryOps({ long_term: { sensitive: [0] } }, { ...wbase, store: ws2 });
+  assert.equal(late.blocks.long_term.sensitive, 1, '事后要能按序号补标');
+  assert.equal(ws2.all()[0].sensitive, true);
+  const badIdx = applyMemoryOps({ long_term: { sensitive: [9] } }, { ...wbase, store: ws2 });
+  assert.equal(badIdx.blocks.long_term.sensitive, 0);
+  assert.ok(badIdx.rejected.some((x) => /序号越界/.test(x.reason)), JSON.stringify(badIdx.rejected));
+
   // 渲染形状（`m08663` 用户指出）：短期与长期**必须各成一块**——长期标题前空一行，
   // 否则它紧贴在短期最后一条下面，看着像同一段里的下一行；每块的序号也都从 0 起。
   assert.equal(

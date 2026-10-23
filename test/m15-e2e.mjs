@@ -1315,8 +1315,12 @@ async function scenarioIsolationAssemble() {
 
   check('balanced：同批人的 shareable 事实可见，private 仍不可见', () => {
     assert.ok(s3.text.includes('养了猫'), 'balanced 放开 shareable');
-    assert.ok(!s3.text.includes('住址'), 'private 事实在 balanced 下仍不可见');
-    assert.ok(!s3.text.includes('换工作'));
+    // 判「不可见」要看**记忆块**，不能拿整份 prompt 去 includes 关键词——提示词里本来就会提到
+    // "住址／钱／身体"这些词（`m20991` 那条隐私提示），整份文本断言会被自己的指导语撞车。
+    const longTexts = (s3.blocks.longTerm ?? []).map((e) => String(e.text ?? '')).join('\n');
+    assert.ok(!longTexts.includes('住址'), 'private 事实在 balanced 下仍不可见');
+    assert.ok(!longTexts.includes('换工作'), '私聊内容在 balanced 下仍不可见');
+    assert.ok((s3.denied ?? []).some((d) => /privateFacts/.test(String(d.reason))), '被拦的原因要说得出来');
   });
 
   check('审计账本记下放行与拦截的判定原因', () => {
