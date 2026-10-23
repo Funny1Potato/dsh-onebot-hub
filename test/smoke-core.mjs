@@ -970,6 +970,71 @@ t('活跃层：跨群共享要同时过白名单与"共同活跃群友"两关，
   assert.equal(filterActive(a.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso, activeWindowDays: 0, now: now + 31 * 86400e3 }).visible.length, 2);
 });
 
+t('活跃层：序号不漂移、过期条目说得出原因、没露过面的人不算活跃', () => {
+  const now = 1_800_000_000_000;
+  const a = new ActiveStore({ storage: null });
+  a.add({ kind: 'topic', text: '讨论换显卡', originScope: 'group:55555' }, now);
+  a.add({ kind: 'task', text: '替小张列清单', originScope: 'group:55555' }, now);
+  const iso = resolveIsolation({ level: 'balanced' });
+  const view = (at) => filterActive(a.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso, activeWindowDays: 30, now: at });
+
+  // 改正文不换位：模型是照着屏幕上的号写 update/settle 的，号一漂就改错条目。
+  a.update(a.all()[0].id, { text: '讨论换显卡（已改）' }, now + 1000);
+  assert.deepEqual(view(now).visible.map((e) => e.text), ['讨论换显卡（已改）', '替小张列清单']);
+
+  // 同一类里新增往后排，不把前面的号顶掉。
+  a.add({ kind: 'task', text: '再列一份', originScope: 'group:55555' }, now + 2000);
+  assert.deepEqual(view(now).visible.map((e) => e.text), ['讨论换显卡（已改）', '替小张列清单', '再列一份']);
+
+  // 过期条目要**说得出原因**（window:expired），不能静默消失——查起来才知道它去哪了。
+  const expired = view(now + 31 * 86400e3);
+  assert.equal(expired.visible.length, 0);
+  assert.equal(expired.denied.filter((d) => d.reason === 'window:expired').length, 3, JSON.stringify(expired.denied));
+
+  // 从没露过面的人不算活跃（窗口关掉时也不能把"没说过话"当活跃）。
+  const quiet = buildShareContext({
+    persons: [{ userId: '10002', groups: { 'group:55555': {}, 'group:77777': {} } }],
+    windowDays: 0,
+    now,
+  });
+  assert.equal(quiet.commonActive('group:55555', 'group:77777'), false, '没有 lastSentAt 就不算露过面');
+  const alive = buildShareContext({
+    persons: [{ userId: '10002', groups: { 'group:55555': { lastSentAt: now - 1000 }, 'group:77777': { lastSentAt: now - 2000 } } }],
+    windowDays: 0,
+    now,
+  });
+  assert.equal(alive.commonActive('group:55555', 'group:77777'), true);
+
+  // 写入层的硬边界：非法的 kind 拒掉**而且不落盘**；空正文不认；不替别的会话写。
+  const base = {
+    store: new MemoryStore({}),
+    profiles: new Profiles({ storage: null }),
+    active: a,
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    actorId: '10001',
+    isolation: iso,
+    now,
+  };
+  const before = a.all().length;
+  const rk = applyMemoryOps({ active: { add: [{ kind: 'note', text: '不合法的类目' }] } }, base);
+  assert.equal(rk.applied.active.add, 0);
+  assert.equal(a.all().length, before, '非法的 kind 不能落盘');
+  assert.ok(rk.rejected.some((x) => /只认/.test(x.reason)), JSON.stringify(rk.rejected));
+
+  const ru = applyMemoryOps({ active: { update: [{ index: 0, text: '' }] } }, { ...base, activeBlocks: { entries: view(now).visible } });
+  assert.equal(ru.applied.active.update, 0);
+  assert.ok(ru.rejected.some((x) => /text 为空/.test(x.reason)), JSON.stringify(ru.rejected));
+
+  const rx = applyMemoryOps(
+    { active: { add: [{ kind: 'topic', text: '替别的群开的' }] } },
+    { ...base, sessionKey: 'group:66666', currentSessionKey: 'group:55555' },
+  );
+  assert.equal(rx.applied.active.add, 0);
+  assert.ok(rx.rejected.some((x) => /不能替别的会话写/.test(x.reason)), JSON.stringify(rx.rejected));
+  assert.ok(!a.all().some((e) => e.text === '替别的群开的'));
+});
+
 t('曾用名与话题关联：改名之后还认得出人，引用关系才接线（§24.11/§24.4）', () => {
 
   const profiles = new Profiles({ storage: null, now: () => 1_700_000_000_000 });

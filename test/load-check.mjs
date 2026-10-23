@@ -1655,6 +1655,23 @@ async function runAsyncChecks() {
     const r4 = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { update: [{ index: 99, text: 'x' }] } } }));
     assert.ok(r4.rejected.some((x) => /序号越界/.test(x.reason)));
 
+    // 非法的 kind：拒掉**而且不落盘**（不能一边说"只认 topic/task"，一边按 topic 存进去）。
+    const rBadKind = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { add: [{ kind: 'note', text: '不合法的类目' }] } } }));
+    assert.equal(rBadKind.applied.active.add, 0, JSON.stringify(rBadKind));
+    assert.ok(rBadKind.rejected.some((x) => /只认/.test(x.reason)), JSON.stringify(rBadKind.rejected));
+    assert.ok(!hub.active.all().some((e) => e.text === '不合法的类目'), '非法的 kind 不能落盘');
+
+    // 活跃层只准写当前会话：模型不能替别的群开话题。
+    const prevKey = hub.mind.activeSessionKey;
+    hub.mind.activeSessionKey = 'group:55555';
+    const rOther = JSON.parse(
+      await t.execute({ sessionKey: 'group:66666', actorId: '10001', ops: { active: { add: [{ kind: 'topic', text: '替别的群开的' }] } } }),
+    );
+    hub.mind.activeSessionKey = prevKey;
+    assert.equal(rOther.applied.active.add, 0, JSON.stringify(rOther));
+    assert.ok(rOther.rejected.some((x) => /不能替别的会话写/.test(x.reason)), JSON.stringify(rOther.rejected));
+    assert.ok(!hub.active.all().some((e) => e.text === '替别的群开的'), '不能替别的会话写活跃条目');
+
     // 结算（`m17909`）：keep 必须给 summary——那一行才是"以后还记得发生过这件事"的唯一证据；
     // 细节按 keep_as 落档案（这里落到话题归档）。结算完这条就从活跃层消失。
     const rk = JSON.parse(
@@ -1675,6 +1692,10 @@ async function runAsyncChecks() {
     assert.equal(indexLine.term, 'long');
     assert.ok(!hub.active.all().some((e) => e.text === '在讨论买哪款咖啡机'), '结算后活跃层不留"已完成"条目');
     assert.equal(hub.profiles.topic('咖啡机选购').status, 'closed');
+    // 回执带一份**最新序号**：结算掉一条，后面的号会前移，模型得知道现在几号对应哪一条。
+    assert.ok(Array.isArray(rk.active?.list), '回执里要有最新序号表');
+    assert.ok(rk.active.list.every((x, i) => x.index === i), '序号必须连着编');
+    assert.ok(!rk.active.list.some((x) => x.text === '在讨论买哪款咖啡机'), '结算掉的不该还在表里');
 
     // drop 就是直接删，不留痕。
     const dropIdx = hub.mind.snapshot('group:55555', { actorId: '10001', audit: false }).active;
