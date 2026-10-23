@@ -2566,7 +2566,9 @@ t('下游心跳：只给实现端型链路发，stop/close 都要停（§19）',
   assert.equal(frames.length, 0, 'intervalMs: 0 一个字节都不该发');
 
   assert.equal(session.startHeartbeat({ intervalMs: 20 }), true);
-  await sleep(75);
+  // 等 4 个 interval，而不是 75 ms（≈3.75 个）：Windows CI 的计时器粒度粗、机器又忙，
+  // 20 ms 的间隔在 75 ms 里只来得及跑一次是常态（真红过：`应发出至少两次心跳，实际 1`）。
+  await sleep(220);
   const beats = frames.filter((f) => f.meta_event_type === 'heartbeat');
   assert.ok(beats.length >= 2, `应发出至少两次心跳，实际 ${beats.length}`);
   assert.equal(beats[0].post_type, 'meta_event');
