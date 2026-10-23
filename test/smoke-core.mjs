@@ -56,7 +56,7 @@ import {
 import { MemoryStore, memoryDedupeKey, normalizeMemoryText } from '../lib/memory/store.js';
 import { resolveIsolation } from '../lib/memory/isolation.js';
 import { applyMemoryOps, memoryBlocks } from '../lib/memory/writer.js';
-import { ActiveStore, buildShareContext, filterActive, renderActive } from '../lib/memory/active.js';
+import { ActiveStore, buildShareContext, filterActive, renderActive, isActiveVisible } from '../lib/memory/active.js';
 import { tokenize, RecallStore } from '../lib/memory/recall.js';
 import { decayStrength, isWeak, weakMessageIds } from '../lib/memory/decay.js';
 import { collectCues, cueKey, Reminders } from '../lib/memory/cues.js';
@@ -1076,6 +1076,10 @@ t('活跃层：跨群共享要同时过白名单与"共同活跃群友"两关，
   const later = renderActive(shown, { limit: 8, settle: true, now: now + 25 * 3600e3 });
   assert.match(later, /【待结算】/);
   assert.ok(!renderActive(shown, { limit: 8, settle: true, now }).includes('【待结算】'), '刚写的不该催结算');
+  // 被条数上限挤出视野的条目要说一句（`m21098` 自审）：序号只覆盖看得见的那几条，
+  // 不说明的话模型会以为活跃层就这些，而挤掉的既看不见也结算不掉。
+  assert.ok(!renderActive(shown, { limit: 8, now }).includes('没显示出来'), '全都在视野里时不该多那句话');
+  assert.match(renderActive(shown, { limit: 1, now, hidden: 1 }), /（还有 1 条没显示出来；/);
   // 过了活跃窗口就不注入（0 = 不过滤）。
   assert.equal(filterActive(a.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso, now: now + 31 * 86400e3 }).visible.length, 0);
   assert.equal(filterActive(a.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso, activeWindowDays: 0, now: now + 31 * 86400e3 }).visible.length, 2);
@@ -1144,6 +1148,61 @@ t('活跃层：序号不漂移、过期条目说得出原因、没露过面的�
   assert.equal(rx.applied.active.add, 0);
   assert.ok(rx.rejected.some((x) => /不能替别的会话写/.test(x.reason)), JSON.stringify(rx.rejected));
   assert.ok(!a.all().some((e) => e.text === '替别的群开的'));
+
+  // 参与者只认 QQ 号（`m21098` 自审）：写名字会被丢掉，而"没参与者"意味着结算出的索引行
+  // 是不点名的 `shareable`，会被念到别的群去——这是 fail-open，必须当面说出来。
+  const rp = applyMemoryOps(
+    { active: { add: [{ kind: 'task', text: '替小张整理清单', participants: ['小张', '10001'] }] } },
+    base,
+  );
+  assert.equal(rp.applied.active.add, 1, '名字被忽略，但这条照写');
+  assert.ok(rp.rejected.some((x) => /participants 只认 QQ 号/.test(x.reason) && /小张/.test(x.reason)), JSON.stringify(rp.rejected));
+  const added = a.all().find((e) => e.text === '替小张整理清单');
+  assert.deepEqual(added.participants, ['10001'], '只留纯数字的');
+
+  // 同一批里同一个序号只能结算一次：`visible` 是快照，不挡就会重复写索引行、重复计数。
+  const dupSnap = { entries: view(now).visible };
+  const dupSettle = applyMemoryOps(
+    {
+      active: {
+        settle: [
+          { index: 0, outcome: 'keep', summary: '第一次结算写的索引' },
+          { index: 0, outcome: 'keep', summary: '第二次又写一行' },
+        ],
+      },
+    },
+    { ...base, activeBlocks: dupSnap },
+  );
+  assert.equal(dupSettle.applied.active.settle.keep, 1, '只该结算成功一次');
+  assert.ok(dupSettle.rejected.some((x) => /已经结算过了/.test(x.reason)), JSON.stringify(dupSettle.rejected));
+  assert.equal(base.store.all().filter((e) => e.text === '第二次又写一行').length, 0, '重复那条不能落库');
+
+  // 摸一下不续命：`update` 只改参与者（正文没变）时不刷新 `updatedAt`。
+  const touchView = view(now).visible;
+  const touchIdx = touchView.findIndex((e) => e.text === '再列一份');
+  assert.ok(touchIdx >= 0, '要有一条还没被结算掉的条目');
+  const touchTarget = touchView[touchIdx];
+  const touchedAt = touchTarget.updatedAt;
+  // ① 原样重写一遍：什么都没变，就不该续命（否则模型每轮"顺手摸一下"就能让 30 天窗口永不过期）。
+  const noop = applyMemoryOps(
+    { active: { update: [{ index: touchIdx, text: '再列一份' }] } },
+    { ...base, now: now + 5000, activeBlocks: { entries: touchView } },
+  );
+  assert.equal(noop.applied.active.update, 1);
+  assert.equal(a.byId(touchTarget.id).updatedAt, touchedAt, '正文没变就不该刷新 updatedAt');
+  // ② 真的改了点东西（参与者变了）：这才算"又被提起"，刷新 updatedAt。
+  applyMemoryOps(
+    { active: { update: [{ index: touchIdx, text: '再列一份', participants: ['10003'] }] } },
+    { ...base, now: now + 9000, activeBlocks: { entries: touchView } },
+  );
+  assert.equal(a.byId(touchTarget.id).updatedAt, now + 9000, '内容真变了才刷新');
+  assert.deepEqual(a.byId(touchTarget.id).participants, ['10003'], '参与者变了还是要落');
+  // 活跃条目也能自己标敏感（跟长期记忆一个口径）：标了就永远不出本会话，哪怕白名单里的另一个群也拿不到。
+  applyMemoryOps({ active: { add: [{ kind: 'topic', text: '小张私下跟我说的事', sensitive: true }] } }, base);
+  const secret = a.all().find((e) => e.text === '小张私下跟我说的事');
+  assert.equal(secret.sensitive, true, '敏感标记要落盘');
+  assert.ok(!isActiveVisible(secret, { sessionKey: 'group:99999', worldKey: 'group:99999', isolation: iso }).ok, '标了敏感就不出本会话');
+  assert.ok(isActiveVisible(secret, { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso }).ok, '本会话自己还是看得见的');
 });
 
 t('曾用名与话题关联：改名之后还认得出人，引用关系才接线（§24.11/§24.4）', () => {
