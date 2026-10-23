@@ -46,12 +46,27 @@ jobs:
         run: npm test
 
       # Trusted Publishing：npm 自动用 OIDC 换临时凭据，无需任何 secret/token
+      #
+      # 预发布（版本号带 `-`，如 `0.11.0-beta.1`）**必须**发到 `next` 这个 dist-tag 上。
+      # `npm publish` 默认一律打 `latest`——预发布版要是占了 `latest`，所有 `npm install`
+      # 的人都会装到 beta，而 `latest` 一旦被新版覆盖，旧的那条就再没有"回退点"了。
       - name: Publish
         if: ${{ !inputs.dry-run }}
-        run: npm publish
+        run: |
+          ver="$(node -p "require('./package.json').version")"
+          case "$ver" in
+            *-*)
+              echo "预发布 $ver → dist-tag next"
+              npm publish --tag next
+              ;;
+            *)
+              npm publish
+              ;;
+          esac
 
       # 打 tag 发布成功后自动建同名 GitHub Release，附上与 npm 同一内容的 tarball；
-      # release 已存在（重跑）时退化为重新上传资产
+      # release 已存在（重跑）时退化为重新上传资产。预发布要标 `--prerelease`，
+      # 否则 GitHub 会把它当成"最新正式版"挂在仓库首页。
       - name: GitHub Release
         if: ${{ startsWith(github.ref, 'refs/tags/') && !inputs.dry-run }}
         env:
@@ -59,7 +74,11 @@ jobs:
         run: |
           mkdir dist
           npm pack --pack-destination dist
-          gh release create "$GITHUB_REF_NAME" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes dist/*.tgz \
+          case "$(node -p "require('./package.json').version")" in
+            *-*) pre="--prerelease" ;;
+            *)   pre="" ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" --verify-tag $pre --title "$GITHUB_REF_NAME" --generate-notes dist/*.tgz \
             || gh release upload "$GITHUB_REF_NAME" dist/*.tgz --clobber
 
       - name: Pack（dry-run 模式下确认打包内容）
