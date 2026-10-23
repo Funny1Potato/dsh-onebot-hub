@@ -246,19 +246,19 @@ t('quotaKey：去掉会话激活后缀，群与私聊的账只留一份', () => 
 t('同群换会话：账接着走，不是从零开始（m14570 报数行一直显示"已用 0"的根因）', () => {
   const ledger = new QuotaLedger();
   // 第一段会话记了一笔，宿主给的 sessionKey 带激活后缀
-  ledger.note('group:617770183.amvb5sjddkj1z', msg(1, { input: 7509, cache: 16384, output: 417, turn: 1 }), 'sid-a');
+  ledger.note('group:123456789.amvb5sjddkj1z', msg(1, { input: 7509, cache: 16384, output: 417, turn: 1 }), 'sid-a');
   // 读侧拿的是批次侧的裸键（协议层的 sessionKey），也拿得到
-  assert.equal(ledger.usage('group:617770183').day.input, 7509, '裸键能读到带后缀那笔');
+  assert.equal(ledger.usage('group:123456789').day.input, 7509, '裸键能读到带后缀那笔');
   // 第二段会话（新激活）继续记，账要加在同一份上
-  ledger.note('group:617770183.amvb6582p0npd', msg(2, { input: 492, cache: 23872, output: 64, turn: 2 }), 'sid-b');
-  const { day } = ledger.usage('group:617770183');
+  ledger.note('group:123456789.amvb6582p0npd', msg(2, { input: 492, cache: 23872, output: 64, turn: 2 }), 'sid-b');
+  const { day } = ledger.usage('group:123456789');
   assert.equal(day.input, 7509 + 492, '两段会话的用量合到同一行');
   assert.equal(day.cache, 16384 + 23872);
   assert.equal(day.turns, 2, '轮次也是两段各一轮');
   const q = normalizeQuota({ enabled: true, tokensPerDay: 1e6 });
   // token 口径 = input + cache + output = 8001 + 40256 + 481 = 48738
-  assert.match(ledger.render('group:617770183.amvb6582p0npd', q), /已用 48,738 token/, '报数行按群读，不再是 0');
-  assert.deepEqual(Object.keys(ledger.toJSON().agents), ['group:617770183'], '落盘只留归一后的一个键');
+  assert.match(ledger.render('group:123456789.amvb6582p0npd', q), /已用 48,738 token/, '报数行按群读，不再是 0');
+  assert.deepEqual(Object.keys(ledger.toJSON().agents), ['group:123456789'], '落盘只留归一后的一个键');
 });
 
 t('去重水位按 sessionId 分桶：同群两个会话各数各的 seq', () => {
@@ -278,12 +278,12 @@ t('迁移：旧账本里带后缀的键并进群那一份，waivers 也跟着并
     'quota/ledger.json': {
       version: 1,
       agents: {
-        'group:617770183.amvb5sjddkj1z': {
+        'group:123456789.amvb5sjddkj1z': {
           days: { [today]: { input: 100, cache: 0, output: 0, turns: 1, firstAt: 111, lastAt: 111 } },
           months: {},
           waivers: [],
         },
-        'group:617770183.amvb6582p0npd': {
+        'group:123456789.amvb6582p0npd': {
           days: { [today]: { input: 200, cache: 50, output: 20, turns: 1, firstAt: 222, lastAt: 999 } },
           months: {},
           waivers: [{ scope: 'day', key: today, by: '1', at: 5, amount: 50, note: '' }],
@@ -292,14 +292,14 @@ t('迁移：旧账本里带后缀的键并进群那一份，waivers 也跟着并
     },
   });
   const ledger = new QuotaLedger({ storage, now: () => at });
-  const day = ledger.usage('group:617770183').day;
+  const day = ledger.usage('group:123456789').day;
   assert.equal(day.input, 300, '两段会话的账相加');
   assert.equal(day.cache, 50);
   assert.equal(day.turns, 2);
   assert.equal(day.firstAt, 111, 'firstAt 取早');
   assert.equal(day.lastAt, 999, 'lastAt 取晚');
-  assert.equal(ledger.waived('group:617770183', 'day', today), 50, '解限记录跟着并过来');
-  assert.deepEqual(Object.keys(ledger.toJSON().agents), ['group:617770183'], '旧键不再单独留着');
+  assert.equal(ledger.waived('group:123456789', 'day', today), 50, '解限记录跟着并过来');
+  assert.deepEqual(Object.keys(ledger.toJSON().agents), ['group:123456789'], '旧键不再单独留着');
   assert.ok(storage.files.has('quota/ledger.json'), '迁移过的账落回磁盘');
 });
 

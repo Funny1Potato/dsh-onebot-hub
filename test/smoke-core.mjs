@@ -760,8 +760,8 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
 
   const s = new MemoryStore({});
   const text = 'FunnyPotato 是 QQ 945126014（owner）';
-  const a = s.add({ text, kind: 'identity', scope: 'group:617770183', actor: { user_id: '945126014' } });
-  const b = s.add({ text: `  ${text}  `, kind: 'identity', scope: 'group:617770183', actor: { user_id: '945126014' }, refs: { message_id: '99' } });
+  const a = s.add({ text, kind: 'identity', scope: 'group:123456789', actor: { user_id: '945126014' } });
+  const b = s.add({ text: `  ${text}  `, kind: 'identity', scope: 'group:123456789', actor: { user_id: '945126014' }, refs: { message_id: '99' } });
   assert.equal(s.all().length, 1, '同一条不该堆成两行');
   assert.equal(b.id, a.id, '返回的是已有那条（id 不变，模型才 modify 得到）');
   assert.equal(a.refs.message_id, '99', '折叠时补上原来缺的线索');
@@ -770,15 +770,15 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   // 换群 / 换说话人 = 另外的条（可见性边界与归属都不同）。
   s.add({ text, kind: 'identity', scope: 'group:55555', actor: { user_id: '945126014' } });
   assert.equal(s.all().length, 2);
-  s.add({ text, kind: 'identity', scope: 'group:617770183', actor: { user_id: '10001' } });
+  s.add({ text, kind: 'identity', scope: 'group:123456789', actor: { user_id: '10001' } });
   assert.equal(s.all().length, 3);
   // 空文本不参与合并（否则一堆空条目会挤成一条，且没有信息量）。
   s.add({ text: '' });
   s.add({ text: '   ' });
   assert.equal(s.all().length, 5);
   // 刻意造重复仍要能造（导入/测试/`dedupe:false`）。
-  s.add({ text: '刻意两条', scope: 'group:617770183' }, { dedupe: false });
-  s.add({ text: '刻意两条', scope: 'group:617770183' }, { dedupe: false });
+  s.add({ text: '刻意两条', scope: 'group:123456789' }, { dedupe: false });
+  s.add({ text: '刻意两条', scope: 'group:123456789' }, { dedupe: false });
   assert.equal(s.all().filter((e) => e.text === '刻意两条').length, 2);
 
   // 模型把同一句话同时写进短期与长期（同一批、`blocks` 快照还没更新）：库里只该有一条，
@@ -2079,10 +2079,10 @@ t('会话卡落盘：重启之后还记得刚才在聊什么，且自报"这是�
     id,
     ts: 1700000000000 + Number(String(id).replace(/\D/g, '') || 0),
     direction: 'upstream-in',
-    sessionKey: 'group:617770183',
+    sessionKey: 'group:123456789',
     actor: { user_id: uid, nickname: nick },
     text,
-    payload: { post_type: 'message', message_type: 'group', group_id: 617770183 },
+    payload: { post_type: 'message', message_type: 'group', group_id: 123456789 },
     ...extra,
   });
 
@@ -2095,21 +2095,21 @@ t('会话卡落盘：重启之后还记得刚才在聊什么，且自报"这是�
       id: 't9',
       ts: 1700000009999,
       direction: 'downstream-out',
-      sessionKey: 'group:617770183',
+      sessionKey: 'group:123456789',
       text: '在吗',
       refs: { upstreamLinkId: 'up:1' },
-      payload: { post_type: 'message', message_type: 'group', group_id: 617770183 },
+      payload: { post_type: 'message', message_type: 'group', group_id: 123456789 },
     }),
     null,
   );
   // 同一个 entry 重复进来自动忽略。
   cards.note(msg('t3', 10001, '小明', '那我去睡了'));
   // 什么都不像的条目不进卡。
-  assert.equal(cards.note({ id: 't10', direction: 'upstream-in', sessionKey: 'group:617770183', kind: 'meta_event' }), null);
+  assert.equal(cards.note({ id: 't10', direction: 'upstream-in', sessionKey: 'group:123456789', kind: 'meta_event' }), null);
 
-  const card = cards.get('group:617770183');
+  const card = cards.get('group:123456789');
   assert.equal(card.messageCount, 3, '转发镜像、重复条目、meta_event 都不计数');
-  assert.equal(card.worldKey, 'group:617770183');
+  assert.equal(card.worldKey, 'group:123456789');
   assert.equal(card.participants.length, 2);
   assert.equal(card.participants[0].user_id, 10001, '说话多的排前面');
   assert.equal(card.participants[0].count, 2);
@@ -2126,7 +2126,7 @@ t('会话卡落盘：重启之后还记得刚才在聊什么，且自报"这是�
   const again = new Cards({ storage });
   assert.equal(again.load(), 1);
   assert.equal(again.stats.skipped, 1);
-  const resumed = again.digestFor('group:617770183');
+  const resumed = again.digestFor('group:123456789');
   assert.equal(resumed.resumed, true);
   assert.equal(resumed.messageCount, 3);
   assert.equal(resumed.participants.length, 2);
@@ -2142,12 +2142,12 @@ t('会话卡落盘：重启之后还记得刚才在聊什么，且自报"这是�
   const memoryOnly = new Cards({});
   assert.equal(memoryOnly.enabled, false);
   memoryOnly.note(msg('t1', 10001, '小明', '在吗'));
-  assert.equal(memoryOnly.digestFor('group:617770183').messageCount, 1);
+  assert.equal(memoryOnly.digestFor('group:123456789').messageCount, 1);
   assert.equal(memoryOnly.flush(), 0);
   assert.equal(memoryOnly.stats.dir, null);
 
   assert.equal(cards.reset(), 1);
-  assert.equal(cards.get('group:617770183'), null);
+  assert.equal(cards.get('group:123456789'), null);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
@@ -2847,8 +2847,8 @@ t('会话卡：发送失败的消息不入卡，存量行可按裁决清掉（m3
 });
 
 t('会话白名单：sessionOverrideOf / mergePolicyMode（m31030）', () => {
-  const cfg = { agentGroups: { 617770183: { mode: 'observer' }, 55555: {} }, agentPrivates: { 10001: {} } };
-  assert.deepEqual(sessionOverrideOf('group:617770183', cfg), { mode: 'observer' });
+  const cfg = { agentGroups: { 123456789: { mode: 'observer' }, 55555: {} }, agentPrivates: { 10001: {} } };
+  assert.deepEqual(sessionOverrideOf('group:123456789', cfg), { mode: 'observer' });
   assert.deepEqual(sessionOverrideOf('group:55555', cfg), {}, '命中但没写覆盖 = 只准入');
   assert.deepEqual(sessionOverrideOf('private:10001', cfg), {});
   assert.equal(sessionOverrideOf('group:99999', cfg), null, '功能启用中，没列出的群 = 拒');

@@ -473,7 +473,7 @@ await check('多下游列表编辑器：「以 JSON 编辑」能切出去再切�
 
 await check('群白名单：额度按行配，「额度」面板里填口径/单价/限额/报数口径，写回同一串 JSON（m14190）', async () => {
   const groups = JSON.stringify([
-    { id: '617770183', mode: 'active' },
+    { id: '123456789', mode: 'active' },
     {
       id: '55555',
       mode: 'assist',
@@ -531,7 +531,7 @@ await check('群白名单：额度按行配，「额度」面板里填口径/单
 });
 
 await check('群白名单：第一行没配额度，展开后勾上启用＋填上限就写进 quota（token 口径）', async () => {
-  const groups = JSON.stringify([{ id: '617770183', mode: 'active' }, { id: '55555' }]);
+  const groups = JSON.stringify([{ id: '123456789', mode: 'active' }, { id: '55555' }]);
   const app = boot({ ...BASE_VALUE, agent: { mode: 'assist', groups, privates: '[]' } });
   const control = () => controlsFor(app.render()).get('agent.groups');
   buttonsOf(control()).find((button) => textOf(button) === '额度').props.onClick();

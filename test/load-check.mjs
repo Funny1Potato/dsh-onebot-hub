@@ -1590,8 +1590,8 @@ async function runAsyncChecks() {
     const user = JSON.parse(await toolOf('onebot_avatar').execute({ user_id: 945126014, size: 100 }));
     assert.equal(user.url, 'https://q1.qlogo.cn/g?b=qq&nk=945126014&s=100');
     assert.equal(user.provenance, 'community');
-    const group = JSON.parse(await toolOf('onebot_avatar').execute({ group_id: 617770183 }));
-    assert.equal(group.url, 'https://p.qlogo.cn/gh/617770183/617770183/100');
+    const group = JSON.parse(await toolOf('onebot_avatar').execute({ group_id: 123456789 }));
+    assert.equal(group.url, 'https://p.qlogo.cn/gh/123456789/123456789/100');
     assert.equal(group.provenance, 'impl-doc');
     await assert.rejects(() => toolOf('onebot_avatar').execute({}), /需要 user_id 或 group_id/);
   });
