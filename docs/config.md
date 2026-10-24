@@ -238,8 +238,8 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `persona.enabled` | 开关 | 开 | **人设**：关掉后没有角色设定段，模型按默认风格说话。 |
-| `persona.defaultName` | 字符串 | 小助手 | **默认预设名**：新会话没绑定过角色时用哪一个预设。老库里叫 `default` 的那条启动时会自动改名过来（连带会话绑定）。 |
-| `persona.presets` | 字符串 | [] | **预设库（JSON）**：JSON 数组：启动时的种子；之后以落盘的 bindings.json 为准（空 = 用内置 default）。 |
+| `persona.defaultName` | 字符串 | 小助手 | **默认预设名**——但只是**首次启动的种子**。运行时要改默认人设，用设置页「人设与预设」里那个下拉（改的是 `persona/presets.json` 这本运行时库，改完立即生效、重启还在）；这里改了不会覆盖已经落盘的默认值。想让它重新生效，删掉 `persona/presets.json` 里的 `defaultName` 字段再重启。老库里叫 `default` 的那条启动时会自动改名过来（连带会话绑定）。 |
+| `persona.presets` | 字符串 | [] | **预设库种子（JSON）**：JSON 数组，启动时写进运行时库。之后以 `persona/presets.json` 为准——要增删改某一条，用设置页的「编辑 JSON / 新建 / 删除」；在这里改了只影响**还没落盘过的**那些名字。 |
 
 ## 聊天管理命令（人打的那几条）
 

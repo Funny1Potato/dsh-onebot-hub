@@ -737,6 +737,126 @@ await check('模型两行从 DSH 清单出下拉；档位只列配对模型声�
   assert.ok(!reports.includes('render'), `渲染不该出错：${JSON.stringify(app.reports())}`);
 });
 
+/** 人设库（`m23678`）：设置页要有下拉选默认人设 + 选中那一条的 JSON 编辑窗口。 */
+const PERSONA_VALUE = {
+  ...BASE_VALUE,
+  persona: { enabled: true, defaultName: '小助手', presets: '[]' },
+};
+const personaPayload = (over = {}) => ({
+  ok: true,
+  defaultName: '小助手',
+  presets: [
+    { name: '小助手', role: '友好的群聊助手', knowledges: ['别客套'], hidden: false },
+    { name: '严肃', role: '说话很简短', knowledges: [], hidden: false },
+  ],
+  note: '',
+  ...over,
+});
+
+await check('人设通道取不到时：面板给说明，页面照旧渲染', async () => {
+  // 先跑降级这条：`personaCache` 是模块级的（同一页反复进出不该每次都问宿主），
+  // 成功那份一旦缓存下来，后面这条就读不到失败了。
+  const app = boot(PERSONA_VALUE, {
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ok: false, presets: [], note: '人设服务不可用' }) }),
+  });
+  // `settle()` 只等 effect 同步返回，而这里 effect 里是 `void fetch(...).then(...)`，
+  // 所以要再推一轮（与模型清单那几条同样的写法）。
+  await app.settle();
+  await app.settle();
+  const tree = app.render();
+  let text = '';
+  walk(tree, (node) => { text += textOf(node); });
+  assert.ok(text.includes('人设服务不可用'), `要原样显示宿主给的说明：${text.slice(0, 200)}`);
+  assert.ok(!app.reports().some((row) => row.kind === 'render'), '降级路径也不该报渲染错');
+});
+
+await check('人设：下拉选默认人设、JSON 窗口改选中的那一条（都走运行时那本库）', async () => {
+  const calls = [];
+  let reply = personaPayload();
+  const app = boot(PERSONA_VALUE, {
+    fetchImpl: async (url, init) => {
+      calls.push({ url: String(url ?? ''), init: init || null });
+      if (init && init.method === 'POST') {
+        const body = JSON.parse(init.body);
+        if (body.op === 'set-default') reply = personaPayload({ defaultName: body.name });
+        if (body.op === 'save') reply = personaPayload({ presets: [...personaPayload().presets, { name: body.preset.name, role: body.preset.role, knowledges: body.preset.knowledges, hidden: false }] });
+        return { ok: true, status: 200, json: async () => reply };
+      }
+      return { ok: true, status: 200, json: async () => reply };
+    },
+  });
+  const next = async () => { await app.settle(); await app.settle(); return app.render(); };
+  let tree = await next();
+
+  // 面板在位：说明"改的是运行时那本库、配置项只是种子"——不说清楚用户会改配置发现没效果。
+  let panelText = '';
+  walk(tree, (node) => { panelText += textOf(node); });
+  assert.ok(panelText.includes('人设库（运行时'), `人设面板没渲染：${panelText.slice(0, 200)}`);
+  assert.ok(panelText.includes('种子'), '要说清配置项只是首次启动的种子');
+
+  // 下拉：列出库里的人设，当前默认被选中。
+  let select = null;
+  walk(tree, (node) => { if (!select && node.type === 'select' && optionValues(node).includes('小助手')) select = node; });
+  assert.ok(select, '找不到人设下拉');
+  assert.deepEqual(optionValues(select), ['小助手', '严肃'], '下拉只列不隐藏的人设');
+  assert.equal(select.props.value, '小助手', '选中的应该就是当前默认');
+
+  // 切默认 → POST set-default，回执就地刷新（不再发一次 GET）。
+  select.props.onChange({ target: { value: '严肃' } });
+  await new Promise((resolve) => setImmediate(resolve));
+  const posted = calls.filter((call) => call.init && call.init.method === 'POST');
+  assert.equal(posted.length, 1, '切默认要发一次 POST');
+  assert.deepEqual(JSON.parse(posted[0].init.body), { op: 'set-default', name: '严肃' });
+  tree = await next();
+  let after = null;
+  walk(tree, (node) => { if (!after && node.type === 'select' && optionValues(node).includes('严肃')) after = node; });
+  assert.equal(after.props.value, '严肃', '切完之后下拉要跟着变（回执即最新状态）');
+
+  // 「编辑 JSON」打开窗口，预填选中那一条的完整内容。
+  buttonsOf(tree).find((button) => textOf(button) === '编辑 JSON').props.onClick();
+  tree = app.render();
+  let area = null;
+  walk(tree, (node) => { if (!area && node.type === 'textarea') area = node; });
+  assert.ok(area, '点「编辑 JSON」应该弹出编辑窗口');
+  const seeded = JSON.parse(area.props.value);
+  assert.deepEqual(seeded, { name: '严肃', role: '说话很简短', knowledges: [] }, '窗口里要预填选中那一条');
+
+  // 改 JSON 再保存 → POST save，payload 就是窗口里的内容。
+  area.props.onChange({ target: { value: JSON.stringify({ name: '严肃', role: '说话极简，能一个字就一个字', knowledges: ['别寒暄'] }) } });
+  // 页面上还有顶栏那个「保存」（配置项），所以取**最后一个**——弹窗在树尾。
+  buttonsOf(app.render()).filter((button) => textOf(button) === '保存').pop().props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const saves = calls.filter((call) => call.init && call.init.method === 'POST').map((call) => JSON.parse(call.init.body));
+  const saveOp = saves.find((body) => body.op === 'save');
+  assert.deepEqual(saveOp, {
+    op: 'save',
+    preset: { name: '严肃', role: '说话极简，能一个字就一个字', knowledges: ['别寒暄'] },
+  }, '保存要原样带上 name / role / knowledges');
+  // 存完窗口自己关掉（不用用户再点一次取消）。
+  tree = await next();
+  let stillOpen = false;
+  walk(tree, (node) => { if (node.type === 'textarea' && String(node.props.value || '').includes('说话极简')) stillOpen = true; });
+  assert.equal(stillOpen, false, '保存成功之后窗口应该关闭');
+
+  // JSON 写坏时**不发请求**，就地报错——把半截 JSON 发上去只会换来一个 400。
+  buttonsOf(tree).find((button) => textOf(button) === '编辑 JSON').props.onClick();
+  tree = app.render();
+  walk(tree, (node) => { if (node.type === 'textarea') area = node; else area = area || null; });
+  let textareaNow = null;
+  walk(tree, (node) => { if (!textareaNow && node.type === 'textarea') textareaNow = node; });
+  textareaNow.props.onChange({ target: { value: '{ 不是 JSON' } });
+  const before = calls.length;
+  buttonsOf(app.render()).filter((button) => textOf(button) === '保存').pop().props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, before, '写坏的 JSON 不该发出去');
+  let errText = '';
+  walk(app.render(), (node) => { errText += textOf(node); });
+  assert.ok(errText.includes('不是合法 JSON'), '要就地说明哪里坏了');
+
+  const reports = app.reports().map((row) => row.kind);
+  assert.ok(!reports.includes('render'), `人设面板不该让整页渲染出错：${JSON.stringify(app.reports())}`);
+});
+
 await check('取不到清单时安静退回手写框，并说明宿主没给出清单', async () => {
   const app = boot(MODEL_VALUE, {
     fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({ ok: false, note: '宿主没有 llm 服务', providers: [], models: [], efforts: [] }) }),

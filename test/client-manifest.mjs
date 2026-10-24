@@ -38,6 +38,7 @@ const [
   { PRESETS, DELIVERY_MODES, PROBE_ISOLATIONS },
   { DOWNSTREAM_TYPES },
   { MODEL_LIST_PATH },
+  { PERSONA_PATH },
 ] = await Promise.all([
   import('../lib/agent/policy.js'),
   import('../lib/vision.js'),
@@ -47,6 +48,7 @@ const [
   import('../lib/router.js'),
   import('../lib/index.js'),
   import('../lib/llm-models.js'),
+  import('../lib/persona/route.js'),
 ]);
 
 /** 把 `const <marker> = {…}` 抠出来（括号配对，跳过字符串）并 JSON.parse。 */
@@ -250,6 +252,24 @@ check('client.js：模型清单路由的字面量与宿主那份一致（不一�
   const routeText = fs.readFileSync(path.join(root, 'lib', 'llm-models.js'), 'utf8');
   assert.match(routeText, /resolveModelInfo/, '宿主路由要用 resolveModelInfo 取 reasoning 档位');
   assert.match(routeText, /listProviders[\s\S]*listModels|listModels/, '宿主路由要列 provider 与模型');
+});
+
+check('client.js：人设库路由的字面量与宿主那份一致（不一致 = 下拉与 JSON 窗口永远取不到）', () => {
+  // 用户诉求（`m23678`）：设置页要有「下拉选默认人设 + 选中那一条的 JSON 编辑窗口」。
+  // 数据走运行时那本库，而浏览器半侧拿不到 `PersonaStore`（inject 只有 slots/configForms），
+  // 所以只能经宿主侧这条**可写**路由；两边路径必须逐字相同。
+  assert.ok(typeof PERSONA_PATH === 'string' && PERSONA_PATH.startsWith('/'), '宿主侧要导出人设路由路径');
+  assert.ok(
+    clientText.includes(`'${PERSONA_PATH}'`),
+    `client.js 里的路由路径要与 lib/persona/route.js 的 PERSONA_PATH 一致（${PERSONA_PATH}）`,
+  );
+  assert.match(clientText, /fetchPersona/, '要有取人设库的函数');
+  assert.match(clientText, /personaCache/, '同一页反复进出别每次都问宿主要');
+  assert.match(clientText, /编辑 JSON/, '要有 JSON 编辑入口');
+  const routeText = fs.readFileSync(path.join(root, 'lib', 'persona', 'route.js'), 'utf8');
+  assert.match(routeText, /set-default/, '宿主路由要支持切默认人设');
+  assert.match(routeText, /save/, '宿主路由要支持保存某一条');
+  assert.match(routeText, /remove/, '宿主路由要支持删除');
 });
 
 check('client.js：模型两行出下拉、思考强度两行只列配对模型声明的档位', () => {

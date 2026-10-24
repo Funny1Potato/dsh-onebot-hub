@@ -235,8 +235,40 @@ t('持久化：flush 后重建 PersonaStore，预设 / 绑定 / hidden / 会话�
 
 // --- 老库迁移 ---------------------------------------------------------------
 
-t('迁移：老库里的 default 预设会原地改名为「小助手」，绑定跟着改、不会多出一条重复的', async () => {
-  const { dir, storage } = scratch();
+t('setDefault：切默认人设 → 未绑定的会话跟着换，且落盘后还是它（设置页那个下拉）', async () => {
+  const { dir, storage, store } = scratch();
+  store.save({ name: '严肃', role: '你说话很简短' });
+  assert.equal(store.resolve('group:1').name, DEFAULT_PRESET_NAME, '切之前未绑定会话用默认');
+
+  assert.equal(store.setDefault('严肃'), true);
+  assert.equal(store.defaultName, '严肃');
+  assert.equal(store.resolve('group:1').name, '严肃', '切换后未绑定会话立刻换成新的默认');
+  assert.equal(store.resolve('group:1').role, '你说话很简短');
+
+  // 名字打错/不存在 → 拒绝，且不悄悄造一条空预设（否则默认人设变成一个空壳，很难查）。
+  assert.equal(store.setDefault('不存在的'), false);
+  assert.equal(store.defaultName, '严肃');
+  assert.equal(store.has('不存在的'), false);
+  // 设成自己算成功（幂等），页面重复点不会报错。
+  assert.equal(store.setDefault('严肃'), true);
+
+  await store.flush();
+  assert.equal(storage.stats.errors, 0, `落盘不应报错：${storage.stats.lastError ?? ''}`);
+  const store2 = new PersonaStore({ storage: new JsonStore({ dir }) }).load();
+  assert.equal(store2.defaultName, '严肃', '默认人设要落盘：不落盘重启就回配置里的种子值');
+  assert.equal(store2.resolve('group:2').name, '严肃');
+});
+
+t('setDefault 之后：默认人设跟着变成"不可删"的那一条，旧的默认变为可删', () => {
+  const { store } = scratch();
+  store.save({ name: '严肃', role: '' });
+  assert.equal(store.remove(DEFAULT_PRESET_NAME), false, '当前默认不允许删');
+  store.setDefault('严肃');
+  assert.equal(store.remove('严肃'), false, '切过去之后它就变成不可删的那条');
+  assert.equal(store.remove(DEFAULT_PRESET_NAME), true, '旧的默认已经不是默认了，可以删');
+});
+
+t('迁移：老库里的 default 预设会原地改名为「小助手」，绑定跟着改、不会多出一条重复的', async () => {  const { dir, storage } = scratch();
   // 造一个"改名之前"的库：默认预设叫 default，有个群正绑在它上面，还有一个别的预设。
   storage.write('persona/presets.json', {
     version: 1,

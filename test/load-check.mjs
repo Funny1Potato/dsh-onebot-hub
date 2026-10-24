@@ -21,6 +21,7 @@ import { ReplyBuffer } from '../lib/reply.js';
 import { DEFAULT_GUIDANCE } from '../lib/mind.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
+import { PERSONA_PATH, installPersonaRoute } from '../lib/persona/route.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
 import { COMMAND_SPECS } from '../lib/chat-commands.js';
 import { filterForScope, resolveIsolation, setGroupMembershipProvider } from '../lib/memory/isolation.js';
@@ -965,8 +966,8 @@ check('下游接入端不再挂宿主 webServer：改由目标自己的地址监
 
 check('浏览器自诊断通道：上报路由 + head 注入', () => {
   // 路由：精确路径、每条各一份（重复 (kind,path) 在真宿主会抛错，这里防回归）。
-  // 两条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）。
-  assert.equal(recorded.routes.length, 2);
+  // 三条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）。
+  assert.equal(recorded.routes.length, 3);
   assert.equal(recorded.routes[0].kind, 'exact');
   assert.equal(recorded.routes[0].path, CLIENT_PROBE_PATH);
   assert.equal(typeof recorded.routes[0].handler, 'function');
@@ -974,6 +975,11 @@ check('浏览器自诊断通道：上报路由 + head 注入', () => {
   assert.ok(catalogRoute, `模型清单路由没注册：${MODEL_LIST_PATH}`);
   assert.equal(catalogRoute.kind, 'exact');
   assert.equal(typeof catalogRoute.handler, 'function');
+  // 人设库那条在 `apply` 里是**真的装上**的（不是只在单测里能用）：下拉与 JSON 窗口全靠它。
+  const personaRoute = recorded.routes.find((route) => route.path === PERSONA_PATH);
+  assert.ok(personaRoute, `人设库路由没注册：${PERSONA_PATH}`);
+  assert.equal(personaRoute.kind, 'exact');
+  assert.equal(typeof personaRoute.handler, 'function');
   // 注入：监听 webserver/index-inject，往表里 push 一条 head 内的内联脚本。
   const injectEvent = recorded.onEvents.find((entry) => entry.name === 'webserver/index-inject');
   assert.ok(injectEvent, '应当监听 webserver/index-inject');
@@ -1089,6 +1095,111 @@ await checkAsync('模型清单路由（m024193）：有 llm 才真列，缺 llm 
   assert.equal(missing.available, false);
   assert.match(missing.note, /webServer/);
 });
+
+/**
+ * 人设库通道（`m23678`）：设置页的「下拉选默认人设 + JSON 编辑窗口」靠这条路由。
+ * 与模型清单那条的差别就一个：这条**能写**。所以既要测读，也要测三种写操作的回执，
+ * 以及"写不进去时如实说为什么"——页面把 note 原样显示给用户。
+ */
+await (async () => {
+  const registered = [];
+  const persona = (() => {
+    const presets = new Map();
+    presets.set('小助手', { name: '小助手', role: '友好', knowledges: [], hidden: false });
+    presets.set('严肃', { name: '严肃', role: '简短', knowledges: ['别客套'], hidden: false });
+    presets.set('隐藏的', { name: '隐藏的', role: '', knowledges: [], hidden: true });
+    const store = {
+      defaultName: '小助手',
+      list({ includeHidden = false } = {}) {
+        return [...presets.values()].filter((p) => includeHidden || !p.hidden);
+      },
+      setDefault(name) {
+        if (!presets.has(name)) return false;
+        store.defaultName = name;
+        return true;
+      },
+      save(preset) {
+        const next = { name: String(preset.name), role: String(preset.role ?? ''), knowledges: Array.isArray(preset.knowledges) ? preset.knowledges : [], hidden: false };
+        presets.set(next.name, next);
+        return next;
+      },
+      remove(name) {
+        if (name === store.defaultName || !presets.has(name)) return false;
+        presets.delete(name);
+        return true;
+      },
+    };
+    return store;
+  })();
+  const ctx = { get: (key) => (key === 'webServer' ? { register: (route) => { registered.push(route); return () => {}; } } : undefined) };
+  const outcome = installPersonaRoute(ctx, { getStore: () => persona });
+  assert.equal(outcome.available, true);
+  assert.equal(outcome.path, PERSONA_PATH);
+  assert.equal(registered.length, 1);
+  assert.equal(registered[0].path, PERSONA_PATH);
+
+  /** 发一次请求：`body` 有值就按 POST 送（模拟原生 IncomingMessage 的 data/end 事件）。 */
+  const call = (method, body) => new Promise((resolve) => {
+    const out = { status: 0, headers: {} };
+    const res = {
+      writeHead: (status, headers) => { out.status = status; out.headers = headers || {}; },
+      end: (text) => resolve({ ...out, raw: text, body: (() => { try { return JSON.parse(text); } catch { return null; } })() }),
+    };
+    const req = {
+      method,
+      url: PERSONA_PATH,
+      headers: {},
+      on: (event, handler) => {
+        if (event === 'data' && body !== undefined) handler(Buffer.from(JSON.stringify(body), 'utf8'));
+        if (event === 'end') handler();
+        return req;
+      },
+      destroy: () => {},
+    };
+    registered[0].handler(req, res);
+  });
+
+  const read = (await call('GET')).body;
+  assert.equal(read.ok, true);
+  assert.equal(read.defaultName, '小助手');
+  assert.deepEqual(read.presets.map((p) => p.name).sort(), ['严肃', '小助手', '隐藏的'].sort(), 'includeHidden 要带上隐藏的（JSON 窗口得能打开它）');
+
+  const switched = (await call('POST', { op: 'set-default', name: '严肃' })).body;
+  assert.equal(switched.ok, true);
+  assert.equal(switched.defaultName, '严肃', '切默认后回执就是最新状态（页面据此一次刷新）');
+  const badDefault = (await call('POST', { op: 'set-default', name: '不存在' })).body;
+  assert.equal(badDefault.ok, false);
+  assert.match(badDefault.note, /没有叫/, '名字打错要说清楚，不能静默不改');
+
+  const saved = (await call('POST', { op: 'save', preset: { name: '新的', role: '新角色', knowledges: ['k1'] } })).body;
+  assert.equal(saved.ok, true);
+  assert.ok(saved.presets.some((p) => p.name === '新的'), '保存后回执里要能看到它');
+  const noName = (await call('POST', { op: 'save', preset: { name: '  ', role: 'x' } })).body;
+  assert.equal(noName.ok, false);
+  assert.match(noName.note, /名字/);
+
+  const notDefault = (await call('POST', { op: 'remove', name: '新的' })).body;
+  assert.equal(notDefault.ok, true);
+  assert.ok(!notDefault.presets.some((p) => p.name === '新的'));
+  const removeDefault = (await call('POST', { op: 'remove', name: '严肃' })).body;
+  assert.equal(removeDefault.ok, false);
+  assert.match(removeDefault.note, /默认人设不能删/);
+
+  const unknown = (await call('POST', { op: '随便' })).body;
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.note, /未知 op/);
+  assert.equal((await call('PUT')).status, 405);
+
+  // 人设关掉（`persona.enabled:false`）时如实降级，而不是抛。
+  const off = installPersonaRoute({ get: () => ({ register: (route) => { registered.push(route); return () => {}; } }) }, { getStore: () => null });
+  assert.equal(off.available, true, '路由装得上，只是没有 store');
+  const offCall = await new Promise((resolve) => {
+    const res = { writeHead: () => {}, end: (text) => resolve(JSON.parse(text)) };
+    registered[registered.length - 1].handler({ method: 'GET', url: PERSONA_PATH, headers: {}, on: () => {} }, res);
+  });
+  assert.equal(offCall.ok, false);
+  assert.match(offCall.note, /人设服务不可用/);
+})();
 
 check('全局指导段注册在 systemPrompt.section', () => {
   assert.equal(hubSections().length, 1);

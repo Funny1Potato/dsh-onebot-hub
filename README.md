@@ -224,6 +224,8 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 2. **前缀撞车 = 两个都触发**，不是谁先谁赢。想让枢纽别管某一条，加让路前缀：`!!/help`。
 3. **只在开头认前缀**：`你好 /status` 是聊天，不是命令。回话超 `chatCommands.maxReplyChars`（默认 1500 字）会截断。
 
+预设库有三条改法：**设置页「人设与预设」**（最省事——下拉选默认人设、JSON 窗口改选中的那一条，改完立即生效）、`/set_preset`（把**当前会话**切过去）、`/set_role` 与 `/preset_role`（给当前会话复制一份私有分叉 `@session/<会话>`，不污染共享预设）。`persona.presets` 那个配置项只是**首次启动的种子**，之后以 `persona/presets.json` 为准。
+
 ## 🧠 记忆系统
 
 agent 不是"每轮都把聊天记录读一遍"，它有**三层心智 + 五个落点**：
