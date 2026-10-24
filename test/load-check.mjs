@@ -582,6 +582,18 @@ check('下游目标不写"对方账号" = 与上游相同（defaultSelfId = upst
   assert.equal(noUpstream.downstreamTargets[0].pendingAccount, true, '标记成"等上游账号"');
 });
 
+check('人设配置项已删：只剩 persona.enabled，旧键只记一句提示不报错（`m24027`）', () => {
+  assert.equal(Config.dict.persona.dict.defaultName, undefined, 'persona.defaultName 不该还在 schema 里');
+  assert.equal(Config.dict.persona.dict.presets, undefined, 'persona.presets 不该还在 schema 里');
+  assert.ok(Config.dict.persona.dict.enabled, '开关要留着');
+  // 旧配置带着这两个键进来：不炸、但要说清楚它们去哪了（静默吞掉时用户改完发现没效果）。
+  const legacy = resolveConfig({ persona: { enabled: true, defaultName: '小助手', presets: '[]' } });
+  assert.deepEqual(legacy.persona.legacyKeys, ['defaultName', 'presets'], JSON.stringify(legacy.persona));
+  assert.equal(legacy.persona.enabled, true);
+  // 没写就是没有 legacyKeys 这个字段（别给正常配置也挂一个空数组）。
+  assert.equal(resolveConfig({}).persona.legacyKeys, undefined);
+});
+
 check('上游监听地址自带路径：parseListenTarget 认 host:port/path，upstreamListenPath 已从 schema 移除', () => {
   // 用户要求：不要再单独配"监听路径"，一个 upstreamListen 说完整。
   assert.equal(Config.dict.upstreamListenPath, undefined, '路径不该再单独配置（已并进 upstreamListen）');
@@ -676,7 +688,7 @@ check('设置页可编辑面：配置字段都标了 volatile，凭据字段标�
     Config.dict.capability.dict.writeAllow,
     Config.dict.memory.dict.isolation.dict.level,
     Config.dict.vision.dict.mode,
-    Config.dict.persona.dict.presets,
+    Config.dict.persona.dict.enabled,
     Config.dict.chatCommands.dict.superUsers,
     Config.dict.memes.dict.autoCollect,
     Config.dict.anime.dict.backend,

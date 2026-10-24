@@ -181,7 +181,7 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 | `agent.replyMaxText` / `replyMaxImages` / `replyGapMs` | 一次回复最多几条文字（3）、几张图（9）、条与条之间隔多久（400 ms） |
 | `chatCommands.prefix` / `bypassPrefix` | 命令前缀（默认 `/`）、让路前缀（默认 `!!`） |
 | `vision.mode` | 看图方式：`describe`（把图交给视觉模型写成人话，默认）/ `segment`（把图本身给模型）/ `off` |
-| `persona.presets` | 群里的角色设定（名字、性格、说话风格），可按群套用 |
+| 人设预设 | 群里的角色设定（名字、性格、说话风格），可按群套用——在设置页「人设与预设」里改 |
 | `memes.enabled` / `memes.maxSend` | 表情包库；收哪张由 agent 自己决定，`maxSend` 限一次发几张 |
 | `imageGen.enabled` | 让 agent 自己生图（默认关，填 `model`/`baseUrl`/`apiKey` 才开） |
 | `anime.backend` | 二次元角色识别（默认 `off`；[anime-recognize](https://github.com/Funny1Potato/aigfm-anime-recognize) 本地 / `animetrace` 公共 API / `both`） |
@@ -224,7 +224,7 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 2. **前缀撞车 = 两个都触发**，不是谁先谁赢。想让枢纽别管某一条，加让路前缀：`!!/help`。
 3. **只在开头认前缀**：`你好 /status` 是聊天，不是命令。回话超 `chatCommands.maxReplyChars`（默认 1500 字）会截断。
 
-预设库有三条改法：**设置页「人设与预设」**（最省事——下拉选默认人设、JSON 窗口改选中的那一条，改完立即生效）、`/set_preset`（把**当前会话**切过去）、`/set_role` 与 `/preset_role`（给当前会话复制一份私有分叉 `@session/<会话>`，不污染共享预设）。`persona.presets` 那个配置项只是**首次启动的种子**，之后以 `persona/presets.json` 为准。
+预设库有三条改法：**设置页「人设与预设」**（最省事——下拉选默认人设、JSON 窗口改选中的那一条，改完立即生效）、`/set_preset`（把**当前会话**切过去）、`/set_role` 与 `/preset_role`（给当前会话复制一份私有分叉 `@session/<会话>`，不污染共享预设）。预设库只有一份权威：`<storageDir>/persona/presets.json`，**没有对应的配置项**。
 
 ## 🧠 记忆系统
 

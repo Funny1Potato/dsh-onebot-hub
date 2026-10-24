@@ -788,11 +788,13 @@ await check('人设：下拉选默认人设、JSON 窗口改选中的那一条�
   const next = async () => { await app.settle(); await app.settle(); return app.render(); };
   let tree = await next();
 
-  // 面板在位：说明"改的是运行时那本库、配置项只是种子"——不说清楚用户会改配置发现没效果。
+  // 面板在位：说明改的是运行时那本库（`m24027` 起配置项那两个种子键已删，
+  // 文案改成"跟 /presets、/set_preset 同一份、改完立即生效"）。
   let panelText = '';
   walk(tree, (node) => { panelText += textOf(node); });
   assert.ok(panelText.includes('人设库（运行时'), `人设面板没渲染：${panelText.slice(0, 200)}`);
-  assert.ok(panelText.includes('种子'), '要说清配置项只是首次启动的种子');
+  assert.ok(panelText.includes('改完立即生效'), '要说清改的是运行时库、立即生效');
+  assert.ok(!panelText.includes('种子'), '配置种子那条路已经删了，别再提它');
 
   // 下拉：列出库里的人设，当前默认被选中。
   let select = null;
