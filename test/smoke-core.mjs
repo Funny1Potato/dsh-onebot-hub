@@ -22,6 +22,7 @@ import {
   stripInlineMedia,
 } from '../lib/protocol.js';
 import { LoopGuard } from '../lib/trace.js';
+import { Hub } from '../lib/hub.js';
 import { DownstreamSession } from '../lib/link.js';
 import { Timeline, canonicalEvents, isForwardMirror } from '../lib/capture.js';
 import {
@@ -1520,6 +1521,63 @@ t('段 → 人话：@换称呼、引用带原文、媒体带 durable ref', () =>
   // notice 也要人话
   assert.match(describeNotice({ notice_type: 'group_decrease', user_id: 1, operator_id: 2, sub_type: 'kick' }), /被 用户2 移出群/);
   assert.match(describeEvent({ post_type: 'meta_event', meta_event_type: 'heartbeat' }), /\[元事件 heartbeat\]/);
+
+  // 识图没回来时的占位（`m24484`）：光写 `[图片]` 时模型只会答"我看不到图"，
+  // 标上"还在看"它才知道该等（回合开始前会等一次，或者自己调 onebot_image_wait）。
+  const imgEvent = { post_type: 'message', message: [{ type: 'image', data: { file: 'a.png' } }] };
+  assert.match(describeEvent(imgEvent, { describing: true }), /\[图片（还在看）\]/);
+  assert.match(describeEvent(imgEvent), /\[图片\]/, '不带这个标记时还是老形状');
+  // 描述回来后照旧是内容，不会留着"还在看"。
+  const described = new Map([[0, { text: '一只金毛趴在键盘上' }]]);
+  assert.match(describeEvent(imgEvent, { describing: true, descriptions: described }), /\[图片：一只金毛趴在键盘上\]/);
+  // 表情包那条分支也要标（否则表情包永远显示"可能是表情包"却不说在看）。
+  const memeEvent = { post_type: 'message', message: [{ type: 'image', data: { file: 'b.png', sub_type: '1' } }] };
+  assert.match(describeEvent(memeEvent, { describing: true }), /还在看/);
+});
+
+t('等识图（`m24484`）：只等这一批、有上限、失败也放行', async () => {
+  const hub = new Hub({}, { log: () => {} });
+  // ① 没有在跑的图：一毫秒都不等（绝大多数回合走这条）。
+  const none = await hub.awaitVisionPending({ key: 'group:1', messageIds: ['m1'], timeoutMs: 50 });
+  assert.deepEqual(none, { count: 0, settled: 0, timedOut: 0, waitedMs: 0 });
+
+  // ② 等到了：这是主路径——描述回来会就地改写 `entry.text`，所以回合只要等它就行。
+  let release = null;
+  const slow = new Promise((resolve) => {
+    release = resolve;
+  });
+  hub.trackVision('group:1', 'm1', slow);
+  assert.deepEqual(hub.pendingVisionIds('group:1'), ['m1']);
+  const waiting = hub.awaitVisionPending({ key: 'group:1', messageIds: ['m1'], timeoutMs: 2000 });
+  release('看过来了');
+  const got = await waiting;
+  assert.deepEqual({ c: got.count, s: got.settled, t: got.timedOut }, { c: 1, s: 1, t: 0 });
+  assert.deepEqual(hub.pendingVisionIds('group:1'), [], '结束后必须从表里消失，否则下一轮会等一个死 promise');
+
+  // ③ 超时：到点就放行，不能把回合拖死（剩下的交给下一轮【图片补描】）。
+  hub.trackVision('group:1', 'm2', new Promise(() => {}));
+  const to = await hub.awaitVisionPending({ key: 'group:1', messageIds: ['m2'], timeoutMs: 60 });
+  assert.equal(to.count, 1);
+  assert.equal(to.timedOut, 1);
+  assert.ok(to.waitedMs >= 50, `应当真的等了，实际 ${to.waitedMs}ms`);
+
+  // ④ 只等这一批：名单里没有的图（别的消息、别的会话）不参与。
+  hub.trackVision('group:1', 'm3', new Promise(() => {}));
+  hub.trackVision('group:2', 'm1', new Promise(() => {}));
+  const only = await hub.awaitVisionPending({ key: 'group:1', messageIds: ['m9'], timeoutMs: 30 });
+  assert.equal(only.count, 0, '别的消息的图不该被顺手等上');
+
+  // ⑤ 失败也算结束：识图报错不能让回合再干等 2 秒。
+  hub.trackVision('group:1', 'm4', Promise.reject(new Error('识图失败')));
+  const failed = await hub.awaitVisionPending({ key: 'group:1', messageIds: ['m4'], timeoutMs: 2000 });
+  assert.equal(failed.settled, 1);
+  assert.equal(failed.timedOut, 0);
+
+  // ⑥ 采样：状态里要看得出"等了几轮、超时几次"，否则"等了但没用"没人发现。
+  const st = hub.visionWaitStats;
+  assert.ok(st.turns >= 3, `turns=${st.turns}`);
+  assert.ok(st.timedOut >= 1);
+  hub.stop?.();
 });
 
 t('字节嗅探：按 magic 认类型，认不出来就是 octet-stream', () => {

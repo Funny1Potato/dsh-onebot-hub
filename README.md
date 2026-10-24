@@ -442,7 +442,7 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 
 | 能力 | 怎么开 | 说明 |
 | --- | --- | --- |
-| **看图** | `vision.mode`（默认 `describe`） | 把图交给视觉模型写成一段人话再进上下文；`segment` 直接把图给模型（模型得支持视觉）；`off` 完全不看图。同一张图按 sha256 缓存，不重复问 |
+| **看图** | `vision.mode`（默认 `describe`） | 把图交给视觉模型写成一段人话再进上下文；`segment` 直接把图给模型（模型得支持视觉）；`off` 完全不看图。同一张图按 sha256 缓存，不重复问。描述还没回来时上下文里是「[图片（还在看）]」，回合开始前会等它一次（`vision.waitBeforeTurnMs`，默认 4 秒，0＝不等）；等超了模型可以调 `onebot_image_wait` 再等一次 |
 | **生图** | `imageGen.enabled` + `model`/`baseUrl`/`apiKey` | 让 agent 自己画图发到群里；`engine: builtin` 用内置 OpenAI 兼容接口，`plugin` 接第三方生图工具；`maxPerTurn` 限每轮几张 |
 | **表情包** | `memes.enabled`（默认开） | 群里发表情时自动收集，agent 自己决定发哪张（只能发上下文里列出的 id，编造的会被丢掉并如实告知）；`maxSend` 限一次几张 |
 | **番剧识别** | `anime.backend`（默认 `off`） | 认出图片里的二次元角色并写进描述；本地 [anime-recognize](https://github.com/Funny1Potato/aigfm-anime-recognize) 或公共 `animetrace`，`both` 本地优先 |
