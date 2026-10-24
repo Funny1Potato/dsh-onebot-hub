@@ -179,6 +179,7 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 | `agent.batchSize` / `agent.batchMs` | 一批攒几条（默认 10）、等多久（默认 20000 ms） |
 | `agent.speakAssistantText` | 默认 `false`：**普通回复文本只是内部草稿，只有调 `onebot_reply` 才会真发进群** |
 | `agent.replyMaxText` / `replyMaxImages` / `replyGapMs` | 一次回复最多几条文字（3）、几张图（9）、条与条之间隔多久（400 ms） |
+| `agent.replyOnSendFailure` | 发送失败当场告知模型（默认开）：立刻排一次唤醒让它知道第几条没发出去，能当场重试；`sendFailureNudgeMax`/`sendFailureNudgeWindowMs` 是刹车（2 次 / 5 分钟） |
 | `chatCommands.prefix` / `bypassPrefix` | 命令前缀（默认 `/`）、让路前缀（默认 `!!`） |
 | `vision.mode` | 看图方式：`describe`（把图交给视觉模型写成人话，默认）/ `segment`（把图本身给模型）/ `off` |
 | 人设预设 | 群里的角色设定（名字、性格、说话风格），可按群套用——在设置页「人设与预设」里改。库里自带「小助手」（默认）与「蓝色大肥鱼」两条，可改可删 |

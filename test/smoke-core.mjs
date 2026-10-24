@@ -3064,6 +3064,54 @@ t('会话白名单：Mind 的闸在 observe/noteDownstreamSend 上生效（m3103
   assert.notEqual(pass.reason, 'unlisted');
 });
 
+t('发送失败当场回执：立刻排一次唤醒把失败递回去，窗口内有次数上限（m25376）', async () => {
+  // 假 hub：上游拒收（retcode 1200 那种）。假池子只记「有没有起一轮新回合」。
+  const nudges = [];
+  const pool = {
+    presetSwapPlan: () => ({ freshSession: false }),
+    async wake(agentKey, opts) {
+      nudges.push({ agentKey, text: String(opts?.text ?? '') });
+      return { ok: true };
+    },
+  };
+  const hub = {
+    config: { agentSendFailureNudgeMax: 2, agentSendFailureNudgeWindowMs: 60000 },
+    callUpstream: async () => ({ status: 'failed', retcode: 1200, message: '未知文件类型或路径不存在' }),
+  };
+  const mind = new Mind({ hub, pool, log: () => {} });
+  const candidate = { text: '本鲸给你画了一张', messages: [{ segments: [{ type: 'text', data: { text: '本鲸给你画了一张' } }], text: '本鲸给你画了一张', kind: 'text' }] };
+  const res = await mind.deliver('group:55555', candidate);
+  assert.equal(res.status, 'failed');
+  // 回执排在 flush 之后（不能在自己这一轮里 await 自己），等它落地再断言。
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(nudges.length, 1, '失败要立刻排一次回执唤醒');
+  assert.match(nudges[0].text, /没发出去/, '回执要写清哪一条没发');
+  assert.match(nudges[0].text, /retcode=1200/);
+  assert.match(nudges[0].text, /「本鲸给你画了一张」/, '要带上是哪句话');
+  // 已经当场告知过了：下一批开头不该再念一遍。
+  assert.equal(mind.pendingSendFailureNotice('group:55555'), null, '当场回执之后不再重复告知');
+  assert.equal(mind.stats.sendFailureNudges, 1);
+  // 关掉开关就完全不动（退回老行为：存起来等下一批开头告知）。
+  const offPool = { presetSwapPlan: () => ({ freshSession: false }), wake: async () => { throw new Error('不该被调'); } };
+  const offMind = new Mind({ hub: { config: { agentReplyOnSendFailure: false }, callUpstream: async () => ({ status: 'failed' }) }, pool: offPool, log: () => {} });
+  await offMind.deliver('group:55555', candidate);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.ok(offMind.pendingSendFailureNotice('group:55555'), '关掉开关时失败照旧存起来，等下一批开头告知');
+  // 上限：窗口内第三次失败不再自动开回合（防止「重试→又失败→又收到回执」转圈）。
+  const capNudges = [];
+  const capMind = new Mind({
+    hub: { config: { agentSendFailureNudgeMax: 2, agentSendFailureNudgeWindowMs: 600000 }, callUpstream: async () => ({ status: 'failed', retcode: 1200 }) },
+    pool: { presetSwapPlan: () => ({ freshSession: false }), wake: async (k, o) => { capNudges.push(o); return { ok: true }; } },
+    log: () => {},
+  });
+  for (let i = 0; i < 4; i += 1) {
+    await capMind.deliver('group:55555', candidate);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(capNudges.length, 2, '一个窗口里最多自动开 2 次');
+  assert.ok(capMind.pendingSendFailureNotice('group:55555'), '撞上限后改由下一批开头告知，失败不能丢');
+});
+
 await Promise.all(pending);
 const failed = cases.filter((c) => !c.ok);
 console.log(JSON.stringify({ passed, failed: failed.length, cases: failed }, null, 2));

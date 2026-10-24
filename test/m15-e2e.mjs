@@ -1672,6 +1672,9 @@ async function scenarioAssistantTextSuppressed() {
  */
 async function scenarioSendFailureNotice() {
   const { hub, sent } = makeHub();
+  // 本用例测的是**兜底路径**：失败当场回执关掉，失败存起来、由下一批开头告知。
+  // 当场回执本身另有专门用例（smoke-core「发送失败当场回执」）。
+  hub.config.agentReplyOnSendFailure = false;
   const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 99, batchMs: 600000 });
   const ref = {};
   const { host, created } = makeFakeHost({
@@ -1761,6 +1764,9 @@ async function scenarioMultiMessageReply() {
       }
       return inner(action, params);
     };
+    // 同上：本用例看的是「第几条没发、后面几条也没发」的**下一批告知**口径，
+    // 关掉当场回执，免得失败后多开的那一轮把 followups 的"最后一条"顶掉。
+    hub.config.agentReplyOnSendFailure = false;
     const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 99, batchMs: 600000 });
     const ref = {};
     const { host, created } = makeFakeHost({
