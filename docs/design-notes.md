@@ -780,6 +780,8 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 
 - **删掉 `persona.defaultName` 与 `persona.presets`（用户 m24027："还有什么用吗？没有用的话就去掉吧"）**：答"没有用"，而且是**有害**的没用。两条都只在**第一次启动**有意义——`defaultName` 传进构造器后立刻被 `presets.json` 里的同名字段盖掉，`presets` 只是往空库里灌一次；但灌原始种子的那段是**每次启动都跑**的：`persona.load()` 之后紧跟 `for (const preset of config.persona.presets) persona.save(preset)`，而 `save()` 按名字 upsert → 用户在设置页里改过的同名预设，重启一次就被配置文件打回去。两个来源互相打架、且配置那头赢，这正是 m23678 那块面板要解决的"改完没效果"。现在只剩 `persona.enabled` 一个开关，预设库的唯一权威是 `<storageDir>/persona/presets.json`；旧配置里留着那两个键不会报错，`resolveConfig` 把它们记进 `cfg.persona.legacyKeys`，`apply` 里打一行日志告诉用户"现在改人设请用设置页那块面板"。撤掉种子不会丢数据：任何跑过的实例都已经把种子写进 `presets.json` 了。
 
+- **自带人设「蓝色大肥鱼」怎么进库（用户 m24158 给了整份 JSON，要求"加到自带的人设库里面，默认还是小助手"）**：做法不是往 `makeDefaultPreset()` 里塞，而是新增 `makeWhalePreset()` + `makeBuiltinPresets()`（`lib/persona/store.js`），`load()` 遍历它**只补缺的那几条**。三个取舍：①**不覆盖同名**——用户改过角色就该按他改的来，否则又是一个"重启就把我的改动打回去"（这正是刚删掉的 `persona.presets` 那个坑，不能再挖一遍）；②**删掉的不复活**——`presets.json` 多存一个 `seeded: [...]` 记"这些自带预设已经处理过了"，`remove()` 之后重启不会再被补回来，否则"删了又回来"比没有更烦人；③`role` 里那个开头的"我是"被去掉了，因为 `render()` 拼的是 `你是 {名字}，{role}`，留着会变成"你是 蓝色大肥鱼，我是 DeepSeek 的鲸鱼娘形象……"——像两个人在说话。默认人设仍是「小助手」，`DEFAULT_PRESET_NAME` 没动。
+
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
 - 方案（原稿，章节号与完整版一致）：`../docs/dsh-onebot-hub-方案.md`

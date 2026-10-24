@@ -181,7 +181,7 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 | `agent.replyMaxText` / `replyMaxImages` / `replyGapMs` | 一次回复最多几条文字（3）、几张图（9）、条与条之间隔多久（400 ms） |
 | `chatCommands.prefix` / `bypassPrefix` | 命令前缀（默认 `/`）、让路前缀（默认 `!!`） |
 | `vision.mode` | 看图方式：`describe`（把图交给视觉模型写成人话，默认）/ `segment`（把图本身给模型）/ `off` |
-| 人设预设 | 群里的角色设定（名字、性格、说话风格），可按群套用——在设置页「人设与预设」里改 |
+| 人设预设 | 群里的角色设定（名字、性格、说话风格），可按群套用——在设置页「人设与预设」里改。库里自带「小助手」（默认）与「蓝色大肥鱼」两条，可改可删 |
 | `memes.enabled` / `memes.maxSend` | 表情包库；收哪张由 agent 自己决定，`maxSend` 限一次发几张 |
 | `imageGen.enabled` | 让 agent 自己生图（默认关，填 `model`/`baseUrl`/`apiKey` 才开） |
 | `anime.backend` | 二次元角色识别（默认 `off`；[anime-recognize](https://github.com/Funny1Potato/aigfm-anime-recognize) 本地 / `animetrace` 公共 API / `both`） |

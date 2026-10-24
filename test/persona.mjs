@@ -22,6 +22,10 @@ function scratch() {
   return { dir, storage, store: new PersonaStore({ storage }).load() };
 }
 
+/** 自带预设的名字（`m24027` 加了「蓝色大肥鱼」）：凡是比对"整份名单"的用例都用它兜住，
+ * 免得以后再加一条自带人设时，五处断言一起红。 */
+const BUILTIN_NAMES = [DEFAULT_PRESET_NAME, '蓝色大肥鱼'];
+
 const registry = [];
 const t = (name, fn) => registry.push({ name, fn });
 
@@ -30,7 +34,7 @@ const t = (name, fn) => registry.push({ name, fn });
 t('空目录 load() 后自动补 default，resolve/render 都拿得到', () => {
   const { store } = scratch();
   assert.equal(store.has(DEFAULT_PRESET_NAME), true);
-  assert.equal(store.list().map((p) => p.name).join(','), DEFAULT_PRESET_NAME);
+  assert.deepEqual(store.list().map((p) => p.name), BUILTIN_NAMES, '空库只有自带的这两条，默认那条排最前');
   const resolved = store.resolve('group:1');
   assert.equal(resolved.name, DEFAULT_PRESET_NAME);
   assert.equal(resolved.role, makeDefaultPreset().role);
@@ -74,14 +78,14 @@ t('save 去重 knowledges，list 顺序稳定且同名覆盖不新增条目', ()
   });
   assert.equal(store.get('整理员').knowledges.length, 2);
 
-  assert.deepEqual(store.list().map((p) => p.name), [DEFAULT_PRESET_NAME, '整理员']);
+  assert.deepEqual(store.list().map((p) => p.name), [...BUILTIN_NAMES, '整理员']);
   store.save({ name: '主持人', role: '控场' });
-  assert.deepEqual(store.list().map((p) => p.name), [DEFAULT_PRESET_NAME, '整理员', '主持人']);
+  assert.deepEqual(store.list().map((p) => p.name), [...BUILTIN_NAMES, '整理员', '主持人']);
 
   store.save({ name: '整理员', role: '改过的职责', knowledges: ['只剩一条'] });
   assert.deepEqual(
     store.list().map((p) => p.name),
-    [DEFAULT_PRESET_NAME, '整理员', '主持人'],
+    [...BUILTIN_NAMES, '整理员', '主持人'],
     '同名覆盖不应改变顺序或新增条目',
   );
   assert.deepEqual(store.get('整理员').knowledges, ['只剩一条']);
@@ -210,7 +214,7 @@ t('持久化：flush 后重建 PersonaStore，预设 / 绑定 / hidden / 会话�
 
   const store2 = new PersonaStore({ storage: new JsonStore({ dir }) }).load();
   assert.deepEqual(store2.list({ includeHidden: true }).map((p) => p.name), [
-    DEFAULT_PRESET_NAME,
+    ...BUILTIN_NAMES,
     '落盘甲',
     '落盘乙',
   ]);
@@ -283,7 +287,7 @@ t('迁移：老库里的 default 预设会原地改名为「小助手」，绑�
 
   const store = new PersonaStore({ storage: new JsonStore({ dir }) }).load();
   const names = store.list().map((p) => p.name);
-  assert.deepEqual(names, [DEFAULT_PRESET_NAME, '整理员'], `默认预设要改名且排在原位，实际 ${names.join(',')}`);
+  assert.deepEqual(names, [DEFAULT_PRESET_NAME, '整理员', '蓝色大肥鱼'], `默认预设要改名且排在原位，实际 ${names.join(',')}`);
   assert.equal(names.includes(LEGACY_DEFAULT_NAME), false, '不能留下旧名字那一条');
   assert.equal(store.get(DEFAULT_PRESET_NAME).role, '改名前的人设', '改名不能丢人设');
   assert.deepEqual(store.get(DEFAULT_PRESET_NAME).knowledges, ['旧知识'], '改名不能丢知识');
@@ -328,7 +332,7 @@ t('stats 数字与实际一致', () => {
   store.bind('group:3', 'b');
 
   const s = store.stats;
-  assert.equal(s.presets, 3, 'default + a + b（含 hidden）');
+  assert.equal(s.presets, 4, '自带两条 + a + b（含 hidden）');
   assert.equal(s.presets, store.list({ includeHidden: true }).length);
   assert.equal(s.bindings, 3);
   assert.equal(s.defaultName, DEFAULT_PRESET_NAME);
@@ -337,19 +341,60 @@ t('stats 数字与实际一致', () => {
 
   store.setRole('group:1', { role: 'x2' });
   assert.equal(store.stats.forks, 1, '会话私有分叉单独计数');
-  assert.equal(store.stats.presets, 3, '会话私有分叉不计入可见预设数');
+  assert.equal(store.stats.presets, 4, '会话私有分叉不计入可见预设数');
   assert.equal(store.stats.bindings, 3);
 });
 
 t('没有 storage（dir 为空）时退化为纯内存，不抛异常', () => {
   const bare = new PersonaStore({}).load();
   assert.equal(bare.stats.storage, false);
-  assert.equal(bare.stats.presets, 1);
+  // 自带两条（`m24027`）：默认「小助手」+「蓝色大肥鱼」。
+  assert.equal(bare.stats.presets, 2);
   assert.equal(bare.resolve('group:1').name, DEFAULT_PRESET_NAME);
   assert.equal(bare.save({ name: '内存预设', role: 'r' }).name, '内存预设');
   assert.equal(bare.bind('group:1', '内存预设'), true);
   assert.equal(bare.resolve('group:1').name, '内存预设');
   assert.equal(bare.flush(), 0);
+});
+
+// --- 自带预设（`m24027`） ----------------------------------------------------
+
+t('自带两条：默认仍是「小助手」，「蓝色大肥鱼」带 8 条知识且拼出来像一句话', () => {
+  const { store } = scratch();
+  const names = store.list().map((p) => p.name);
+  assert.deepEqual(names, [DEFAULT_PRESET_NAME, '蓝色大肥鱼'], '默认那条永远排最前');
+  assert.equal(store.defaultName, DEFAULT_PRESET_NAME, '默认还是小助手，不是新加的那条');
+  const whale = store.get('蓝色大肥鱼');
+  assert.equal(whale.knowledges.length, 8);
+  // role 不能自带"我是"：`render()` 拼的是 `你是 {名字}，{role}`，留着会变成两个人在说话。
+  assert.ok(!whale.role.startsWith('我是'), `role 不该以"我是"开头：${whale.role.slice(0, 20)}`);
+  store.bind('group:1', '蓝色大肥鱼');
+  const text = store.render('group:1');
+  assert.ok(text.startsWith('你是 蓝色大肥鱼，'), text.slice(0, 40));
+  assert.ok(!text.includes('你是 蓝色大肥鱼，我是'), '不许出现"你是 X，我是 Y"');
+  assert.ok(text.includes('## 你的知识'));
+  assert.equal(text.split('\n- ').length - 1, 8, '八条知识都要进 prompt');
+});
+
+t('自带预设只补缺的：用户改过的那条不会被下一次启动覆盖', async () => {
+  const { store, storage } = scratch();
+  store.save({ name: '蓝色大肥鱼', role: '我被她改成了别的样子', knowledges: ['只有一条'] });
+  await store.flush();
+  const again = new PersonaStore({ storage }).load();
+  const whale = again.get('蓝色大肥鱼');
+  assert.equal(whale.role, '我被她改成了别的样子', '启动不能把用户改过的自带预设打回去');
+  assert.deepEqual(whale.knowledges, ['只有一条']);
+  assert.equal(again.list().length, 2, '也不该因此多出一条');
+});
+
+t('用户删掉自带预设之后，重启不会复活它', async () => {
+  const { store, storage } = scratch();
+  assert.equal(store.remove('蓝色大肥鱼'), true);
+  await store.flush();
+  const again = new PersonaStore({ storage }).load();
+  assert.deepEqual(again.list().map((p) => p.name), [DEFAULT_PRESET_NAME], '删了就是删了');
+  // 只删这一条不影响默认：默认是结构性兜底，永远在。
+  assert.equal(again.defaultName, DEFAULT_PRESET_NAME);
 });
 
 // --- 执行 -------------------------------------------------------------------
