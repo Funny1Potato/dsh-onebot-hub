@@ -80,7 +80,7 @@ import {
   renderParams,
   splitCommand,
 } from '../lib/learn.js';
-import { Mind } from '../lib/mind.js';
+import { Mind, mediaTag } from '../lib/mind.js';
 import { mergePolicyMode, resolveAgentPolicy, sessionOverrideOf } from '../lib/agent/policy.js';
 
 let passed = 0;
@@ -1533,6 +1533,64 @@ t('段 → 人话：@换称呼、引用带原文、媒体带 durable ref', () =>
   // 表情包那条分支也要标（否则表情包永远显示"可能是表情包"却不说在看）。
   const memeEvent = { post_type: 'message', message: [{ type: 'image', data: { file: 'b.png', sub_type: '1' } }] };
   assert.match(describeEvent(memeEvent, { describing: true }), /还在看/);
+});
+
+t('图消息在批里带短标识（`m24656`）：同一分钟两张图不再长得一模一样', () => {
+  const mk = (mid, media, extra = {}) => ({ ts: 1_700_000_000_000, text: '[图片]', refs: { message_id: mid, media }, ...extra });
+  // 真机那两条：16:04/16:06 的图消息批行都是 `- 10-24 16:06 某人(945126014)：[图片]`，
+  // 逐字相同，模型于是把新图判成"上一条的重复送达"，那张图一个字都没回。
+  assert.equal(mediaTag(mk('-1589196849', ['m112'])), ' #196849');
+  assert.equal(mediaTag(mk('856180595', ['m112'])), ' #180595');
+  assert.notEqual(mediaTag(mk('-1589196849', ['m112'])), mediaTag(mk('856180595', ['m112'])), '两条必须能区分');
+  // 没图的消息不加：文字消息靠内容本身就能区分，每行挂 id 只是噪声。
+  assert.equal(mediaTag(mk('856180595', [])), '');
+  assert.equal(mediaTag(mk('856180595', undefined)), '');
+  assert.equal(mediaTag({ ts: 1, text: '纯文字', refs: { message_id: '9' } }), '');
+  // 批条目带 `live`（真身）时照样读得到（批行正文优先取 live，标识也一样）。
+  assert.equal(mediaTag({ ts: 1, text: '[图片]', live: { refs: { message_id: '-1589196849', media: ['m112'] } } }), ' #196849');
+});
+
+t('补描去重（`m24656`）：工具已经把描述交给模型，就别再排一句【图片补描】', () => {
+  const hub = new Hub({}, { log: () => {} });
+  const mind = new Mind({ hub, timeline: hub.timeline, store: new MemoryStore({}), log: () => {} });
+  // 队列空时是安全的空操作（工具每次读完都会调一遍）。
+  assert.equal(mind.markDescribed('group:1', ['856180595']), 0);
+  assert.equal(mind.markDescribed('group:1', []), 0);
+  assert.equal(mind.markDescribed('group:1', null), 0);
+  hub.stop?.();
+});
+
+t('识图等完了也要能回读（`m24656`）：没有 pending 时取最近几张图，否则"已经看完了"等于没有', () => {
+  const hub = new Hub({}, { log: () => {} });
+  // 没有图：返回空，工具照实说"最近也没有带图的消息"。
+  assert.deepEqual(hub.recentMediaIds('group:1'), []);
+  const record = (mid, media) => {
+    const entry = hub.timeline.record({
+      direction: 'upstream-in',
+      linkId: 'up:test',
+      event: {
+        post_type: 'message',
+        message_type: 'group',
+        group_id: 1,
+        user_id: 2,
+        message_id: mid,
+        self_id: 9,
+        message: [{ type: 'text', data: { text: '[图片]' } }],
+      },
+      decision: 'recorded',
+    });
+    if (media) entry.refs = { ...(entry.refs ?? {}), media };
+    return entry;
+  };
+  record(401, ['m1']);
+  record(402, null); // 纯文字：不该被回读
+  record(403, ['m2']);
+  record(404, ['m3']);
+  record(405, ['m4']);
+  assert.deepEqual(hub.recentMediaIds('group:1'), ['403', '404', '405'], '默认最近三条带图的');
+  assert.deepEqual(hub.recentMediaIds('group:1', { limit: 2 }), ['404', '405']);
+  assert.deepEqual(hub.recentMediaIds('group:2'), [], '别的会话不许串');
+  hub.stop?.();
 });
 
 t('等识图（`m24484`）：只等这一批、有上限、失败也放行', async () => {
