@@ -2550,7 +2550,6 @@ t('看图：两种手段、按 sha256 缓存、看不见就降级不猜（M14-V/
 // ---- 下游心跳（§19）----
 t('下游心跳：只给实现端型链路发，stop/close 都要停（§19）', async () => {
   const { EventEmitter } = await import('node:events');
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const frames = [];
   const ws = new EventEmitter();
   ws.readyState = 1; // WS_OPEN
@@ -2558,32 +2557,43 @@ t('下游心跳：只给实现端型链路发，stop/close 都要停（§19）',
   ws.close = () => {
     ws.readyState = 3;
   };
-  const session = new DownstreamSession({ selfId: '30001000', ws, role: 'Implementation', log: () => {} });
+  /**
+   * **心跳测试不碰真实计时器**（`m24175`）。这条红过四次，每次都是
+   * `应发出至少两次心跳，实际 1`：CI 的 Windows 机器上 `setInterval(20ms)` 三秒里
+   * 就只跑了一次——那测的不是心跳，是机器有多快。现在注入一对假计时器手动 tick，
+   * 断言"tick 几次就该发几条、内容对不对"，跟机器速度无关。
+   */
+  const live = new Map();
+  let seq = 0;
+  const timers = {
+    setInterval(fn) {
+      seq += 1;
+      live.set(seq, fn);
+      return { id: seq, unref: () => {} };
+    },
+    clearInterval(handle) {
+      live.delete(handle.id);
+    },
+    tick(n = 1) {
+      for (let i = 0; i < n; i += 1) for (const fn of [...live.values()]) fn();
+    },
+    get running() {
+      return live.size;
+    },
+  };
+  const session = new DownstreamSession({ selfId: '30001000', ws, role: 'Implementation', log: () => {}, timers });
 
   // 0 = 关（bot-app 型链路就是这么关掉的）
   assert.equal(session.startHeartbeat({ intervalMs: 0 }), false);
-  await sleep(40);
+  timers.tick(3);
   assert.equal(frames.length, 0, 'intervalMs: 0 一个字节都不该发');
+  assert.equal(timers.running, 0, '关着的时候不该有计时器在跑');
 
   assert.equal(session.startHeartbeat({ intervalMs: 20 }), true);
-  /**
-   * **别用"睡固定时长再数条数"**：这条在 CI 上红过三次（Windows 一次、ubuntu+node24 一次），
-   * 每次都是 `应发出至少两次心跳，实际 1`——机器一忙，20 ms 的 interval 在 220 ms 里
-   * 真就只跑了一次。改成等条件成立（最多 3 秒），断言的是"心跳确实发了、内容对"，
-   * 不是"本机计时器多准"。
-   */
-  const waitFor = async (pred, timeoutMs = 3000, step = 10) => {
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
-      if (pred()) return true;
-      await sleep(step);
-    }
-    return pred();
-  };
-  const beatFrames = () => frames.filter((f) => f.meta_event_type === 'heartbeat');
-  const gotTwo = await waitFor(() => beatFrames().length >= 2);
-  const beats = beatFrames();
-  assert.ok(gotTwo, `应发出至少两次心跳，实际 ${beats.length}（等了 3 秒）`);
+  assert.equal(timers.running, 1, '开着的时候正好一个计时器');
+  timers.tick(2);
+  const beats = frames.filter((f) => f.meta_event_type === 'heartbeat');
+  assert.equal(beats.length, 2, `tick 两次就该发两条，实际 ${beats.length}`);
   assert.equal(beats[0].post_type, 'meta_event');
   assert.equal(beats[0].self_id, '30001000');
   assert.equal(beats[0].interval, 20);
@@ -2591,18 +2601,21 @@ t('下游心跳：只给实现端型链路发，stop/close 都要停（§19）',
   assert.equal(beats[0].status.good, true);
   assert.equal(typeof beats[0].time, 'number');
 
+  // 停了之后一条都不许多发，计时器也要清掉
   session.stopHeartbeat();
   const afterStop = frames.length;
-  await sleep(120); // 够 20 ms 间隔跑好几轮：一条都不许多
+  timers.tick(3);
   assert.equal(frames.length, afterStop, 'stopHeartbeat 之后不再发');
+  assert.equal(timers.running, 0, 'stopHeartbeat 要把计时器清掉');
 
   // 连接关掉也要停，不然心跳会往死链路上打
   session.startHeartbeat({ intervalMs: 20 });
   session.close();
   const afterClose = frames.length;
-  await sleep(120);
+  timers.tick(3);
   assert.equal(frames.length, afterClose, 'close 之后不再发');
   assert.equal(session.heartbeatMs, 0);
+  assert.equal(timers.running, 0, 'close 也要把计时器清掉');
 });
 
 t('原始报文缓存：解析不了的段也留原文 + 索引，按 rawRef / 消息 id 都能取回', () => {
