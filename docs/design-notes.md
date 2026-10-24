@@ -171,7 +171,7 @@ dsh plugin --profile <你的 profile> add dsh-onebot-hub
 | `vision.timeoutMs` | `30000` | 看图单次超时；超时就当没看见（不猜内容） |
 | `vision.cacheLimit` | `500` | `<storageDir>/vision/cache.json` 最多缓存几张图的描述（键是字节的 sha256） |
 | `persona.enabled` | `true` | 是否启用人设/预设层（关掉 = 不注入人设段，命令面也答"人设未启用"） |
-| `persona.defaultName` | `default` | 默认预设名；没有为某会话绑定过预设时用它 |
+| `persona.defaultName` | `小助手` | 默认预设名；没有为某会话绑定过预设时用它（`m22774` 从 `default` 改名，老库自动迁移） |
 | `persona.presets` | `'[]'` | **JSON 数组**，启动时写进预设库的种子预设：`[{"name":"小助手","role":"…","knowledges":["…"],"hidden":false}]`。落盘内容才是权威，config 只是种子；`default` 不允许删 |
 | `chatCommands.enabled` | `true` | 是否启用聊天管理命令层 |
 | `chatCommands.prefix` | `/` | 命令前缀（`/help`）。只认**句首**前缀 |

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { JsonStore } from '../lib/storage.js';
 import {
   DEFAULT_PRESET_NAME,
+  LEGACY_DEFAULT_NAME,
   PersonaStore,
   makeDefaultPreset,
   normalizePreset,
@@ -230,6 +231,33 @@ t('持久化：flush 后重建 PersonaStore，预设 / 绑定 / hidden / 会话�
   assert.equal(Object.keys(snap.presets).includes(DEFAULT_PRESET_NAME), true);
   assert.equal(typeof snap.bindings['group:1'], 'string');
   await store2.flush();
+});
+
+// --- 老库迁移 ---------------------------------------------------------------
+
+t('迁移：老库里的 default 预设会原地改名为「小助手」，绑定跟着改、不会多出一条重复的', async () => {
+  const { dir, storage } = scratch();
+  // 造一个"改名之前"的库：默认预设叫 default，有个群正绑在它上面，还有一个别的预设。
+  storage.write('persona/presets.json', {
+    version: 1,
+    order: [LEGACY_DEFAULT_NAME, '整理员'],
+    presets: {
+      [LEGACY_DEFAULT_NAME]: { name: LEGACY_DEFAULT_NAME, role: '改名前的人设', knowledges: ['旧知识'], hidden: false },
+      整理员: { name: '整理员', role: '整理', knowledges: [], hidden: false },
+    },
+  });
+  storage.write('persona/bindings.json', { version: 1, bindings: { 'group:1': LEGACY_DEFAULT_NAME } });
+  storage.flush();
+
+  const store = new PersonaStore({ storage: new JsonStore({ dir }) }).load();
+  const names = store.list().map((p) => p.name);
+  assert.deepEqual(names, [DEFAULT_PRESET_NAME, '整理员'], `默认预设要改名且排在原位，实际 ${names.join(',')}`);
+  assert.equal(names.includes(LEGACY_DEFAULT_NAME), false, '不能留下旧名字那一条');
+  assert.equal(store.get(DEFAULT_PRESET_NAME).role, '改名前的人设', '改名不能丢人设');
+  assert.deepEqual(store.get(DEFAULT_PRESET_NAME).knowledges, ['旧知识'], '改名不能丢知识');
+  assert.equal(store.boundName('group:1'), DEFAULT_PRESET_NAME, '绑在旧默认名上的会话要跟着改');
+  assert.equal(store.resolve('group:1').name, DEFAULT_PRESET_NAME);
+  await store.flush();
 });
 
 // --- render 与统计 ----------------------------------------------------------

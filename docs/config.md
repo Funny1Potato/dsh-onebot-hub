@@ -236,7 +236,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `persona.enabled` | 开关 | 开 | **人设**：关掉后没有角色设定段，模型按默认风格说话。 |
-| `persona.defaultName` | 字符串 | default | **默认预设名**：新会话没绑定过角色时用哪一个预设。 |
+| `persona.defaultName` | 字符串 | 小助手 | **默认预设名**：新会话没绑定过角色时用哪一个预设。老库里叫 `default` 的那条启动时会自动改名过来（连带会话绑定）。 |
 | `persona.presets` | 字符串 | [] | **预设库（JSON）**：JSON 数组：启动时的种子；之后以落盘的 bindings.json 为准（空 = 用内置 default）。 |
 
 ## 聊天管理命令（人打的那几条）
