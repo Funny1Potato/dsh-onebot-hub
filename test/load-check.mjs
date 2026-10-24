@@ -1272,11 +1272,53 @@ async function runAsyncChecks() {
     await wsHub.pool.wake('group:77777', { text: '装', summary: '装', setup: () => {} });
     await sleep(80);
     const createdWs = wsCase.recorded.created.at(-1);
-    assert.equal(createdWs?.meta?.cwd, wsPath, 'agent.workspace 要当会话 cwd 用（否则会话文件也不会落在那个工作区）');
+    // cwd 必须是**规范化之后**的路径（issue #1 的坑）：宿主判定"会话属于哪个工作区"靠
+    // header.cwd === 工作区的 canonical 路径，尾分隔符/盘符大小写/junction 差一点就还是「未分类」。
+    const canon = (p) => (fs.realpathSync.native ? fs.realpathSync.native(p) : fs.realpathSync(p));
+    assert.equal(createdWs?.meta?.cwd, canon(wsPath), 'agent.workspace 要当会话 cwd 用，且要规范化');
     const attached = wsCase.recorded.attaches.at(-1);
     assert.ok(attached, `配了 agent.workspace 就要把新会话挂进工作区；lastAttach=${JSON.stringify(wsHub.pool.host.lastAttach)}`);
     assert.equal(attached.sessionId, createdWs.sessionId, '挂的应当是刚建的那个会话 id');
     assert.equal(wsHub.pool.host.lastAttach?.ok, true, `attach 失败：${wsHub.pool.host.lastAttach?.error}`);
+
+    // ①-b 尾分隔符/大小写不同也算同一个目录（否则用户手滑写个 `D:\x\` 就白配了）。
+    const slashCase = makeCtx();
+    slashCase.recorded.workspaces.push({
+      id: 'ws-2',
+      path: wsPath,
+      attachSession: async (sessionId) => slashCase.recorded.attaches.push({ sessionId, workspaceId: 'ws-2' }),
+    });
+    const slashHub = apply(slashCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, workspace: `${wsPath}${path.sep}` },
+    });
+    await sleep(60);
+    await slashHub.pool.wake('group:77778', { text: '装', summary: '装', setup: () => {} });
+    await sleep(80);
+    assert.ok(slashCase.recorded.attaches.at(-1), '带尾分隔符的路径也应当挂上');
+    assert.equal(slashHub.pool.host.lastAttach?.ok, true);
+
+    // ①-c 路径不存在：**不硬失败**（不能因为一个笔误让整台 hub 醒不过来），退回进程 cwd 且不 attach。
+    const badCase = makeCtx();
+    const badHub = apply(badCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, workspace: path.join(os.tmpdir(), 'onebot-hub-no-such-dir-xyz') },
+    });
+    await sleep(60);
+    await badHub.pool.wake('group:77779', { text: '装', summary: '装', setup: () => {} });
+    await sleep(80);
+    const createdBad = badCase.recorded.created.at(-1);
+    assert.ok(createdBad, '路径配错了也要照常建会话（退回进程 cwd）');
+    assert.equal(createdBad.meta.cwd, process.cwd(), '路径用不了就退回进程 cwd');
+    assert.equal(badCase.recorded.attaches.length, 0, '路径用不了时不挂（挂到进程 cwd 上更错）');
+    assert.equal(badHub.pool.host.lastAttach?.ok, false);
+    assert.match(String(badHub.pool.host.lastAttach?.error ?? ''), /agent\.workspace 用不了/, '失败原因要说得出来');
 
     // ② agent.archiveOnRetire=false：结束不归档，也**不能**退化成"删除会话"。
     const keepCase = makeCtx();
