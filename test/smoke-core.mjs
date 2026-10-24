@@ -2566,11 +2566,24 @@ t('下游心跳：只给实现端型链路发，stop/close 都要停（§19）',
   assert.equal(frames.length, 0, 'intervalMs: 0 一个字节都不该发');
 
   assert.equal(session.startHeartbeat({ intervalMs: 20 }), true);
-  // 等 4 个 interval，而不是 75 ms（≈3.75 个）：Windows CI 的计时器粒度粗、机器又忙，
-  // 20 ms 的间隔在 75 ms 里只来得及跑一次是常态（真红过：`应发出至少两次心跳，实际 1`）。
-  await sleep(220);
-  const beats = frames.filter((f) => f.meta_event_type === 'heartbeat');
-  assert.ok(beats.length >= 2, `应发出至少两次心跳，实际 ${beats.length}`);
+  /**
+   * **别用"睡固定时长再数条数"**：这条在 CI 上红过三次（Windows 一次、ubuntu+node24 一次），
+   * 每次都是 `应发出至少两次心跳，实际 1`——机器一忙，20 ms 的 interval 在 220 ms 里
+   * 真就只跑了一次。改成等条件成立（最多 3 秒），断言的是"心跳确实发了、内容对"，
+   * 不是"本机计时器多准"。
+   */
+  const waitFor = async (pred, timeoutMs = 3000, step = 10) => {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      if (pred()) return true;
+      await sleep(step);
+    }
+    return pred();
+  };
+  const beatFrames = () => frames.filter((f) => f.meta_event_type === 'heartbeat');
+  const gotTwo = await waitFor(() => beatFrames().length >= 2);
+  const beats = beatFrames();
+  assert.ok(gotTwo, `应发出至少两次心跳，实际 ${beats.length}（等了 3 秒）`);
   assert.equal(beats[0].post_type, 'meta_event');
   assert.equal(beats[0].self_id, '30001000');
   assert.equal(beats[0].interval, 20);
@@ -2580,14 +2593,14 @@ t('下游心跳：只给实现端型链路发，stop/close 都要停（§19）',
 
   session.stopHeartbeat();
   const afterStop = frames.length;
-  await sleep(50);
+  await sleep(120); // 够 20 ms 间隔跑好几轮：一条都不许多
   assert.equal(frames.length, afterStop, 'stopHeartbeat 之后不再发');
 
   // 连接关掉也要停，不然心跳会往死链路上打
   session.startHeartbeat({ intervalMs: 20 });
   session.close();
   const afterClose = frames.length;
-  await sleep(50);
+  await sleep(120);
   assert.equal(frames.length, afterClose, 'close 之后不再发');
   assert.equal(session.heartbeatMs, 0);
 });
