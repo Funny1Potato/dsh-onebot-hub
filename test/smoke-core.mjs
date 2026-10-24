@@ -63,7 +63,7 @@ import { decayStrength, isWeak, weakMessageIds } from '../lib/memory/decay.js';
 import { collectCues, cueKey, Reminders } from '../lib/memory/cues.js';
 import { renderCues, renderCapabilities } from '../lib/memory/assembler.js';
 import { describeEvent, describeNotice, describeSegments } from '../lib/segments.js';
-import { resolveReplyImages } from '../lib/reply.js';
+import { resolvePartsMedia, resolveReplyImages } from '../lib/reply.js';
 import { Vision, normalizeVisionMode, parseDescribeReply } from '../lib/vision.js';
 import { MediaStore, extOf, sniffType } from '../lib/media.js';
 import {
@@ -2618,6 +2618,26 @@ t('看图：两种手段、按 sha256 缓存、看不见就降级不猜（M14-V/
   assert.deepEqual(resolved, ['https://x/y.jpg', 'D:\\blobs\\ok.png', { file: 'D:\\blobs\\ok.png', summary: 's' }]);
   assert.throws(() => resolveReplyImages(fakeHub, ['hub-media:gone']), /图片引用不可用：hub-media:gone/);
   assert.deepEqual(resolveReplyImages(fakeHub, undefined), [], '不传图片不炸');
+
+  // 修2（`m25247` 真机事故 retcode 1200「未知文件类型或路径不存在: hub-media:…」）：
+  // 同一条引用写在 `parts:[{type:'image',source:'hub-media:…'}]` 里时也必须落成 blob 路径——
+  // 工具描述把它列为合法写法，而只有 `images` 那条路会解析。
+  const partsIn = [
+    { type: 'text', content: '喏' },
+    { type: 'image', source: 'hub-media:ok' },
+    { type: 'image', file: 'hub-media:ok' },
+    { type: 'image', source: 'https://x/y.jpg' },
+    '纯字符串段不动',
+  ];
+  assert.deepEqual(resolvePartsMedia(fakeHub, partsIn), [
+    { type: 'text', content: '喏' },
+    { type: 'image', source: 'D:\\blobs\\ok.png' },
+    { type: 'image', file: 'D:\\blobs\\ok.png' },
+    { type: 'image', source: 'https://x/y.jpg' },
+    '纯字符串段不动',
+  ]);
+  assert.throws(() => resolvePartsMedia(fakeHub, [{ type: 'image', source: 'hub-media:gone' }]), /图片引用不可用：hub-media:gone/);
+  assert.deepEqual(resolvePartsMedia(fakeHub, undefined), [], '不传 parts 不炸');
 
   // 关掉 / 没接 llm / 模型看不见：都给一句话，绝不编内容
   const off = new Vision({ mode: 'off' });
