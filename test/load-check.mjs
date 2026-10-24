@@ -171,6 +171,8 @@ function makeCtx(extraServices = {}) {
     attaches: [],
     /** 假工作区注册表里"已登记的工作区"（用例自己塞，字段 path / id / attachSession）。 */
     workspaces: [],
+    /** 自动建工作区的调用记录（`workspaceRegistry.create`，用户 m23291）。 */
+    wsCreates: [],
     /** 喂给 agent 的用户消息（`followup` 的实参）——批量渲染/补描的断言都看这里。 */
     followups: [],
     /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict(filter) 的调用记录。 */
@@ -226,6 +228,23 @@ function makeCtx(extraServices = {}) {
     },
     // issue #1：hub 会按路径在已登记的工作区里找目标，找到就 attachSession。
     list: async () => recorded.workspaces,
+    // issue #1 续（用户 m23291）：找不到就当场建。真服务的语义是**有则复用、无则新建**，
+    // 按 canonical 路径幂等；这里的假件照这个语义实现，好让"新建/复用"两条路都能被验证。
+    create: async (wsPath, title) => {
+      recorded.wsCreates.push({ path: wsPath, title });
+      const hit = recorded.workspaces.find((w) => w.path === wsPath);
+      if (hit) return hit;
+      const made = {
+        id: `ws-auto-${recorded.wsCreates.length}`,
+        path: wsPath,
+        title: title ?? wsPath,
+        attachSession: async (sessionId) => {
+          recorded.attaches.push({ sessionId, workspaceId: made.id });
+        },
+      };
+      recorded.workspaces.push(made);
+      return made;
+    },
   };
   /** 用例自己塞进来的宿主服务（`permissionPresets` 之类）；没给就当宿主没这个服务。 */
   const extras = { ...extraServices };
@@ -1300,6 +1319,26 @@ async function runAsyncChecks() {
     await sleep(80);
     assert.ok(slashCase.recorded.attaches.at(-1), '带尾分隔符的路径也应当挂上');
     assert.equal(slashHub.pool.host.lastAttach?.ok, true);
+
+    // ①-b2 路径合法但**没有对应的工作区**：当场建一个再挂（用户 m23291 定案）。
+    // 不这么做的话用户得先去侧栏手动建工作区，issue #1 那位根本不知道有这一步。
+    const autoCase = makeCtx();
+    const autoHub = apply(autoCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, workspace: wsPath },
+    });
+    await sleep(60);
+    await autoHub.pool.wake('group:77780', { text: '装', summary: '装', setup: () => {} });
+    await sleep(120);
+    assert.ok(autoCase.recorded.wsCreates.length >= 1, '没有已登记工作区时要按路径建一个');
+    assert.equal(autoCase.recorded.wsCreates[0].path, canon(wsPath), '建工作区用的是规范化后的路径（宿主按 canonical 复用）');
+    assert.equal(autoCase.recorded.wsCreates[0].title, path.basename(canon(wsPath)), '标题用路径末段');
+    assert.ok(autoCase.recorded.attaches.at(-1), '建完工作区要把会话挂进去');
+    assert.equal(autoHub.pool.host.lastAttach?.ok, true, `自动建完应当挂成功：${autoHub.pool.host.lastAttach?.error}`);
+    assert.equal(autoHub.pool.host.lastAttach?.created, true, 'lastAttach 要标出这次是新建的');
 
     // ①-c 路径不存在：**不硬失败**（不能因为一个笔误让整台 hub 醒不过来），退回进程 cwd 且不 attach。
     const badCase = makeCtx();
