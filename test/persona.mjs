@@ -12,6 +12,7 @@ import {
   LEGACY_DEFAULT_NAME,
   PersonaStore,
   makeDefaultPreset,
+  makeWhalePreset,
   normalizePreset,
 } from '../lib/persona/store.js';
 
@@ -75,6 +76,8 @@ t('save 去重 knowledges，list 顺序稳定且同名覆盖不新增条目', ()
     role: '负责整理资料',
     knowledges: ['第一条', '第二条'],
     hidden: false,
+    // `m25104`：经 `save()` 写的一律算"用户改过"，自带预设升级时不许覆盖它。
+    edited: true,
   });
   assert.equal(store.get('整理员').knowledges.length, 2);
 
@@ -395,6 +398,42 @@ t('用户删掉自带预设之后，重启不会复活它', async () => {
   assert.deepEqual(again.list().map((p) => p.name), [DEFAULT_PRESET_NAME], '删了就是删了');
   // 只删这一条不影响默认：默认是结构性兜底，永远在。
   assert.equal(again.defaultName, DEFAULT_PRESET_NAME);
+});
+
+t('自带预设改文案：老实例重启会换成新文案，但改过的那条不动', async () => {
+  // 场景一（`m25104`）：老实例里存的是**上一版自带文案**，而且没有 `builtinRev` 记录。
+  // 只靠"名字已在 seeded 里"就跳过的话，改一次文案所有老实例都停在旧的上面——
+  // 表现成"我明明改了，怎么还是那段"。这里直接改落盘文件，精确复现那种库。
+  const legacy = scratch();
+  const whale = makeWhalePreset();
+  // 直接造一份"上一版插件写下的库"：有 seeded、没有 builtinRev。
+  legacy.storage.write('persona/presets.json', {
+    version: 1,
+    presets: {
+      [DEFAULT_PRESET_NAME]: makeDefaultPreset(),
+      [whale.name]: {
+        name: whale.name,
+        role: 'DeepSeek 的鲸鱼娘形象，旧版本的一段话',
+        knowledges: ['旧的一条'],
+        hidden: false,
+      },
+    },
+    order: [DEFAULT_PRESET_NAME, whale.name],
+    seeded: [DEFAULT_PRESET_NAME, whale.name],
+  });
+
+  const upgraded = new PersonaStore({ storage: legacy.storage }).load();
+  const got = upgraded.get(whale.name);
+  assert.equal(got.role, whale.role, '上一版自带文案要换成新版');
+  assert.deepEqual(got.knowledges, whale.knowledges);
+  assert.equal(got.edited, undefined, '升级不等于"用户改过"');
+
+  // 场景二：用户点保存改过之后，再重启就不能再被冲回去。
+  upgraded.save({ name: whale.name, role: '我自己改的', knowledges: ['我的一条'] });
+  await upgraded.flush();
+  const after = new PersonaStore({ storage: legacy.storage }).load();
+  assert.equal(after.get(whale.name).role, '我自己改的', '用户改过的一律以他的为准');
+  assert.deepEqual(after.get(whale.name).knowledges, ['我的一条']);
 });
 
 // --- 执行 -------------------------------------------------------------------
