@@ -167,6 +167,10 @@ function makeCtx(extraServices = {}) {
     titles: [],
     /** 归档旧会话的调用记录（`workspaceRegistry.archiveSession`）。 */
     archives: [],
+    /** 挂工作区的调用记录（`workspace.attachSession`，issue #1）。 */
+    attaches: [],
+    /** 假工作区注册表里"已登记的工作区"（用例自己塞，字段 path / id / attachSession）。 */
+    workspaces: [],
     /** 喂给 agent 的用户消息（`followup` 的实参）——批量渲染/补描的断言都看这里。 */
     followups: [],
     /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict(filter) 的调用记录。 */
@@ -220,6 +224,8 @@ function makeCtx(extraServices = {}) {
       recorded.archives.push({ sessionId, stopActivity: options.stopActivity === true });
       return { ok: true, value: { archivedSessionIds: [sessionId] } };
     },
+    // issue #1：hub 会按路径在已登记的工作区里找目标，找到就 attachSession。
+    list: async () => recorded.workspaces,
   };
   /** 用例自己塞进来的宿主服务（`permissionPresets` 之类）；没给就当宿主没这个服务。 */
   const extras = { ...extraServices };
@@ -378,6 +384,9 @@ check('Config schema 能填默认值', () => {
   assert.equal(plainConfig(filled.agent.mode), 'assist');
   assert.equal(plainConfig(filled.agent.batchSize), 10);
   assert.equal(plainConfig(filled.agent.batchMs), 20000);
+  // issue #1：会话归属默认**什么都不改**——不进工作区、结束即归档。
+  assert.equal(plainConfig(filled.agent.workspace), '');
+  assert.equal(plainConfig(filled.agent.archiveOnRetire), true);
   // `m18072` 用户定案：默认档位由 scoped 改 balanced（活跃层要开箱能跨共享会话看见彼此的话题）。
   assert.equal(plainConfig(filled.memory.isolation.level), 'balanced');
   // `m22311` 用户定案：私聊事实默认改 sameActor（同一个人在别的私聊里能看见）。
@@ -1236,6 +1245,54 @@ async function runAsyncChecks() {
     assert.equal(archived.stopActivity, true, '归档时要让宿主停掉它的活动（stopActivity）');
     assert.equal(hub.pool.host.lastRetire?.archived, true);
     assert.equal(hub.pool.host.lastTitle?.ok, true);
+  });
+
+  await checkAsync('会话归属（issue #1）：两个开关默认都不动，配了才挂工作区 / 才不归档', async () => {
+    // 默认：不挂。上面那条已经验证过"结束照旧归档"。
+    assert.equal(recorded.attaches.length, 0, '没配 agent.workspace 时不该去挂任何工作区');
+
+    // ① agent.workspace：用它当会话 cwd，并把刚建的会话挂进该路径对应的已登记工作区。
+    const wsCase = makeCtx();
+    const wsPath = process.cwd();
+    wsCase.recorded.workspaces.push({
+      id: 'ws-1',
+      path: wsPath,
+      attachSession: async (sessionId) => {
+        wsCase.recorded.attaches.push({ sessionId, workspaceId: 'ws-1' });
+      },
+    });
+    const wsHub = apply(wsCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, workspace: wsPath },
+    });
+    await sleep(60);
+    await wsHub.pool.wake('group:77777', { text: '装', summary: '装', setup: () => {} });
+    await sleep(80);
+    const createdWs = wsCase.recorded.created.at(-1);
+    assert.equal(createdWs?.meta?.cwd, wsPath, 'agent.workspace 要当会话 cwd 用（否则会话文件也不会落在那个工作区）');
+    const attached = wsCase.recorded.attaches.at(-1);
+    assert.ok(attached, `配了 agent.workspace 就要把新会话挂进工作区；lastAttach=${JSON.stringify(wsHub.pool.host.lastAttach)}`);
+    assert.equal(attached.sessionId, createdWs.sessionId, '挂的应当是刚建的那个会话 id');
+    assert.equal(wsHub.pool.host.lastAttach?.ok, true, `attach 失败：${wsHub.pool.host.lastAttach?.error}`);
+
+    // ② agent.archiveOnRetire=false：结束不归档，也**不能**退化成"删除会话"。
+    const keepCase = makeCtx();
+    const keepHub = apply(keepCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, archiveOnRetire: false },
+    });
+    await sleep(60);
+    await keepHub.pool.wake('group:88888', { text: '装', summary: '装', setup: () => {} });
+    const kept = await keepHub.pool.host.retire('group:88888');
+    assert.equal(kept.archived, false, '关掉后不该归档');
+    assert.equal(kept.via, 'archiveOnRetire:false');
+    assert.equal(keepCase.recorded.archives.length, 0, '关掉后不该调用 archiveSession');
   });
 
   await checkAsync('易变上下文走会话级 live section（text 是函数，装配时现算），不再塞进用户消息', async () => {
