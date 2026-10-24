@@ -2627,6 +2627,7 @@ t('看图：两种手段、按 sha256 缓存、看不见就降级不猜（M14-V/
     { type: 'image', source: 'hub-media:ok' },
     { type: 'image', file: 'hub-media:ok' },
     { type: 'image', source: 'https://x/y.jpg' },
+    { type: 'image', id: 'hub-media:ok' },
     '纯字符串段不动',
   ];
   assert.deepEqual(resolvePartsMedia(fakeHub, partsIn), [
@@ -2634,10 +2635,13 @@ t('看图：两种手段、按 sha256 缓存、看不见就降级不猜（M14-V/
     { type: 'image', source: 'D:\\blobs\\ok.png' },
     { type: 'image', file: 'D:\\blobs\\ok.png' },
     { type: 'image', source: 'https://x/y.jpg' },
+    { type: 'image', id: 'D:\\blobs\\ok.png' },
     '纯字符串段不动',
   ]);
   assert.throws(() => resolvePartsMedia(fakeHub, [{ type: 'image', source: 'hub-media:gone' }]), /图片引用不可用：hub-media:gone/);
   assert.deepEqual(resolvePartsMedia(fakeHub, undefined), [], '不传 parts 不炸');
+  // 表情包段里的 `id` 是表情包 id（`m3`），不是图片路径——不能被这条解析误碰。
+  assert.deepEqual(resolvePartsMedia(fakeHub, [{ type: 'meme', id: 'm3' }]), [{ type: 'meme', id: 'm3' }]);
 
   // 关掉 / 没接 llm / 模型看不见：都给一句话，绝不编内容
   const off = new Vision({ mode: 'off' });
@@ -3110,6 +3114,38 @@ t('发送失败当场回执：立刻排一次唤醒把失败递回去，窗口�
   }
   assert.equal(capNudges.length, 2, '一个窗口里最多自动开 2 次');
   assert.ok(capMind.pendingSendFailureNotice('group:55555'), '撞上限后改由下一批开头告知，失败不能丢');
+
+  // 排不上**不消耗额度**：回执没送达时额度必须还回去，否则一次池子忙就把这个会话的
+  // 当场告知废掉五分钟。这里把 `reawake` 打成永远 woke:false，连失败 4 次也不该吃额度。
+  const busyMind = new Mind({
+    hub: { config: { agentSendFailureNudgeMax: 2, agentSendFailureNudgeWindowMs: 600000 }, callUpstream: async () => ({ status: 'failed', retcode: 1200 }) },
+    pool: { presetSwapPlan: () => ({ freshSession: false }), wake: async () => ({ ok: true }) },
+    log: () => {},
+  });
+  busyMind.reawake = async () => ({ woke: false, reason: 'busy' });
+  for (let i = 0; i < 4; i += 1) {
+    await busyMind.deliver('group:55555', candidate);
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  assert.equal(busyMind.stats.sendFailureNudges, 0, '没排上就不该计数');
+  assert.ok(busyMind.pendingSendFailureNotice('group:55555'), '没排上时失败条目要留着，等下一批开头告知');
+
+  // 新失败不会被旧回执吞掉：回执成功后只删"它自己那条"。这里用两条不同文本模拟
+  // 「回执在飞 → 又来一次失败」——旧实现对 map 无脑 delete，会把新的那条一起吞了。
+  const seq = [];
+  const raceMind = new Mind({
+    hub: { config: { agentSendFailureNudgeMax: 5, agentSendFailureNudgeWindowMs: 600000 }, callUpstream: async () => ({ status: 'failed', retcode: 1200 }) },
+    pool: { presetSwapPlan: () => ({ freshSession: false }), wake: async (k, o) => { seq.push(String(o?.text ?? '')); return { ok: true }; } },
+    log: () => {},
+  });
+  const first = await raceMind.deliver('group:55555', candidate);
+  assert.equal(first.status, 'failed');
+  // 在回执落地之前再制造一次失败（换一句正文，好分辨是哪条被留下）。
+  const second = { text: '第二句也没发出去', messages: [{ segments: [{ type: 'text', data: { text: '第二句也没发出去' } }], text: '第二句也没发出去', kind: 'text' }] };
+  await raceMind.deliver('group:55555', second);
+  await new Promise((r) => setTimeout(r, 20));
+  const left = raceMind.pendingSendFailureNotice('group:55555');
+  assert.ok(left === null || /第二句/.test(left), `留下的必须是新那条（或已被新回执吃掉），实际：${left}`);
 });
 
 await Promise.all(pending);
