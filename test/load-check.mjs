@@ -215,10 +215,17 @@ function makeCtx(extraServices = {}) {
     },
   };
   /** 假会话服务：`rename(sessionId, title)`（用户要求"会话按群名+时间命个名"）。 */
+  // 宿主 0.2.1-rc.2 的真形状：`sessions` **没有 rename**，只有 `get(id) -> Session`；
+  // 改名在 `sessionTitle.rename(session, title)` 上，且第一个参数必须是活着的 Session 对象。
+  // 假件照这个形状来，好让"拿 id 去改名"这种错在测试里就红（以前三个候选全不成立，
+  // 会话名一直是空的，测试却一直是绿的）。
   const fakeSessions = {
-    rename: async (sessionId, title) => {
-      recorded.titles.push({ sessionId, title });
-      return { ok: true, value: { title, seq: 1 } };
+    get: (sessionId) => (extraServices.sessionNotLive ? undefined : { id: sessionId }),
+  };
+  const fakeSessionTitle = {
+    rename: async (session, title) => {
+      recorded.titles.push({ sessionId: session?.id, title });
+      return { title, messageSeqs: [], source: { kind: 'user' }, eventSeq: 1, updatedAt: Date.now() };
     },
   };
   /** 假工作区注册表：`archiveSession(sessionId, {stopActivity})`（"旧的会话直接归档即可"）。 */
@@ -259,6 +266,7 @@ function makeCtx(extraServices = {}) {
     get: (name) => {
       if (name === 'agentPresets') return fakePresets;
       if (name === 'sessions') return extras.sessions ?? fakeSessions;
+      if (name === 'sessionTitle') return extras.sessionTitle ?? fakeSessionTitle;
       if (name === 'workspaceRegistry') return extraServices.noWorkspaceRegistry ? undefined : fakeWorkspace;
       return extras[name] ?? undefined;
     },
@@ -1381,6 +1389,9 @@ async function runAsyncChecks() {
     assert.match(String(named.sessionId), /^onebot-hub:group%3A55555\.a/, `改名的应当是本次激活的会话：${named.sessionId}`);
     assert.match(String(named.title), /群|私聊/, `标题要带人话的名字：${named.title}`);
     assert.match(String(named.title), /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/, `标题要带时间：${named.title}`);
+    // 名字里得有**群号**（用户要的是"群号/私聊号 + 时间"，光有时间那是钟表）：
+    // 格式取自 `titleForAgent`：`群 <群名>（<群号>） · <时间>`，群名还没观测到时退化成 `群 <群号>`。
+    assert.match(String(named.title), /（55555）|^群 55555/, `标题要带群号：${named.title}`);
     // 归档：交还会话时调 `workspaceRegistry.archiveSession(id, { stopActivity: true })`。
     await hub.pool.host.retire('group:55555');
     const archived = recorded.archives.at(-1);
@@ -1499,6 +1510,24 @@ async function runAsyncChecks() {
     assert.equal(noRegHub.pool.host.lastAttach?.ok, false, '没有 registry 就不该报成功');
     assert.match(String(noRegHub.pool.host.lastAttach?.error ?? ''), /workspaceRegistry/, '原因要说清是宿主没这个服务');
     assert.equal(noRegHub.pool.host.lastAttach?.stale, undefined, '不是"会话已换"的那种失败');
+
+    // ①-f 会话还没进 live 表（`sessions.get` 拿不到）：**不许**拿 id 当 Session 去改名——
+    // 真宿主会抛 `session "undefined" is not live in this store`，名字白丢，还留一条像 bug 的日志。
+    // 这里只验证"不瞎调 + 原因说得出来"，命名失败不影响唤醒。
+    const notLiveCase = makeCtx({ sessionNotLive: true });
+    const notLiveHub = apply(notLiveCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500 },
+    });
+    await sleep(60);
+    await notLiveHub.pool.wake('group:77783', { text: '装', summary: '装', setup: () => {} });
+    await sleep(700);
+    assert.equal(notLiveCase.recorded.titles.length, 0, '会话不在 live 表里就不该调 rename');
+    assert.equal(notLiveHub.pool.host.lastTitle?.ok, false);
+    assert.match(String(notLiveHub.pool.host.lastTitle?.error ?? ''), /live/, '原因要说清是"不在 live 表里"');
 
     // ①-e 建工作区**抛错**（宿主对路径的校验比我们严）：同样是确定性失败，不该重试三轮。
     const createFailCase = makeCtx({ failWorkspaceCreate: true });

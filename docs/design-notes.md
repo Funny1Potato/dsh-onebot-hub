@@ -782,6 +782,8 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 
 - **自带人设「蓝色大肥鱼」怎么进库（用户 m24158 给了整份 JSON，要求"加到自带的人设库里面，默认还是小助手"）**：做法不是往 `makeDefaultPreset()` 里塞，而是新增 `makeWhalePreset()` + `makeBuiltinPresets()`（`lib/persona/store.js`），`load()` 遍历它**只补缺的那几条**。三个取舍：①**不覆盖同名**——用户改过角色就该按他改的来，否则又是一个"重启就把我的改动打回去"（这正是刚删掉的 `persona.presets` 那个坑，不能再挖一遍）；②**删掉的不复活**——`presets.json` 多存一个 `seeded: [...]` 记"这些自带预设已经处理过了"，`remove()` 之后重启不会再被补回来，否则"删了又回来"比没有更烦人；③`role` 里那个开头的"我是"被去掉了，因为 `render()` 拼的是 `你是 {名字}，{role}`，留着会变成"你是 蓝色大肥鱼，我是 DeepSeek 的鲸鱼娘形象……"——像两个人在说话。默认人设仍是「小助手」，`DEFAULT_PRESET_NAME` 没动。
 
+- **会话名一直是空的：不是没写，是三个候选接口全都不成立（用户 m24294"hub创建的会话全都还是未命名"）**：`hostRef.title` 早就写好了漂亮的标题（`群 <群名>（<群号>） · YYYY-MM-DD HH:mm`），失败只记 `lastTitle`，所以没人注意到它从来没成功过。用 `cordis_inspect_query` 查宿主 0.2.1-rc.2 的真实契约后真相很清楚：①`workspaceRegistry` **没有 `rename`**（`rename` 在 `workspaceController` 上、走 `@Remote`）；②`sessions` **也没有 `rename`**，只有 `get/list/create/prepare/enter/announce/flush/fork`；③唯一能改名的是 `sessionTitle.rename(session, title)`，**第一个参数必须是活着的 Session 对象**——拿 id 去调会抛 `session "undefined" is not live in this store`。以前三条候选都是"拿 id 硬试"，于是要么 `typeof rename !== 'function'` 被跳过、要么抛错被吞掉，标题永远为空。现在改成：用 `sessions.get(id)` 取到 Session 再 `sessionTitle.rename(session, title)`，取不到就等 400ms 再试一次（会话刚从 `create` 回来时偶尔还没进 live 表），**绝不拿 id 冒充 Session**。顺带补上 `resume`/换 id 两条路的改名——老会话升级后第一次被领养时也会补一个名字，而归档里的旧会话改不了（改名只认活着的会话）。另一个副作用是好的：`source.kind === 'user'` 会把标题**钉住**，后面灌多少群消息都不会被自动生成的标题盖掉。
+
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
 - 方案（原稿，章节号与完整版一致）：`../docs/dsh-onebot-hub-方案.md`
