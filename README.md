@@ -270,7 +270,7 @@ agent 不是"每轮都把聊天记录读一遍"，它有**三层心智 + 五个�
 | 档位 | 别的群的群内事实 | 私聊内容 | 身份（谁是谁） | 活跃层跨群 |
 | --- | --- | --- | --- | --- |
 | `strict` | 不可见 | 不可见 | 可见 | 只在本会话 |
-| `scoped` | 不可见 | 按 `privateFacts`（默认 `sameActor`：只有跟同一个人的私聊能看见） | 可见 | 只在本群 |
+| `scoped` | 不可见 | 按 `privateFacts`（默认 `sameActor`：那个人自己在场时才看得见） | 可见 | 只在本群 |
 | `balanced`（默认） | 标了 `shareable` 的可见 | 同上 | 可见 | 白名单内 + 有共同活跃群友 |
 | `open` | 全部可见 | 按 `privateFacts` | 可见 | 白名单内全可见 |
 
@@ -551,7 +551,7 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 <details>
 <summary>记忆里的东西会不会被别的群看到？</summary>
 
-由 `memory.isolation.level` 与白名单决定（见[记忆系统](#-记忆系统)）。默认 `balanced`：同群可见；私聊内容默认不出私聊；敏感内容任何档位都不外传；群档案不进共享。
+由 `memory.isolation.level` 与白名单决定（见[记忆系统](#-记忆系统)）。默认 `balanced`：同群可见；私聊内容只在**那个人自己在场**时可见（`privateFacts: sameActor`，敏感内容除外的除外规则见下）；敏感内容任何档位都不外传；群档案不进共享。
 </details>
 
 <details>

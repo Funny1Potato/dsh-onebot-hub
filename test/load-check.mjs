@@ -232,6 +232,8 @@ function makeCtx(extraServices = {}) {
     // 按 canonical 路径幂等；这里的假件照这个语义实现，好让"新建/复用"两条路都能被验证。
     create: async (wsPath, title) => {
       recorded.wsCreates.push({ path: wsPath, title });
+      // ①-e：宿主对路径的校验比我们严时 `create` 会 reject——那是确定性失败，hub 不该重试。
+      if (extraServices.failWorkspaceCreate) throw new Error('不是目录或路径不可用（假件）');
       const hit = recorded.workspaces.find((w) => w.path === wsPath);
       if (hit) return hit;
       const made = {
@@ -256,7 +258,7 @@ function makeCtx(extraServices = {}) {
     get: (name) => {
       if (name === 'agentPresets') return fakePresets;
       if (name === 'sessions') return extras.sessions ?? fakeSessions;
-      if (name === 'workspaceRegistry') return fakeWorkspace;
+      if (name === 'workspaceRegistry') return extraServices.noWorkspaceRegistry ? undefined : fakeWorkspace;
       return extras[name] ?? undefined;
     },
   };
@@ -1358,6 +1360,38 @@ async function runAsyncChecks() {
     assert.equal(badCase.recorded.attaches.length, 0, '路径用不了时不挂（挂到进程 cwd 上更错）');
     assert.equal(badHub.pool.host.lastAttach?.ok, false);
     assert.match(String(badHub.pool.host.lastAttach?.error ?? ''), /agent\.workspace 用不了/, '失败原因要说得出来');
+
+    // ①-d 宿主没暴露 workspaceRegistry：**立刻收工**，不要拿着"没这个服务"再等 5.5 秒重试两轮。
+    const noRegCase = makeCtx({ noWorkspaceRegistry: true });
+    const noRegHub = apply(noRegCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, workspace: wsPath },
+    });
+    await sleep(60);
+    await noRegHub.pool.wake('group:77781', { text: '装', summary: '装', setup: () => {} });
+    await sleep(120);
+    assert.equal(noRegHub.pool.host.lastAttach?.ok, false, '没有 registry 就不该报成功');
+    assert.match(String(noRegHub.pool.host.lastAttach?.error ?? ''), /workspaceRegistry/, '原因要说清是宿主没这个服务');
+    assert.equal(noRegHub.pool.host.lastAttach?.stale, undefined, '不是"会话已换"的那种失败');
+
+    // ①-e 建工作区**抛错**（宿主对路径的校验比我们严）：同样是确定性失败，不该重试三轮。
+    const createFailCase = makeCtx({ failWorkspaceCreate: true });
+    const createFailHub = apply(createFailCase.ctx, {
+      upstreamUrl: '',
+      upstreamSelfId: '30001000',
+      downstreamTargets: '[]',
+      persist: false,
+      agent: { mode: 'assist', batchMs: 500, workspace: wsPath },
+    });
+    await sleep(60);
+    await createFailHub.pool.wake('group:77782', { text: '装', summary: '装', setup: () => {} });
+    await sleep(150);
+    assert.equal(createFailHub.pool.host.lastAttach?.ok, false);
+    assert.match(String(createFailHub.pool.host.lastAttach?.error ?? ''), /新建工作区失败/);
+    assert.equal(createFailCase.recorded.wsCreates.length, 1, '确定性失败只试一次，别拿 1.5s/4s 重试两次');
 
     // ② agent.archiveOnRetire=false：结束不归档，也**不能**退化成"删除会话"。
     const keepCase = makeCtx();

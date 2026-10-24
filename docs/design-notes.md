@@ -110,8 +110,8 @@ dsh plugin --profile <你的 profile> add dsh-onebot-hub
 | `persist` | `true` | 是否落盘（只读缓存与实测能力结论）。关掉即完全不碰磁盘 |
 | `storageDir` | `''` | 落盘目录；留空用 `~/.dsh/onebot-hub`。`persist: false` 时该项无意义 |
 | `agent.mode` | `assist` | 唤醒档位（每会话一套"休眠/激活"状态机，见 §21.7）：`observer`（只看不说，模型完全不被调用）/ `assist`（平时**休眠**只记录，**被叫到**才醒并进激活；激活期按批量窗口持续参与）/ `active`（休眠时每 `activeTickMs` 看一眼有没有新消息，有就醒一次并进激活；被叫到同 `assist`） |
-| `agent.batchSize` | `6` | **激活状态下**攒够多少条消息就再唤醒一次（休眠期的消息只是攒着，醒来时一起看） |
-| `agent.batchMs` | `8000` | **激活状态下**批量窗口最长等待（ms），从进入激活/上次唤醒后的第一条新消息算起，到期再唤醒一次 |
+| `agent.batchSize` | `10` | **激活状态下**攒够多少条消息就再唤醒一次（休眠期的消息只是攒着，醒来时一起看） |
+| `agent.batchMs` | `20000` | **激活状态下**批量窗口最长等待（ms），从进入激活/上次唤醒后的第一条新消息算起，到期再唤醒一次 |
 | `agent.awakeMs` | `300000` | 激活状态能挂多久（ms）：**从"最后一次有人说话或它自己回话"算起**，这么久两边都没动静才回休眠（`0` = 不超时，一直挂着激活）。回话本身续期，所以是"说完还能再待一会儿"，不是"说完立刻睡" |
 | `agent.activeTickMs` | `300000` | `active` 档休眠时的判断间隔（ms）：每隔这么久看一眼该会话有没有新消息（`0` = 关掉节拍唤醒） |
 | `agent.maxActive` | `8` | 同时活着的会话 agent 上限，超出按 LRU 回收 |
@@ -133,10 +133,10 @@ dsh plugin --profile <你的 profile> add dsh-onebot-hub
 | `agent.replyMaxText` | `3` | **一次回复最多几条文字消息（m32420）**：`0` = 不限。超出的从尾部丢弃，并在工具回执里说清"另有 N 条文字超出上限未发" |
 | `agent.replyMaxImages` | `9` | **一次回复最多几张图（m32420）**：`0` = 不限。图**不占**文字额度（文字/图两个上限分开算） |
 | `memory.limit` | `5000` | 内存记忆条数上限（写入永远全量，隔离只作用于装配与检索） |
-| `memory.isolation.level` | `scoped` | 隔离级别：`strict` / `scoped`（默认，仅身份可跨会话）/ `balanced`（+ shareable 事实）/ `open`（全放，仅测试） |
+| `memory.isolation.level` | `balanced` | 隔离级别：`strict` / `scoped`（仅身份可跨会话）/ `balanced`（默认：+ shareable 事实，活跃层可在白名单会话间共享）/ `open`（全放，仅测试） |
 | `memory.isolation.crossGroupIdentity` | `true` | 身份档案是否可跨群复用 |
 | `memory.isolation.crossGroupFacts` | `shareable` | 跨群事实：`never` / `shareable` / `all` |
-| `memory.isolation.privateFacts` | `never` | 私聊内容：`never` / `sameActor` / `all` |
+| `memory.isolation.privateFacts` | `sameActor` | 私聊内容：`never` / `sameActor`（默认：那个人自己在场时可见）/ `all` |
 | `memory.isolation.sensitivityAlwaysLocal` | `true` | 敏感信息（住址/证件/收入/病历…）一票否决，永不跨会话 |
 | `memory.isolation.overrides` | `'[]'` | JSON 数组，按 glob 覆盖某个 scope 的级别，如 `[{"match":"group:55555","level":"strict"}]` |
 | `memory.isolation.trustedGroups` | `'[]'` | JSON 数组，互为"同世界"的群组，如 `[["group:1","group:2"]]` |
@@ -172,14 +172,14 @@ dsh plugin --profile <你的 profile> add dsh-onebot-hub
 | `vision.cacheLimit` | `500` | `<storageDir>/vision/cache.json` 最多缓存几张图的描述（键是字节的 sha256） |
 | `persona.enabled` | `true` | 是否启用人设/预设层（关掉 = 不注入人设段，命令面也答"人设未启用"） |
 | `persona.defaultName` | `小助手` | 默认预设名；没有为某会话绑定过预设时用它（`m22774` 从 `default` 改名，老库自动迁移） |
-| `persona.presets` | `'[]'` | **JSON 数组**，启动时写进预设库的种子预设：`[{"name":"小助手","role":"…","knowledges":["…"],"hidden":false}]`。落盘内容才是权威，config 只是种子；`default` 不允许删 |
+| `persona.presets` | `'[]'` | **JSON 数组**，启动时写进预设库的种子预设：`[{"name":"小助手","role":"…","knowledges":["…"],"hidden":false}]`。落盘内容才是权威，config 只是种子；默认预设（`小助手`）不允许删 |
 | `chatCommands.enabled` | `true` | 是否启用聊天管理命令层 |
 | `chatCommands.prefix` | `/` | 命令前缀（`/help`）。只认**句首**前缀 |
 | `chatCommands.bypassPrefix` | `!!` | 让路前缀：`!!/help` 连枢纽那条回话都不要（消息本身一直都会照常转发） |
 | `chatCommands.superUsers` | `'[]'` | **JSON 数组**，超管 QQ 列表（`["10001"]`，支持 `"*"` 全开）。**留空 = 整条命令链沉默**：不拦任何消息，也不回任何话 |
-| `chatCommands.maxReplyChars` | `800` | 单条命令回话的字符上限（超了截断，避免把群刷屏） |
+| `chatCommands.maxReplyChars` | `1500` | 单条命令回话的字符上限（超了截断，避免把群刷屏） |
 | `memes.enabled` | `true` | 是否启用表情包库（关掉 = 不注入清单、`onebot_reply` 的 memes 一律被丢） |
-| `memes.topK` | `8` | 注入上下文的候选条数（最近用过的会强制入列） |
+| `memes.topK` | `50` | 注入上下文的候选条数（最近用过的会强制入列） |
 | `memes.maxSend` | `3` | 一轮最多发几张表情（超出的按顺序丢） |
 | `memes.autoCollect` | `true` | **是否允许收录**：`false` = 完全不收集（`onebot_memes{action:'add'}` 直接拒绝，库只读）；`true` = **只有 agent 能收录**（判断值不值得、写 brief 都由它做，hub 不再自动收纯表情） |
 | `anime.backend` | `off` | 角色识别后端：`off` / `anime-recognize`（自建接口）/ `animetrace`（公共 API）/ `both`（本地优先，未命中或报错才回落）。**默认关**：识别会发图给第三方 |
@@ -195,7 +195,7 @@ dsh plugin --profile <你的 profile> add dsh-onebot-hub
 | `imageGen.model` | `''` | 生图模型名 |
 | `imageGen.baseUrl` | `''` | OpenAI 兼容生图接口的 base URL |
 | `imageGen.apiKey` | `''` | 接口密钥（只进 `Authorization` 头；`stats`/回显里一律替换成 `***`） |
-| `imageGen.maxSize` | `1024x1024` | 尺寸上限：请求的 `size` 会**等比内缩**进这个框（不拉变形）。宽高比保持 |
+| `imageGen.maxSize` | `2560x1440` | 尺寸上限：请求的 `size` 会**等比内缩**进这个框（不拉变形）。宽高比保持 |
 | `imageGen.minSize` | `''` | 尺寸下限（按面积向上放大）；与上限冲突时下限优先 |
 | `imageGen.watermark` | `false` | 是否让实现端打水印 |
 | `imageGen.timeoutMs` | `120000` | 生图超时（ms）——生图本来就慢，默认给两分钟 |
@@ -775,6 +775,8 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 - **启动变慢不是新版本引入的，是同步 IO 爬在启动路径上（用户 m21641"又能启动了，只是时间非常久"、m21653 给了 startup.log）**：按 `startup.log` 的块内耗时算，`links:connecting → tools:ready` 从 10-09 的 6–70 ms 单调涨到 10-23 的 2.4–2.9 s，`config:ready → hub:ready` 同步涨（2–30 ms → 100–186 ms）。涨的和数据量成正比，与版本无关。三处元凶全是"启动时同步扫全量历史"：①`connectUpstream()` → `#startRetention()` → `pruneOld()` 同步跑 recall/media 两头的 `readdirSync+statSync+rmSync`；②`purgeFailedSends()` 排在启动路径上，它 `await recall.ensure()`——那是"把全部 jsonl 读进内存"；③`ensure()` 回填 sqlite 索引时逐条 `INSERT`，而 `node:sqlite` 默认**自动提交**：实测 3000 条 12.8 秒（4.3 ms/条，一次 fsync 一条），放进一个事务只要 18 ms。修法：三处 IO 全改 `fs.promises` 并分批让出事件循环；`pruneOld()` 改 `async`、首次清理推迟到启动后 20 s（`retention.firstRunDelayMs`）；`purgeFailedSends()` 推迟 30 s；回填索引包进一个事务；`prune` 删行在过期行占多数时改走"清表重灌"（fts5 逐行 `DELETE` 实测 3000 条 0.7–2 s，重灌是毫秒级）。实测 30 个日文件 / 12000 行 / 300 个 blob：`ensure` 47.7 s → **0.24 s**，`prune` 12.7 s → **0.11 s**，二次启动 37 ms。顺带把 `links:connected` 单独记一笔，以后日志里"连线"与"工具注册"不再混成一段。
 
 - **会话归属：默认什么都不改，只留两个显式开关（issue #1，用户 m22855 定案）**：外部用户报"枢纽建的会话在 DSH Web 里全在「未分类」、切到工作区找不到"。根因查实是两条：① `hostRef.create` 只给 `meta.cwd`，**从不调 `workspace.attachSession`**——宿主的 `session.create` 只有带 `workspaceId` 那条路才会 attach，所以 cwd 再对也不会出现在任何工作区的 `sessionIds` 里；② `hostRef.retire` 结束就 `archiveSession`，会话进归档集。用户的定案是"都做，但默认保持现状"：`agent.workspace`（空＝宿主进程 cwd 且不挂；填了＝用它当 cwd，并在建完会话后按路径找已登记工作区 `attachSession`，排三次重试——header 落盘需要时间）＋ `agent.archiveOnRetire`（默认 true；false 时不归档也不走删除退路，会话留在列表里，代价是每次激活多留一条）。两条都失败静默、不挡唤醒，结果写进 `onebot_hub_status` 的 `host.workspaceAttach`。
+
+- **自查抓到的"旧值残影"与三处薄弱点（用户 m23417"再详细自查一遍吧"）**：把最近这批改动（六项默认值、默认预设改名、issue #1 的会话归属、`privateFacts` 新语义）按"同一个数字/名字还出现在哪儿"扫了一遍，捞到一类不报错、但会**慢慢骗人**的东西——代码里三处、文档与设置页里八处还是旧值。①`lib/chat-commands.js` 的 `DEFAULT_MAX_REPLY_CHARS` 还是 800：配置层已传 1500，可任何直接 `clipReply(text)`（不给上限）的地方仍按 800 截。②`lib/agent/policy.js` 的 `BatchWindow` 构造默认值还是 `size:6, ms:8000`：上层总会传值，但"这个类的默认"本身也是一句话，留着旧值等于给下一个人埋坑。③`lib/mind.js` 的 `#silenceSince` 兜底 `|| 8000`——拿不到 `policy.batchMs` 时按 8 秒算"最近有没有人说话"，与 20 秒的攒批窗口错位。④`docs/design-notes.md` 配置表七行（`agent.batchSize` 6、`agent.batchMs` 8000、`memory.isolation.level` scoped、`privateFacts` never、`maxReplyChars` 800、`memes.topK` 8、`imageGen.maxSize` 1024x1024）全是旧值，还写着"`default` 不允许删"。⑤设置页下拉里 `sameActor` 的说明是"同一个人在哪都可见"、`scoped` 还标着"（默认）"——语义与默认都变了，选项标签停在旧世界。⑥README 的隔离表写着"只有跟同一个人的私聊能看见"，那正是 `m22465` 推翻的旧语义。另有三处薄弱点：`hostRef.title` 与识图取 `llm` 仍在用 `sctx.get?.(x) ?? sctx.x`（服务没挂载时那次属性访问会抛，而它跑在唤醒路径上——与 `serviceOf` 的存在理由自相矛盾）；`hostRef.attach` 在"宿主没暴露 workspaceRegistry"与"`create` 抛错"这两种**确定性失败**上仍按 1.5s/4s 重试两轮，白等 5.5 秒；重试期间会话可能已经退役换了 id，晚到的那次 attach 会把一个已归档的旧会话重新挂回工作区（现已按 `sessionIdOf(agentKey) !== id` 提前收工）。
 
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
