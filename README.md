@@ -455,6 +455,8 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 工具面 = **28 个 `onebot_*`**（本插件提供）+ **agent 预设自带的 DSH 原生工具**。
 
 > 这 28 个工具、以及写给 agent 的指导文字，**只挂在枢纽自己那个会话里**（agent 作用域）——同一 profile 里另外开的普通 DSH 会话、以及 agent 派生的**子代理都看不见**它们。想在普通会话里手动排查是做不到的。
+>
+> 唯一的例外是 `onebot_session`（会话之间转达，**测试功能**）：它是**全局**工具，同一 profile 的任何会话都能看见，见 [会话之间转达](#-会话之间转达测试功能)。
 
 ### 本插件提供的 28 个
 
@@ -477,7 +479,59 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 - **`onebot_tools` 的 enable/disable 管不到预设自带的那些**（宿主的工具限制只作用于全局层）。想换整档工具面就换预设：`onebot_tools { preset: 'default' }`。
 - **`onebot_tools` 的增删只对本次激活有效**：会话退役后回到预设默认。
 
-## 🗂️ 数据存储
+## 📡 会话之间转达（测试功能）
+
+一个会话里的 agent，把值得搬的东西递给**另一个会话的 agent**——由那边自己决定发不发——
+递完之后两边还能在同一根线上来回说几句。默认**关**。
+
+### 拿来干什么
+
+| 场景 | 怎么走 |
+| --- | --- |
+| 群 A 有人问"上次那个活动什么时候"，答案在群 B | A 里的 agent `relay` 过去问一句，B 答，A 回群里说 |
+| 群里的图、小程序卡、合并聊天记录，想搬给另一个群 | `relay` 带 `refs`（原文），枢纽替你搬 |
+| 私聊里聊定的事，要在群里说一声 | 只能 `text` **转述**（原文默认不许搬），转述会过隐私词表 |
+
+### 四个动作
+
+| `op` | 干什么 |
+| --- | --- |
+| `list` | 有哪些会话可以递、手上还有哪几条活着的线 |
+| `relay` | 开一条线并递东西（`refs` 原文 / `text` 话），返回通道号 `ch_xxx` |
+| `say` | 在这条线上接着说一句，**两边都能用** |
+| `close` | 主动收线 |
+
+### 三条上限，缺一条它就会没完没了
+
+| 上限 | 默认 | 为什么 |
+| --- | --- | --- |
+| 每方 6 句 | `channelMaxPerSide` | 每句注入都写着"还剩 N 句"，比突然被拒体面 |
+| 30 分钟 | `channelTtlMs` | 跨天的"对话"没意义，上下文早丢了 |
+| 10 分钟没人说话就冷掉 | `channelSilentMs` | 比过期更早生效——谁都不许用僵尸线反复唤醒对方 |
+
+### 隐私：原文和转述分开算
+
+- **原文**（整段搬运，进了群就撤不回来）：私聊 → 群**默认禁止**。要开得显式打开 `cross.allowPrivateRefs`。
+- **转述**（agent 自己写的话）：放行，但代码会过一遍隐私词表（住址、证件、工资、病历……），命中直接拒并让它改写。
+- 递过去的字条里会明写"这段话是那边的 agent 用自己的话转述的，不是原文"，让对面知道自己在听二手话。
+
+### 打开
+
+```yaml
+cross:
+  enabled: true
+```
+
+开了之后默认只有枢纽自己拉起的会话能发起（`allowFrom: hub`）；`allowTo` 留空＝枢纽的全部会话都能当目标。
+完整 12 个配置项见 [docs/config.md](docs/config.md#会话间转达cross)。
+
+### 为什么标"测试功能"
+
+- 链路本身跑通了、测试也覆盖了，但**真机只验过一半**：上游是否支持 `get_msg` 回完整消息段、`send_group_forward_msg` 发合并转发、`send_msg` 带 `json` 段，不同实现端差别很大。
+- 通道只活在内存里，**重启就断**——这是有意的，跨重启的"对话"没有上下文可依。
+- 每递一句话都是把对面**真的叫醒**一次，也就是一次真实的模型调用。别在群里拿它做实验。
+
+## ## 🗂️ 数据存储
 
 默认 `<storageDir>` = `~/.dsh/onebot-hub`：
 
@@ -582,6 +636,7 @@ node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具�
 
 | 版本 | 要点 |
 | --- | --- |
+| `0.12.0-beta.1` | **会话之间转达（测试功能）**：一个会话的 agent 能把图片、小程序卡、合并记录递给另一个会话，两边在同一根线上来回说几句（每方 6 句 / 30 分钟 / 10 分钟沉默即冷）；私聊里的话只能转述、原文默认不许搬，转述过隐私词表。工具 `onebot_session` 是全局的，**默认关** |
 | `0.11.0` | **启动提速**：把三处同步 IO 挪出启动路径（大库实测"读回历史"47.7 s → 0.24 s）；**记忆系统改为三层心智**（活跃层 / 长期记忆＝事件索引 / 档案带），删掉群档案里的 highlights，默认隔离档位 `scoped` → `balanced`；记忆每一行带出处、日期与相关群友 |
 | `0.10.0` | 版本号规则改为 `x.y.z`；设置页布局自适应（窄容器自动堆叠）；记忆按人隔离 |
 | 更早 | 见 [Releases](https://github.com/Funny1Potato/dsh-onebot-hub/releases) |
@@ -601,6 +656,7 @@ A DeepSeek Harness plugin that puts DSH on an OneBot v11 bus: LLOneBot / NapCat 
 - **Downstream** — serve or dial downstream links and **relay events verbatim**, so existing bot plugins keep working unchanged.
 - **Observer** — a full timeline of every message plus a ledger of what each downstream bot did, exposed to the agent as 28 `onebot_*` tools.
 - **Agent** — wake logic, layered memory (active / long-term index / person / group / topic), persona presets, per-group quotas.
+- **Cross-session relay** (experimental, off by default) — one session's agent hands a picture, a mini-program card or a merged forward to *another* session, then both sides keep talking on the same short-lived channel; private-chat originals are never moved verbatim into a group, only paraphrased and filtered.
 
 Install: `dsh plugin --profile <profile> add dsh-onebot-hub`. Configuration, commands and behavior notes are in Chinese above, and every config key is documented in [docs/config.md](docs/config.md).
 
