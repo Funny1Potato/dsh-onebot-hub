@@ -3427,6 +3427,67 @@ t('跨会话转达的自查（m26473）：note 也是转述、递送失败不吃
   assert.match(degraded[0] ?? '', /全体成员/);
 });
 
+t('跨会话转达的第三轮自查（m27100）：去重不占名额、失败不白吃名额、引用段不当噪声、包 id 猜不到', async () => {
+  const now = 1_000_000;
+  const relay = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const first = await relay.relay({ from: 'group:1', to: 'group:2', note: 'n', text: '同一句', as: 'message' });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  // 同一内容连撞三次：挡住它的是去重，不该顺手把五分钟的三个名额吃光。
+  for (let i = 0; i < 3; i += 1) {
+    const dup = await relay.relay({ from: 'group:1', to: 'group:2', note: 'n', text: '同一句', as: 'message' });
+    assert.equal(dup.ok, false);
+    assert.match(dup.error, /刚转达过/);
+  }
+  const other = await relay.relay({ from: 'group:1', to: 'group:2', note: 'n', text: '换一句', as: 'message' });
+  assert.equal(other.ok, true, `重复内容被拒之后，新内容还得转得出去：${JSON.stringify(other)}`);
+
+  // 因为"包太大"被拒的那几次，名额也得还回来。
+  const tight = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    config: { cross: { enabled: true, maxBytes: 1024 } },
+    now: () => now,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    const big = await tight.relay({ from: 'group:1', to: 'group:2', note: 'n', text: '大'.repeat(2000), as: 'message' });
+    assert.equal(big.ok, false);
+    assert.match(big.error, /内容太大/);
+  }
+  const small = await tight.relay({ from: 'group:1', to: 'group:2', note: 'n', text: '小的一句', as: 'message' });
+  assert.equal(small.ok, true, `三次"太大"之后还得转得出去：${JSON.stringify(small)}`);
+
+  // `reply` 段（"这条是在回哪句"）搬过去指向也不成立，不该被说成"转不过来"。
+  const quoted = transcode([{ type: 'text', data: { text: '好' } }, { type: 'reply', data: { id: '42' } }]);
+  assert.deepEqual(quoted.sendable.map((s) => s.type), ['text']);
+  assert.deepEqual(quoted.degraded, [], '引用段是噪声，不该出现在回执里');
+
+  // 包 id 不能被顺着念出来：8 位随机十六进制（原来是序号拼随机数，跑一阵后能枚举）。
+  let tickp = 0;
+  const store = new PackageStore({ ttlMs: 60_000, now: () => (tickp += 1) });
+  const pkA = store.put({ segments: [{ type: 'text', data: { text: 'x' } }] });
+  const pkB = store.put({ segments: [{ type: 'text', data: { text: 'y' } }] });
+  assert.match(pkA.id, /^pkg_[0-9a-f]{8}$/);
+  assert.notEqual(pkA.id, pkB.id);
+  assert.equal(store.take(pkA.id)?.length, 1, '包仍然单次可用');
+  assert.equal(store.take(pkA.id), null, '再取一次就没有了');
+
+  // 递送失败退额度时，沉默时钟也要拨回去——没送出去的话不算"刚有人说过话"。
+  let tick = 1_000_000;
+  const chStore = new ChannelStore({ ttlMs: 3_600_000, silentMs: 300_000, maxPerSide: 6, now: () => tick });
+  const line = chStore.open({ from: 'group:1', to: 'group:2' });
+  tick += 240_000;
+  const marker = chStore.note(line.id, 'a', tick);
+  assert.equal(chStore.get(line.id).lastAt, tick);
+  chStore.refund(line.id, 'a', marker.prevLastAt);
+  assert.equal(chStore.get(line.id).lastAt, 1_000_000, '没送出去的那句话不该把线推老');
+  assert.equal(chStore.left(line.id, 'a'), 6, '额度要还回来');
+});
+
 t('跨会话转达：只能搬自己这个会话里看见的消息（时间线按 id 找得到，别人的要报清楚）', async () => {
   const now = 1_000_000;
   const delivered = [];
