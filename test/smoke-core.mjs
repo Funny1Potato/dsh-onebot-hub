@@ -38,6 +38,10 @@ import {
   ttlOf,
 } from '../lib/capability.js';
 import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
+import { composeReply, buildSendParams } from '../lib/reply.js';
+import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay } from '../lib/cross/relay.js';
+import { ChannelStore } from '../lib/cross/channels.js';
+import { PackageStore } from '../lib/cross/packages.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
 import { full, mdhm } from '../lib/stamp.js';
 import { Cards } from '../lib/memory/cards.js';
@@ -3146,6 +3150,355 @@ t('发送失败当场回执：立刻排一次唤醒把失败递回去，窗口�
   await new Promise((r) => setTimeout(r, 20));
   const left = raceMind.pendingSendFailureNotice('group:55555');
   assert.ok(left === null || /第二句/.test(left), `留下的必须是新那条（或已被新回执吃掉），实际：${left}`);
+});
+
+t('发出去的图片/表情包在快照里留痕：占位符带上时间线编号（m26901）', async () => {
+  // 用户问的是"AI 生图发出去以后，下一轮的聊天记录快照里有没有记录"——以前没有：
+  // 图片单独成条、`text` 是空字符串，而会话卡与最近窗口都按"没文本就不渲染"过滤，
+  // 于是模型下一轮完全不知道自己发过图（会重复发，或接不上"这张好看"）。
+  const timeline = new Timeline({});
+  const hub = { config: {}, upstreamLinkId: 'up:test', callUpstream: async () => ({ status: 'ok', data: { message_id: 1 } }) };
+  const mind = new Mind({ hub, timeline, log: () => {} });
+
+  const imageOnly = composeReply({ images: ['D:/tmp/a.png'] });
+  assert.equal(imageOnly.messages[0].text, '', '前提：只有图的那条文本是空的');
+  const res = await mind.deliver('group:55555', imageOnly);
+  assert.equal(res.status, 'ok');
+
+  const rows = timeline.bySession('group:55555');
+  assert.equal(rows.length, 1);
+  const id = rows[0].id;
+  assert.equal(rows[0].text, `[图片]〔${id}〕`, '占位符要带上编号，下一轮才回查得到');
+  assert.equal(rows[0].refs.carrier, true, '标出来这是占位符，不是真的说过这句话');
+
+  // 会话卡与最近窗口都得看得见这一行（两处是同一道"没文本就滤掉"的过滤）。
+  const cards = new Cards({ log: () => {} });
+  cards.note(rows[0]);
+  const card = renderDigest(cards.digestFor('group:55555'));
+  assert.match(card, new RegExp(`我：\\[图片\\]〔${id}〕`), '会话卡里要看得见发过图');
+  assert.match(renderWindow(rows, {}), new RegExp(`我：\\[图片\\]〔${id}〕`), '窗口里也要看得见');
+
+  // 表情包：占位符带的是表情包 id（图片段里只剩本地路径，memeId 到不了出站那层）。
+  const meme = composeReply({ memes: [{ id: 'meme_bigfish', file: 'D:/tmp/b.png' }] });
+  assert.deepEqual(meme.messages[0].memeIds, ['meme_bigfish']);
+  await mind.deliver('group:55555', meme);
+  const rows2 = timeline.bySession('group:55555');
+  const memeRow = rows2.at(-1);
+  assert.equal(memeRow.text, `[表情包 meme_bigfish]〔${memeRow.id}〕`);
+
+  // 有字的消息不加占位符也不加编号（内容本来就在，不用回查）。
+  await mind.deliver('group:55555', composeReply({ text: '本鲸给你画了一张' }));
+  assert.equal(timeline.bySession('group:55555').at(-1).text, '本鲸给你画了一张');
+});
+
+// ---------------------------------------------------------------- 跨会话转达（m25983 / m26026）
+
+t('跨会话转达：字条不说"已经发出去了"，包只能用一次且会过期', () => {
+  // `m26026` 用户指出的问题：早一版字条写"已经放到这个群里了"，会让 B 以为消息已经发出去。
+  // 现在是"东西在我这儿，是个包"——B 才是发送方。
+  const letter = letterFor({ fromScope: 'group:123456789', fromLabel: '群 123456789', note: '这边有人在问显卡', packageId: 'pkg_7f3a' });
+  assert.match(letter, /【会话间的转达】来自 group:123456789（群 123456789）/);
+  assert.match(letter, /递信的是那边的另一个你/);
+  assert.match(letter, /pkg_7f3a/);
+  assert.match(letter, /不想接就不用动/);
+  assert.equal(letter.includes('已经放到这个群里了'), false, '不能说"已经发到群里"：B 才是发送方');
+  assert.equal(labelOfScope('private:10001'), '10001 的私聊');
+  assert.equal(labelOfScope('group:55555'), '群 55555');
+
+  let now = 1_000_000;
+  const store = new PackageStore({ ttlMs: 60_000, now: () => now });
+  const pkg = store.put({ segments: [{ type: 'text', data: { text: 'hi' } }], from: 'group:1', to: 'group:2' });
+  assert.ok(pkg.id.startsWith('pkg_'));
+  // 单次使用：第一次取到，第二次就没了。
+  assert.deepEqual(store.take(pkg.id), [{ type: 'text', data: { text: 'hi' } }]);
+  assert.equal(store.take(pkg.id), null, '包只能用一次');
+  // 过期就取不到。
+  const pkg2 = store.put({ segments: [{ type: 'text', data: { text: 'later' } }] });
+  now += 61_000;
+  assert.equal(store.take(pkg2.id), null, '过期取不到');
+  // 超限直接拒绝，不悄悄截断。
+  const big = store.put({ segments: [{ type: 'text', data: { text: 'x'.repeat(400 * 1024) } }] });
+  assert.equal(big.rejected, 'too-large');
+});
+
+t('会话间通道：两条线能来回说，句数封顶，收线后就不再递（m26268）', async () => {
+  // 通道本身：开→说→封顶→收线。
+  let now = 1_000_000;
+  const ch = new ChannelStore({ ttlMs: 60_000, silentMs: 30_000, maxPerSide: 2, now: () => now });
+  const rec = ch.open({ from: 'group:111', to: 'group:222', fromLabel: '群 111', toLabel: '群 222' });
+  assert.ok(rec.id.startsWith('ch_'));
+  assert.equal(ch.live(rec.id).ok, true);
+  assert.equal(ch.left(rec.id, 'a'), 2);
+  assert.deepEqual(ch.note(rec.id, 'a').left, 1, '说了 1 句还剩 1 句');
+  assert.deepEqual(ch.left(rec.id, 'b'), 2, '对面还是满额');
+  ch.note(rec.id, 'b');
+  ch.note(rec.id, 'a');
+  assert.equal(ch.note(rec.id, 'a'), null, '每方封顶后不再给额度');
+  // 冷掉：超过 silentMs 没人说话。
+  now += 31_000;
+  const stale = ch.live(rec.id);
+  assert.equal(stale.ok, false);
+  assert.match(stale.reason, /冷掉/, '10 分钟没人说话就冷掉');
+  // 收线。
+  const c2 = ch.open({ from: 'group:1', to: 'group:2' });
+  assert.equal(ch.close(c2.id).closed, true);
+  assert.match(ch.live(c2.id).reason, /主动收线/, '关掉的线再说话要被告知通道已关闭');
+  // 30 分钟硬过期。
+  now += 10 * 60_000;
+  const c3 = ch.open({ from: 'group:1', to: 'group:3' });
+  now += 61_000;
+  assert.match(ch.live(c3.id).reason, /过期/);
+
+  // 真的走一条线：开线 → 对面回一句 → 收线。
+  const delivered = [];
+  const relay = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async (scope, opts) => { delivered.push({ scope, text: opts.text }); return { woke: true }; } },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const open = await relay.relay({ from: 'group:111', to: 'group:222', note: '这边在聊显卡', text: '看到一张显卡图', as: 'message' });
+  assert.equal(open.ok, true, JSON.stringify(open));
+  assert.ok(open.channel.startsWith('ch_'), '开线要回一个通道号');
+  assert.match(delivered[0].text, /会话间的通道（ch_/);
+  const back = await relay.say({ from: 'group:222', channel: open.channel, text: '我看看' });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.equal(back.to, 'group:111', '回话要递回发起方');
+  assert.match(delivered.at(-1).text, /【会话间的对话】group:222/);
+  assert.match(delivered.at(-1).text, new RegExp(open.channel));
+  assert.equal(relay.close({ from: 'group:222', channel: open.channel }).closed, true);
+  const after = await relay.say({ from: 'group:111', channel: open.channel, text: '还在吗' });
+  assert.equal(after.ok, false);
+  assert.match(after.error, /已关闭/);
+  // 不认识这条线的人说不了话。
+  const stranger = await relay.say({ from: 'group:999', channel: open.channel, text: '插一句' });
+  assert.match(stranger.error, /没有你/);
+});
+
+t('私聊来源：原文到任何别的会话都禁、转述放行但要过隐私词表（m26268 / m26439）', async () => {
+  const delivered = [];
+  const now = 1_000_000;
+  const relay = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async (scope, opts) => { delivered.push({ scope, text: opts.text }); return { woke: true }; } },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  // 原文：私聊里的一条消息 id → 群里，默认禁。
+  const refsOnly = await relay.relay({ from: 'private:10001', to: 'group:222', note: '看这个', refs: ['42'], as: 'message' });
+  assert.equal(refsOnly.ok, false);
+  assert.match(refsOnly.error, /原文不能搬到别的会话/);
+  // 转述：放行，且字条里要标明"这是转述，不是原文"。
+  const told = await relay.relay({ from: 'private:10001', to: 'group:222', note: '那边问显卡', text: '那位最近在挑显卡，预算卡在一万以内', as: 'message' });
+  assert.equal(told.ok, true, JSON.stringify(told));
+  assert.match(delivered.at(-1).text, /是那边的 agent 用自己的话转述的/);
+  // 转述里带隐私 → 直接拒，不留余地。
+  const leaky = await relay.relay({ from: 'private:10001', to: 'group:333', text: '他工资三万八', as: 'message' });
+  assert.equal(leaky.ok, false);
+  assert.match(leaky.error, /隐私/);
+  // 同一个人从私聊往群里 say 一句，也走同样的检查。
+  const open = await relay.relay({ from: 'private:10002', to: 'group:333', note: 'x', text: '他最近在忙', as: 'message' });
+  assert.equal(open.ok, true, JSON.stringify(open));
+  const bad = await relay.say({ from: 'private:10002', channel: open.channel, text: '他住址在某某路' });
+  assert.equal(bad.ok, false);
+  assert.match(bad.error, /隐私/);
+  // 正常的一句能过。
+  const good = await relay.say({ from: 'private:10002', channel: open.channel, text: '他大概下周有空' });
+  assert.equal(good.ok, true, JSON.stringify(good));
+
+  // `m26439`：私聊 → 另一个私聊，原文同样不能搬。
+  const toPrivate = await relay.relay({ from: 'private:10001', to: 'private:10003', note: 'x', refs: ['43'], as: 'message' });
+  assert.equal(toPrivate.ok, false);
+  assert.match(toPrivate.error, /原文不能搬到别的会话/);
+  // 但转述可以，而且字条里一样标明"这是转述"。
+  const toldPrivate = await relay.relay({ from: 'private:10001', to: 'private:10003', note: 'x', text: '他最近在挑显卡', as: 'message' });
+  assert.equal(toldPrivate.ok, true, JSON.stringify(toldPrivate));
+  assert.match(delivered.at(-1).text, /是那边的 agent 用自己的话转述的/);
+  // 群来源不受这个开关管：群里取到的原文照旧能搬。
+  const fromGroup = await relay.relay({ from: 'group:222', to: 'private:10003', note: 'x', refs: ['44'], as: 'message' });
+  assert.equal(fromGroup.ok, false, '取不到消息 id 时会报错，但不该报"原文不能搬"');
+  assert.doesNotMatch(fromGroup.error, /原文不能搬/);
+});
+
+t('会话间通道的自查修复：额度会退回、不能转给自己、太长的话劝你拆开说（m26370）', async () => {
+  const now = 1_000_000;
+  // 递送失败要退额度：`get()` 是浅拷贝，改拷贝不算数（这一处曾经真错）。
+  let fail = true;
+  const relay = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: {
+      reawake: async () => (fail ? { woke: false, reason: '上游没醒' } : { woke: true }),
+    },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const open = await relay.relay({ from: 'group:1', to: 'group:2', note: 'x', text: '第一句', as: 'message' });
+  assert.equal(open.ok, false, '递不到就不算开成');
+  assert.equal(relay.channels.stats.open, 0, '递送失败的线要收掉，别留一条僵尸通道');
+  fail = false;
+  const ok = await relay.relay({ from: 'group:1', to: 'group:2', note: 'x', text: '再试一次', as: 'message' });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  const ch = ok.channel;
+  const before = relay.channels.left(ch, 'b');
+  fail = true;
+  const bad = await relay.say({ from: 'group:2', channel: ch, text: '说一句但递不到' });
+  assert.equal(bad.ok, false);
+  assert.equal(relay.channels.left(ch, 'b'), before, '递送失败要把额度还回去');
+  fail = false;
+
+  // 不能转给自己。
+  const self = await relay.relay({ from: 'group:3', to: 'group:3', note: 'x', text: '喂', as: 'message' });
+  assert.equal(self.ok, false);
+  assert.match(self.error, /不能转给自己/);
+
+  // 太长的话：明确劝拆，不静默截断，而且不能白扣一句额度。
+  const leftBefore = relay.channels.left(ch, 'a');
+  const long = await relay.say({ from: 'group:1', channel: ch, text: '啊'.repeat(601) });
+  assert.equal(long.ok, false);
+  assert.match(long.error, /拆成/);
+  assert.equal(relay.channels.left(ch, 'a'), leftBefore, '被拒的长句不该吃掉额度');
+
+  // `as:"forward"` 但只有一段话：降级成单条，不整次废掉。
+  const only = await relay.relay({ from: 'group:1', to: 'group:4', note: 'x', text: '只有一句话', as: 'forward' });
+  assert.equal(only.ok, true, JSON.stringify(only));
+  assert.equal(only.as, 'message');
+
+  // channelSilentMs=0：不按沉默冷掉，只看 TTL。
+  const warm = new ChannelStore({ ttlMs: 60_000, silentMs: 0, maxPerSide: 6, now: () => now });
+  const c = warm.open({ from: 'group:1', to: 'group:2' });
+  assert.equal(warm.live(c.id).ok, true);
+});
+
+t('跨会话转达的自查（m26473）：note 也是转述、递送失败不吃额度也不记指纹、不归枢纽管的会话不去叫醒、@全体成员不跟着搬', async () => {
+  const now = 1_000_000;
+  const relay = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  // `note` 是模型写给对面看的一整段话，和 `text` 一样原样递过去——只查 `text` 就是个后门。
+  const smuggle = await relay.relay({ from: 'private:10001', to: 'group:222', note: '他工资三万八', text: '那位在挑显卡', as: 'message' });
+  assert.equal(smuggle.ok, false);
+  assert.match(smuggle.error, /隐私/);
+  // 群来源的 note 不受管（群里的话本来半公开）。
+  const groupNote = await relay.relay({ from: 'group:222', to: 'group:333', note: '他工资三万八', text: '群 222 在聊薪资', as: 'message' });
+  assert.equal(groupNote.ok, true, JSON.stringify(groupNote));
+
+  // 递送失败：既不能把指纹记上（否则重试撞"刚转达过"），也不能把频率名额吃掉。
+  let fail = true;
+  const flaky = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async () => (fail ? { woke: false, reason: '上游没醒' } : { woke: true }) },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const same = { from: 'group:1', to: 'group:2', note: 'x', text: '同一句话', as: 'message' };
+  for (let i = 0; i < 3; i += 1) {
+    const bad = await flaky.relay(same);
+    assert.equal(bad.ok, false);
+    assert.doesNotMatch(bad.error, /太频繁|刚转达过/, `第 ${i + 1} 次失败不该被自己的失败挡住`);
+  }
+  fail = false;
+  const retry = await flaky.relay(same);
+  assert.equal(retry.ok, true, `三次失败之后仍然要能真递到：${JSON.stringify(retry)}`);
+
+  // 不归枢纽管的群：不能去叫醒它（否则机器人会在没人管的群里说话）。
+  const scoped = new CrossRelay({
+    hub: { config: { agentGroups: { 222: {}, 333: {} }, agentPrivates: {} }, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const stranger = await scoped.relay({ from: 'group:222', to: 'group:999999', note: 'x', text: '喂', as: 'message' });
+  assert.equal(stranger.ok, false);
+  assert.match(stranger.error, /不归枢纽管/);
+  const inBook = await scoped.relay({ from: 'group:222', to: 'group:333', note: 'x', text: '喂', as: 'message' });
+  assert.equal(inBook.ok, true, `白名单里配了的群要能递：${JSON.stringify(inBook)}`);
+  const selfToo = await scoped.relay({ from: 'group:222', to: 'group:222', note: 'x', text: '喂', as: 'message' });
+  assert.match(selfToo.error, /不能转给自己/);
+
+  // `@全体成员` 跟着搬会变成一次真通知：降级成纯文字。
+  const { sendable, degraded } = transcode([
+    { type: 'at', data: { qq: 'all' } },
+    { type: 'at', data: { qq: '10002' } },
+  ]);
+  assert.deepEqual(sendable.map((s) => s.type), ['text', 'at'], '@全体成员变文字，@个人照旧');
+  assert.match(degraded[0] ?? '', /全体成员/);
+});
+
+t('跨会话转达：只能搬自己这个会话里看见的消息（时间线按 id 找得到，别人的要报清楚）', async () => {
+  const now = 1_000_000;
+  const delivered = [];
+  const timeline = new Timeline({});
+  const mine = { ...upstreamGroup, group_id: 222, message_id: 900001, message: [{ type: 'text', data: { text: '群 222 里那句话' } }] };
+  const others = { ...upstreamGroup, group_id: 333, message_id: 900002, message: [{ type: 'text', data: { text: '群 333 的话' } }] };
+  const mineEntry = timeline.record({ direction: 'upstream-in', linkId: 'up:1', event: mine });
+  timeline.record({ direction: 'upstream-in', linkId: 'up:2', event: others });
+  // 时间线现在真能按 id 找到了：内部 id 与 OneBot 的 message_id 都认。
+  assert.equal(timeline.byId(mineEntry.id)?.sessionKey, 'group:222', '按内部 id 找得到');
+  assert.equal(timeline.byId('900001')?.sessionKey, 'group:222', '按 message_id 也找得到');
+  assert.equal(timeline.byId('nope'), null);
+
+  const relay = new CrossRelay({
+    hub: { timeline, config: {}, profiles: { person: () => null } },
+    mind: { reawake: async (scope, opts) => { delivered.push({ scope, text: opts.text }); return { woke: true }; } },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  // 自己会话里的消息：从本地时间线取，不用问上游，包里有原文。
+  const own = await relay.relay({ from: 'group:222', to: 'group:444', note: 'x', refs: ['900001'], as: 'message' });
+  assert.equal(own.ok, true, JSON.stringify(own));
+  const pkgSegments = relay.takePackage(own.packageId);
+  assert.deepEqual(pkgSegments?.map((s) => s.data?.text), ['群 222 里那句话'], '本地取到的原文要能搬过去');
+
+  // 别的群的消息：不许搬，而且要直接说清"这不是你这个会话里的"。
+  const stolen = await relay.relay({ from: 'group:333', to: 'group:444', note: 'x', refs: ['900001'], as: 'message' });
+  assert.equal(stolen.ok, false);
+  assert.ok(
+    (stolen.degraded ?? []).some((d) => /不在你现在的会话里/.test(d)),
+    `跨会话搬别人的消息要被挡住：${JSON.stringify(stolen)}`,
+  );
+});
+
+t('跨会话转达：语音/视频/文件降级成一句说明，不静默丢', () => {
+  const { sendable, degraded } = transcode([
+    { type: 'text', data: { text: '看这个' } },
+    { type: 'image', data: { file: 'a.jpg' } },
+    { type: 'record', data: { file: 'a.amr', duration: 12 } },
+    { type: 'file', data: { file: 'a.zip', file_size: 300 * 1024 } },
+    { type: 'json', data: { data: '{"app":"x"}' } },
+  ]);
+  assert.deepEqual(sendable.map((s) => s.type), ['text', 'image', 'json'], '能搬的原样带过去');
+  assert.equal(degraded.length, 2);
+  assert.match(degraded[0], /语音（12 秒）/);
+  assert.match(degraded[1], /文件（300 KB）/);
+});
+
+t('跨会话转达：包在 onebot_reply 里展开，编造 id 会说清；node 段走合并转发动作', () => {
+  const store = new PackageStore({ now: () => 1_000_000 });
+  const pkg = store.put({ segments: [{ type: 'image', data: { file: 'blob.jpg' } }] });
+  const plan = composeReply({
+    parts: [{ type: 'text', content: '给你看个东西' }, { type: 'package', id: pkg.id }],
+    resolvePackage: (id) => store.take(id),
+  });
+  // 包里的段**独立成条**，不能跟相邻文字合并（否则一张 json 卡片会被塞进普通消息里）。
+  assert.equal(plan.messages.length, 2);
+  assert.deepEqual(plan.messages[1].segments, [{ type: 'image', data: { file: 'blob.jpg' } }]);
+  // 同一个包再用一次：说清为什么发不出去。
+  const again = composeReply({ parts: [{ type: 'package', id: pkg.id }], resolvePackage: (id) => store.take(id) });
+  assert.equal(again.messages.length, 0);
+  assert.ok(again.skipped.some((x) => /不存在或已过期/.test(x)), JSON.stringify(again.skipped));
+  // 合并转发：node 段要换成 send_group_forward_msg，而不是塞进 send_msg（那个认不得 node）。
+  const { action, params } = buildSendParams({
+    segments: [{ type: 'node', data: { uin: '10001', name: '小张', content: [{ type: 'text', data: { text: '原话' } }] } }],
+    sessionKey: 'group:55555',
+  });
+  assert.equal(action, 'send_group_forward_msg');
+  assert.equal(params.group_id, 55555);
+  assert.equal(params.messages[0].type, 'node');
+  // 没有 node 时行为不变。
+  assert.equal(buildSendParams({ segments: [{ type: 'text', data: { text: 'hi' } }], sessionKey: 'group:55555' }).action, 'send_msg');
 });
 
 await Promise.all(pending);

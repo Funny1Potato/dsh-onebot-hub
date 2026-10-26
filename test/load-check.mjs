@@ -429,6 +429,11 @@ check('Config schema 能填默认值', () => {
   assert.equal(plainConfig(filled.memory.active.dailySettleReminder), true);
   // `m24484`：回合开始前默认等识图 4 秒（0＝不等）。用户定案"默认 4 秒、可配置"。
   assert.equal(plainConfig(filled.vision.waitBeforeTurnMs), 4000);
+  // `m25983`：会话间转达**默认关**——它会把一个群里的东西带到另一个群，必须人显式打开。
+  assert.equal(plainConfig(filled.cross.enabled), false);
+  assert.equal(plainConfig(filled.cross.allowFrom), 'hub');
+  assert.equal(plainConfig(filled.cross.allowPrivateRefs), false);
+  assert.equal(plainConfig(filled.cross.packageTtlMs), 1800000);
   // 【本群认识的人】默认列 20 人（`m09409` 用户要求"不写死"→ 走配置项，0 才是关）
   assert.equal(plainConfig(filled.memory.peopleRoster), 20);
   assert.equal(plainConfig(filled.media.enabled), true);
@@ -843,8 +848,25 @@ check('注册了 29 个工具且形状合法', () => {
 // 的视图 = global + 本 scope 的链，而 agent 的 scope 没有父链（`dsh-agent-loop` 里
 // `createScope(loopCtx, this)` 不传 parent、`bindScopeParent` 零调用者），
 // 所以子代理即便 join 了父预设，也拿不到父 agent 的 scoped 注册。
-check('枢纽工具只挂在会话装配的 agent 作用域，profile 全局层一个都不留（m10863）', () => {
-  assert.deepEqual(recorded.globalTools, [], 'apply 阶段不该往全局层注册工具：那会让每个 DSH 会话都看见 onebot_*');
+await checkAsync('枢纽工具只挂在会话装配的 agent 作用域，profile 全局层一个都不留（m10863）', async () => {
+  // m25983 的唯一例外：`onebot_session`（会话间转达）用户明确要求做成**全局**工具
+  // ——"不一定是某个群的 agent，也可以是其它插件拉起的会话"。它默认关闭、调用即被拒，
+  // 靠 `cross.enabled` 而不是靠"看不见"来保护。除它以外，全局层仍然一个都不许有。
+  const globals = recorded.globalTools.map((t) => t.name).filter((n) => n !== 'onebot_session');
+  assert.deepEqual(globals, [], 'apply 阶段不该往全局层注册 onebot_* 工具：那会让每个 DSH 会话都看见它们');
+  // 那个唯一的例外必须真的在、而且默认是关的（`m25948` 用户要求全局，`cross.enabled` 默认 false）。
+  const crossTool = recorded.globalTools.find((t) => t.name === 'onebot_session');
+  assert.ok(crossTool, 'onebot_session 应当注册在全局层（用户要求：别的插件拉起的会话也能用）');
+  assert.ok(crossTool.parameters?.op, '要有 op 参数');
+  assert.deepEqual(crossTool.parameters?.as?.enum, ['message', 'forward'], 'as 必填且只有两种形态');
+  assert.equal(crossTool.parameters?.as?.default, undefined, 'as 不许有默认值（m26026：每次都要 A 自己判断）');
+  const listed = JSON.parse(await crossTool.execute({ op: 'list' }, { agent: { id: 'group:55555' } }));
+  assert.equal(listed.ok, true);
+  const refused = JSON.parse(
+    await crossTool.execute({ op: 'relay', to: 'group:777', note: 'x', refs: ['1'], as: 'message' }, { agent: { id: 'group:55555' } }),
+  );
+  assert.equal(refused.ok, false, '默认关闭时调用要被拒');
+  assert.match(refused.error, /cross\.enabled/, '要说清是哪个开关');
   assert.equal(hubTools().length, 29, '会话装配（宿主 create/resume 走的就是同一条路）里应当收全 29 个');
   assert.deepEqual(hubSections().map((s) => s.name), ['plugin:dsh-onebot-hub'], '指导段同理：只跟着枢纽会话走，不再是全局段落');
   // m11162 真机事故：同名工具硬撞会让宿主抛错并**连坐**后面 22 个注册（真机会话里只剩 6 个 onebot_*）。
