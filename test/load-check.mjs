@@ -857,6 +857,15 @@ await checkAsync('枢纽工具只挂在会话装配的 agent 作用域，profile
   // 那个唯一的例外必须真的在、而且默认是关的（`m25948` 用户要求全局，`cross.enabled` 默认 false）。
   const crossTool = recorded.globalTools.find((t) => t.name === 'onebot_session');
   assert.ok(crossTool, 'onebot_session 应当注册在全局层（用户要求：别的插件拉起的会话也能用）');
+  // `m27441`：这段描述会被**所有**会话的模型读到——不是枢纽自己的会话也读，所以不能留内部编号
+  // （`m26268` 这种），也不能讲"枢纽"，那是只有枢纽会话才懂的词。
+  const desc = String(crossTool.description ?? '');
+  assert.ok(desc.length > 200, '描述要够用（模型对这个工具的全部知识就在这儿）');
+  assert.doesNotMatch(desc, /\bm\d{5}\b/, '描述里不许出现内部编号');
+  assert.doesNotMatch(desc, /枢纽(?!自己拉起的)/, '非枢纽会话也在读这段：讲"枢纽"要说明白是谁');
+  assert.match(desc, /另一个会话/, '要说清它是干什么的');
+  assert.match(desc, /被拒时会给理由/, '要交代会被拒、别反复重试');
+  assert.match(desc, /转述/, '私聊只能转述');
   assert.ok(crossTool.parameters?.op, '要有 op 参数');
   assert.deepEqual(crossTool.parameters?.as?.enum, ['message', 'forward'], 'as 必填且只有两种形态');
   assert.equal(crossTool.parameters?.as?.default, undefined, 'as 不许有默认值（m26026：每次都要 A 自己判断）');

@@ -39,7 +39,7 @@ import {
 } from '../lib/capability.js';
 import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
 import { composeReply, buildSendParams } from '../lib/reply.js';
-import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay } from '../lib/cross/relay.js';
+import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel } from '../lib/cross/relay.js';
 import { ChannelStore } from '../lib/cross/channels.js';
 import { PackageStore } from '../lib/cross/packages.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
@@ -3534,6 +3534,46 @@ t('跨会话转达：语音/视频/文件降级成一句说明，不静默丢', 
   assert.equal(degraded.length, 2);
   assert.match(degraded[0], /语音（12 秒）/);
   assert.match(degraded[1], /文件（300 KB）/);
+});
+
+t('字条要报包里有什么（只报形状），转不过来的要跟着说（m27441）', async () => {
+  // 只报形状，不带内容：B 拿到的应当是"1 张图片、1 段文字"，不是图里的字。
+  assert.equal(describeParcel([{ type: 'text', data: { text: '秘密' } }, { type: 'image', data: {} }]), '1 张图片、1 段文字');
+  assert.equal(describeParcel([{ type: 'json', data: {} }]), '1 张卡片');
+  assert.equal(describeParcel([{ type: 'forward', data: { content: [{}, {}, {}] } }]), '1 条聊天记录（3 条消息）');
+  assert.equal(describeParcel([]), '', '空包不报');
+  // 超过四项只报前四项 + 总数，别让字条长成一屏。
+  const many = describeParcel([
+    { type: 'image' }, { type: 'json' }, { type: 'text' }, { type: 'face' }, { type: 'at', data: { qq: '1' } },
+  ]);
+  assert.match(many, /等 5 项$/);
+
+  const delivered = [];
+  const now = 1_000_000;
+  const timeline = new Timeline({});
+  const entry = timeline.record({
+    direction: 'upstream-in',
+    linkId: 'up:1',
+    event: {
+      ...upstreamGroup,
+      group_id: 222,
+      message_id: 910001,
+      message: [{ type: 'text', data: { text: '看这个' } }, { type: 'image', data: { file: 'a.jpg' } }, { type: 'record', data: { file: 'a.amr', duration: 12 } }],
+    },
+  });
+  const relay = new CrossRelay({
+    hub: { timeline, config: {}, profiles: { person: () => null } },
+    mind: { reawake: async (scope, opts) => { delivered.push({ scope, text: opts.text }); return { woke: true }; } },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const out = await relay.relay({ from: 'group:222', to: 'group:444', note: 'x', refs: [entry.id], as: 'message' });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  const letter = delivered.at(-1).text;
+  assert.match(letter, /包里有：1 张图片、1 段文字。/, '要报清包里是什么形状');
+  assert.match(letter, /注意：那边还有一段语音（12 秒），转不过来。/, '转不过来的要跟着说，别让 B 以为收齐了');
+  assert.doesNotMatch(letter, /看这个/, '清单只报形状，不抄内容');
+  assert.doesNotMatch(letter, /\bm\d{5}\b/, '给对面看的字条里不许出现内部编号');
 });
 
 t('跨会话转达：包在 onebot_reply 里展开，编造 id 会说清；node 段走合并转发动作', () => {
