@@ -166,7 +166,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
 | `actionPolicy` | 字符串 | {} | **action 策略（JSON）**：JSON：逐 action 的允许/拒绝规则（与 capability 白名单一起生效）。 |
-| `capability.writeAllow` | 字符串 | [] | **写操作白名单（JSON）**：JSON 数组：允许下调的写级 action（如 send_msg）；空 = 全部拒绝。 |
+| `capability.writeAllow` | 字符串 | [] | **写操作白名单（JSON）**：JSON 数组：允许下调的写级 action（如 send_msg）；空 = 全部拒绝。被拒时对发消息类动作会多指一句"跨会话递内容用 `onebot_session`，不必为此放行 write"。 |
 | `capability.dangerAllow` | 字符串 | [] | **危险操作白名单（JSON）**：JSON 数组：踢人/禁言/退群一类；空 = 全部拒绝。 |
 | `capability.exposeSensitive` | 开关 | 关 | **回显敏感字段**：打开后只读查询里带 token 之类字段（默认关，防泄漏）。 |
 | `capability.cache` | 开关 | 开 | **只读查询缓存**：打开后 get_group_info 之类有 TTL 缓存，返回里 source=cache。 |

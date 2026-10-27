@@ -2325,6 +2325,9 @@ async function scenarioCapability() {
   const gated = makeCap();
   const deniedWrite = await gated.hub.callAction({ action: 'send_like', params: { user_id: 1 } });
   const deniedDanger = await gated.hub.callAction({ action: 'set_group_kick', params: { group_id: 1, user_id: 2 } });
+  // 发消息类被写拒时要多指一条"不用改配置"的路（2026-10-27 真机：模型照着
+  // "去 capability.writeAllow 里放行"这句话翻了二十步源码找配置文件）。
+  const deniedForward = await gated.hub.callAction({ action: 'send_group_forward_msg', params: { group_id: 1, messages: [] } });
   const deniedSensitive = await gated.hub.callAction({ action: 'get_cookies' });
   check('能力面·闸门：write / danger / 凭证类默认一律拒绝，且不碰上游', () => {
     assert.equal(deniedWrite.ok, false);
@@ -2332,6 +2335,10 @@ async function scenarioCapability() {
     assert.equal(deniedWrite.source, 'policy');
     assert.equal(deniedWrite.tier, 'write');
     assert.match(deniedWrite.note, /write 级/);
+    // 指路只给"发消息类"：`send_like` 不是消息，多念一句反而误导。
+    assert.doesNotMatch(deniedWrite.note, /onebot_session/);
+    assert.match(deniedForward.note, /onebot_session/);
+    assert.equal(deniedForward.retcode, 1403);
     assert.equal(deniedDanger.tier, 'danger');
     assert.match(deniedDanger.note, /danger 级/);
     assert.equal(deniedSensitive.sensitive, true);
