@@ -3230,6 +3230,14 @@ t('发起方身份：宿主给的 agent id 是包装过的，要能解回会话�
   // 已经是裸会话键就直接认（别的宿主/嵌入场景可能就给这个）。
   assert.equal(scopeOfAgentId('group:833194406'), 'group:833194406');
   assert.equal(scopeOfAgentId('private:945126014'), 'private:945126014');
+  // 带激活序号的裸键要截到号码为止，否则和来源作用域永远比不等。
+  assert.equal(scopeOfAgentId('private:945126014.a1b2c3'), 'private:945126014');
+  assert.equal(scopeOfAgentId('group:833194406.amvq0zx9vok64'), 'group:833194406');
+  // 宿主那边再转义一层也能解（`%253A` → `%3A` → `:`）。
+  assert.equal(scopeOfAgentId('onebot-hub:private%253A945126014.amvq0zx9vok64'), 'private:945126014');
+  // 坏转义不抛、也**不硬猜**：解不开就当认不出（宁可拒绝一次，也别把一个外部会话撮合进来）。
+  assert.equal(scopeOfAgentId('onebot-hub:private%3A94512%ZZ'), '');
+  assert.equal(scopeOfAgentId('onebot-hub:%E0%A4%A'), '');
   // 普通工作区会话认不出来 → 空串（不是"撮合一个"）。
   assert.equal(scopeOfAgentId('main:3f2a9c'), '');
   assert.equal(scopeOfAgentId(''), '');

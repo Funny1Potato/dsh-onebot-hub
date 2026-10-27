@@ -452,23 +452,24 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 
 ## 🧰 agent 可用的工具
 
-工具面 = **28 个 `onebot_*`**（本插件提供）+ **agent 预设自带的 DSH 原生工具**。
+工具面 = **30 个 `onebot_*`**（本插件提供：29 个在枢纽会话里 + 1 个全局）+ **agent 预设自带的 DSH 原生工具**。
 
-> 这 28 个工具、以及写给 agent 的指导文字，**只挂在枢纽自己那个会话里**（agent 作用域）——同一 profile 里另外开的普通 DSH 会话、以及 agent 派生的**子代理都看不见**它们。想在普通会话里手动排查是做不到的。
+> 这 29 个工具、以及写给 agent 的指导文字，**只挂在枢纽自己那个会话里**（agent 作用域）——同一 profile 里另外开的普通 DSH 会话、以及 agent 派生的**子代理都看不见**它们。想在普通会话里手动排查是做不到的。
 >
 > 唯一的例外是 `onebot_session`（会话之间转达）：它是**全局**工具，同一 profile 的任何会话都能看见，见 [会话之间转达](#-会话之间转达)。
 
-### 本插件提供的 28 个
+### 本插件提供的 30 个
 
 | 用途 | 工具 |
 | --- | --- |
 | 发言 | `onebot_reply`（发消息，支持多条 / 图片 / 表情 / 引用） |
-| 看链路与消息 | `onebot_hub_status` `onebot_timeline` `onebot_turns` `onebot_raw` `onebot_capture` `onebot_context` |
+| 看链路与消息 | `onebot_hub_status` `onebot_timeline` `onebot_turns` `onebot_raw` `onebot_capture` `onebot_context` `onebot_image_wait` |
 | 人与群 | `onebot_profile` `onebot_group` `onebot_members` `onebot_avatar` `onebot_sessions` `onebot_recall` |
 | 记忆 | `onebot_memory` `onebot_person` `onebot_topic` `onebot_memory_audit` |
 | 控制下游 | `onebot_invoke` `onebot_relay_probe` `onebot_capabilities` `onebot_code_scopes` |
 | 协议与能力 | `onebot_call` `onebot_caps` `onebot_admin` `onebot_media` `onebot_imagegen` `onebot_memes` |
 | 其它 | `onebot_tools`（按需取回 DSH 的其它工具） |
+| 全局 | `onebot_session`（会话之间转达，**默认关**；同一 profile 的任何会话都能看见） |
 
 ### 预设自带的原生工具
 
@@ -587,7 +588,7 @@ cross:
 <details>
 <summary>装完之后普通 DSH 会话里怎么调不到 onebot_* 工具？</summary>
 
-这是设计如此：这 28 个工具注册在**枢纽自己的会话作用域**里，不是 profile 全局层。要在枢纽的会话里调，普通会话和子代理都看不见。
+这是设计如此：这 29 个工具注册在**枢纽自己的会话作用域**里，不是 profile 全局层。要在枢纽的会话里调，普通会话和子代理都看不见。
 </details>
 
 <details>
@@ -637,7 +638,7 @@ node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具�
 
 | 版本 | 要点 |
 | --- | --- |
-| `0.12.0-beta.1` | **会话之间转达**（`0.12.0` 起，当前只有预发布）：一个会话的 agent 能把图片、小程序卡、合并记录递给另一个会话，两边在同一根线上来回说几句（每方 6 句 / 30 分钟 / 10 分钟沉默即冷）；私聊里的话只能转述、原文默认不许搬，转述过隐私词表。工具 `onebot_session` 是全局的，**默认关**。beta.2：说明改成非枢纽会话也读得懂的措辞，字条会先报一句包里有什么 |
+| `0.12.0-beta.1` | **会话之间转达**（`0.12.0` 起，当前只有预发布）：一个会话的 agent 能把图片、小程序卡、合并记录递给另一个会话，两边在同一根线上来回说几句（每方 6 句 / 30 分钟 / 10 分钟沉默即冷）；私聊里的话只能转述、原文默认不许搬，转述过隐私词表。工具 `onebot_session` 是全局的，**默认关**。beta.2：说明改成非枢纽会话也读得懂的措辞，字条会先报一句包里有什么。beta.3：修 `onebot_session` 认不出"我自己"（宿主给的会话 id 是编码过的，被当成外部会话拒绝）；被 write 闸拒时多指一句"递内容走 `onebot_session`，不必放行"，并在提示词里要求被拒就停、不要翻插件源码找配置 |
 | `0.11.0` | **启动提速**：把三处同步 IO 挪出启动路径（大库实测"读回历史"47.7 s → 0.24 s）；**记忆系统改为三层心智**（活跃层 / 长期记忆＝事件索引 / 档案带），删掉群档案里的 highlights，默认隔离档位 `scoped` → `balanced`；记忆每一行带出处、日期与相关群友 |
 | `0.10.0` | 版本号规则改为 `x.y.z`；设置页布局自适应（窄容器自动堆叠）；记忆按人隔离 |
 | 更早 | 见 [Releases](https://github.com/Funny1Potato/dsh-onebot-hub/releases) |
@@ -655,7 +656,7 @@ A DeepSeek Harness plugin that puts DSH on an OneBot v11 bus: LLOneBot / NapCat 
 
 - **Upstream** — dial or listen for the real implementation, so the agent sees every event and has every action available.
 - **Downstream** — serve or dial downstream links and **relay events verbatim**, so existing bot plugins keep working unchanged.
-- **Observer** — a full timeline of every message plus a ledger of what each downstream bot did, exposed to the agent as 28 `onebot_*` tools.
+- **Observer** — a full timeline of every message plus a ledger of what each downstream bot did, exposed to the agent as 29 `onebot_*` tools.
 - **Agent** — wake logic, layered memory (active / long-term index / person / group / topic), persona presets, per-group quotas.
 - **Cross-session relay** (off by default, from `0.12.0`; prerelease only for now) — one session's agent hands a picture, a mini-program card or a merged forward to *another* session, then both sides keep talking on the same short-lived channel; private-chat originals are never moved verbatim into a group, only paraphrased and filtered.
 
