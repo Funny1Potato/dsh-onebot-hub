@@ -311,6 +311,28 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `imageGen.plugin.tool` | 字符串 | 空 | **第三方生图工具名**：engine=plugin 时用；逗号分隔或数组。留空＝自动探测（generate_image 等已知名单）。 |
 | `imageGen.plugin.timeoutMs` | 数字 | 180000 | **探测/后处理超时（ms）**：预留的后处理等待上限，当前主要留作扩展。 |
 
+## 语音合成（`tts.*`）
+
+OpenAI 兼容的 `POST /audio/speech`：`onebot_reply` 里写 `{"type":"tts","text":"…"}` 就在发送前当场合成语音。音色不枚举，兼容服务的自定义音色直接填；要"照这个声音读"，给一段参考音频即可（字段名可配，各家不一样）。
+
+| 键 | 类型 | 默认 | 说明 |
+| --- | --- | --- | --- |
+| `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `baseUrl`/`apiKey`，缺一个仍然是关。 |
+| `tts.baseUrl` | 字符串 | 空 | **接口地址**：形如 `https://…/v1`（不要带 `/audio/speech`）。 |
+| `tts.apiKey` | 字符串 | 空 | **API Key（凭据）**：留空＝不改。只进 `Authorization` 头，绝不进请求体。 |
+| `tts.model` | 字符串 | tts-1 | **模型名**：如 `tts-1` / `gpt-4o-mini-tts` / `cosyvoice-v1`。 |
+| `tts.voice` | 字符串 | alloy | **默认音色**：不做枚举校验，兼容服务写它注册的音色名或 id。 |
+| `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`，默认 mp3（QQ 最稳）。 |
+| `tts.speed` | 数字 | 1 | **语速**：1＝原速；只在 ≠1 时才往请求体里带。 |
+| `tts.instructions` | 字符串 | 空 | **说话风格提示**：`gpt-4o-mini-tts` 支持；留空＝不发。 |
+| `tts.refAudio` | 字符串 | 空 | **参考音频**：URL / 本地路径 / `base64://…` / `data:…`；留空＝不做克隆。 |
+| `tts.refText` | 字符串 | 空 | **参考音频对应的文本**：多数克隆接口要求同时给。 |
+| `tts.refAudioField` | 字符串 | ref_audio | **参考音频的字段名**：`ref_audio` / `ref_audio_path` / `prompt_audio`…留空＝不发。 |
+| `tts.refTextField` | 字符串 | ref_text | **参考文本的字段名**：`ref_text` / `prompt_text`…留空＝不发。 |
+| `tts.timeoutMs` | 数字 | 30000 | **超时（ms）**：单次合成的等待上限。 |
+| `tts.maxChars` | 数字 | 1000 | **单次最多多少字**：超了明确说"太长，分几句"，不偷偷截断。 |
+| `tts.cacheLimit` | 数字 | 200 | **缓存上限（条）**：同一句话同一音色复用本地文件，不重复花钱；0＝不缓存。 |
+
 ## 记忆（记人、记群、记承诺）
 
 它会记住人、群、承诺与话题；`isolation` 决定这些内容跨会话能不能互相看见。
