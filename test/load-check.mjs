@@ -1629,6 +1629,12 @@ async function runAsyncChecks() {
       /自己发过的消息/.test(DEFAULT_GUIDANCE) && DEFAULT_GUIDANCE.includes('滤掉'),
       'guidance 缺"读上下文先滤掉自己发过的消息"这条判据',
     );
+    // 被拒就停（`m27996` 用户给的原文）：2026-10-27 真机被 write 闸拒了之后，模型照着
+    // 拒绝话去翻文件系统找配置文件，翻了二十步还进了 node_modules 读插件源码。这条是止损线。
+    assert.ok(
+      /工具被拒/.test(DEFAULT_GUIDANCE) && /不要自己去翻插件源码/.test(DEFAULT_GUIDANCE) && /翻了也没用/.test(DEFAULT_GUIDANCE),
+      'guidance 缺"工具被拒就放弃或说明原因，不要翻插件源码/改配置"这条止损线',
+    );
     // 回复决策清单（参考 aigf-master）：提示词里必须有成体系的"什么不回"判断面，
     // 不能只剩三条散落的窄规则——这是模型判断"该不该开口"的主要依据。
     assert.ok(replySpec.text.includes('要不要回'), '回复提示词缺"要不要回"的决策清单入口');
