@@ -253,6 +253,21 @@ t('chat 形状：只发 assistant，绝不带 system 角色（小米 TTS 模型�
   assert.equal(call.body.model, 'mimo-v2.5-tts-voicedesign');
 });
 
+t('上游又说"不许 system"时，错误里写清本地到底发了几条 assistant（`m30659`）', async () => {
+  const f = fakeFetch(() => ({
+    ok: false,
+    status: 400,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ error: { message: 'messages[0] system role is not allowed for TTS model' } }),
+    text: async () => JSON.stringify({ error: { message: 'messages[0] system role is not allowed for TTS model' } }),
+  }));
+  const tts = new Tts(base({ fetchImpl: f, shape: 'chat', model: 'mimo-v2.5-tts' }));
+  const r = await tts.synth({ text: '你好' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /system role is not allowed/, '上游原话要原样保留');
+  assert.match(r.error, /只发了 1 条 assistant/, '要写清本地实际发了几条');
+});
+
 t('chat 形状：没配 instructions 就只有一条 assistant；参考音频不掺进来', async () => {
   const f = fakeFetch(() => ({
     ok: true,
