@@ -11,7 +11,7 @@
 
 import assert from 'node:assert/strict';
 
-import { ReplyBuffer, composeReply, describePlanIssues, describeReply } from '../lib/reply.js';
+import { ReplyBuffer, composeReply, describePlanIssues, describeReply, resolvePartsMedia } from '../lib/reply.js';
 
 // ---- 用例收集（与仓库其它测试同形）--------------------------------------------
 
@@ -188,6 +188,52 @@ t('纯空白/空 parts 排不出任何消息', () => {
   assert.deepEqual(composeReply({}).messages, []);
   assert.deepEqual(composeReply({ parts: [] }).messages, []);
   assert.deepEqual(composeReply({ parts: [{ type: 'break' }] }).messages, [], '光一个 break 不该产生空消息');
+});
+
+// ---- 语音段（`m28823`） ---------------------------------------------------------
+
+t('语音段独立成一条，不跟文字并排，也不混进 images 汇总', () => {
+  const plan = composeReply({
+    parts: [
+      { type: 'text', content: '听这个' },
+      { type: 'record', source: '/tmp/a.silk' },
+      { type: 'text', content: '好听吗' },
+    ],
+  });
+  assert.equal(plan.messages.length, 3, '文字 / 语音 / 文字 各一条');
+  assert.deepEqual(shape(plan.messages[0]), ['text']);
+  assert.deepEqual(shape(plan.messages[1]), ['record']);
+  assert.equal(plan.messages[1].segments[0].data.file, '/tmp/a.silk');
+  assert.equal(plan.messages[1].kind, 'record');
+  assert.deepEqual(plan.images, [], '语音不是图片，别混进 images');
+  assert.equal(plan.text, '听这个 好听吗');
+});
+
+t('语音段的别名（voice / audio / ptt）与各来源字段都认', () => {
+  for (const type of ['voice', 'audio', 'ptt']) {
+    const plan = composeReply({ parts: [{ type, file: '/tmp/b.amr' }] });
+    assert.deepEqual(shape(plan.messages[0]), ['record'], `${type} 也要当语音`);
+  }
+  const viaUrl = composeReply({ parts: [{ type: 'record', url: 'https://x/y.mp3' }] });
+  assert.equal(viaUrl.messages[0].segments[0].data.file, 'https://x/y.mp3');
+});
+
+t('语音段没有来源：丢掉并说出来（不静默）', () => {
+  const plan = composeReply({ parts: [{ type: 'record' }] });
+  assert.equal(plan.messages.length, 0);
+  assert.equal(plan.skipped.length, 1);
+  assert.match(plan.skipped[0], /语音段没有可用的来源/);
+});
+
+t('resolvePartsMedia 也把语音段的 hub-media 引用落成本地 blob 路径', () => {
+  const hub = { media: { find: (ref) => (ref === 'hub-media:voice01' ? { blob: '/data/blobs/voice01.silk' } : null) } };
+  const [part] = resolvePartsMedia(hub, [{ type: 'record', source: 'hub-media:voice01' }]);
+  assert.equal(part.source, '/data/blobs/voice01.silk');
+  assert.throws(
+    () => resolvePartsMedia(hub, [{ type: 'record', source: 'hub-media:gone' }]),
+    /语音引用不可用/,
+    '解不出来要当场报错，不能让它带着假路径发出去',
+  );
 });
 
 // ---- ReplyBuffer（会话缓冲版的行为） -------------------------------------------

@@ -429,7 +429,7 @@ agent 不是"每轮都把聊天记录读一遍"，它有**三层心智 + 五个�
 
 agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_reply` 才会发**。判断不该说话时它可以不调，**沉默是正常手段**（不是故障）。
 
-一次 `onebot_reply` 可以发多条：文字里空行断条、每张图各成一条、连续的 `@` 与文字合成一条；条与条之间隔 400 ms（像在打字）。超过上限的部分不会静默丢弃，工具回执里会如实告诉它。
+一次 `onebot_reply` 可以发多条：文字里空行断条、每张图各成一条、连续的 `@` 与文字合成一条；条与条之间隔 400 ms（像在打字）。超过上限的部分不会静默丢弃，工具回执里会如实告诉它。语音也能发：`parts` 里写 `{"type":"record","source":"本地路径|URL|hub-media:xx"}`，它独立成一条（实现端多半只吃 silk/amr，发不出去会如实回报 retcode）。
 
 ### 额度（分群记账）
 
@@ -463,7 +463,7 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 
 | 用途 | 工具 |
 | --- | --- |
-| 发言 | `onebot_reply`（发消息，支持多条 / 图片 / 表情 / 引用） |
+| 发言 | `onebot_reply`（发消息，支持多条 / 图片 / 表情 / 语音 / 引用） |
 | 看链路与消息 | `onebot_hub_status` `onebot_timeline` `onebot_turns` `onebot_raw` `onebot_capture` `onebot_context` `onebot_image_wait` |
 | 人与群 | `onebot_profile` `onebot_group` `onebot_members` `onebot_avatar` `onebot_sessions` `onebot_recall` |
 | 记忆 | `onebot_memory` `onebot_person` `onebot_topic` `onebot_memory_audit` |
