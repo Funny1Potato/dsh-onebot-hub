@@ -330,6 +330,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `memory.isolation.sensitivityAlwaysLocal` | 开关 | 开 | **敏感内容永远本地**：打开后敏感事实不参与跨会话装配（不看 level）。 |
 | `memory.isolation.overrides` | 字符串 | [] | **逐项覆盖（JSON）**：JSON 数组：给单条记忆指定可见范围。 |
 | `memory.isolation.trustedGroups` | 字符串 | [] | **可信群（JSON）**：JSON 数组：这些群之间可以互相看见（仍受 level 约束）。 |
+| `memory.isolation.trustedPrivates` | 字符串 | [] | **白名单私聊（JSON）**：这些人的私聊能读任何会话；留空则吃超管名单，超管也没配就谁都不能跨会话读。 |
 | `memory.isolation.recallEscape` | 开关 | 关 | **允许越界检索**：打开后 onebot_recall 能跨会话翻旧账（默认关）。 |
 | `memory.isolation.recallEscapeNeedsApproval` | 开关 | 开 | **越界要确认**：打开后越界检索要显式 confirm 才给。 |
 | `memory.isolation.audit` | 开关 | 开 | **留审计**：每次放行/拦截都记一条，可用 onebot_memory_audit 查。 |

@@ -86,6 +86,7 @@ import {
 } from '../lib/learn.js';
 import { Mind, mediaTag } from '../lib/mind.js';
 import { mergePolicyMode, resolveAgentPolicy, sessionOverrideOf } from '../lib/agent/policy.js';
+import { canRead, describeReadScope, parseTrustedPrivates } from '../lib/read-scope.js';
 
 let passed = 0;
 const cases = [];
@@ -3632,7 +3633,51 @@ t('跨会话转达：包在 onebot_reply 里展开，编造 id 会说清；node 
   assert.equal(buildSendParams({ segments: [{ type: 'text', data: { text: 'hi' } }], sessionKey: 'group:55555' }).action, 'send_msg');
 });
 
+// ---------------- 跨会话读取的受众闸（`m28449`） ----------------
+t('读范围：白名单为空时谁都不给跨会话', () => {
+  const trusted = parseTrustedPrivates('[]');
+  for (const current of ['group:55555', 'private:10001']) {
+    const r = canRead({ current, target: 'group:66666', trusted });
+    assert.equal(r.ok, false, `${current} 不该能读`);
+    assert.match(r.reason, /白名单/);
+  }
+});
+
+t('读范围：群读群放行、群读私聊恒拒（硬边界，白名单也救不了）', () => {
+  const trusted = parseTrustedPrivates('["10001"]');
+  assert.equal(canRead({ current: 'group:55555', target: 'group:66666', trusted }).ok, true);
+  for (const ok of [true, false]) {
+    const set = ok ? trusted : new Set();
+    const r = canRead({ current: 'group:55555', target: 'private:10001', trusted: set });
+    assert.equal(r.ok, false);
+    assert.match(r.reason, /群会话不读任何私聊|白名单/);
+  }
+});
+
+t('读范围：白名单私聊读一切、普通私聊只读自己', () => {
+  const trusted = parseTrustedPrivates('["10001"]');
+  assert.equal(canRead({ current: 'private:10001', target: 'private:20002', trusted }).ok, true);
+  assert.equal(canRead({ current: 'private:10001', target: 'group:55555', trusted }).ok, true);
+  const r = canRead({ current: 'private:20002', target: 'group:55555', trusted });
+  assert.equal(r.ok, false);
+  assert.equal(canRead({ current: 'private:20002', target: 'private:20002', trusted }).ok, true, '自己的会话永远能读');
+});
+
+t('读范围：认不出当前会话就一律拒（fail-closed）', () => {
+  const trusted = parseTrustedPrivates('["10001"]');
+  const r = canRead({ current: '', target: 'group:55555', trusted });
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /认不出/);
+  assert.match(describeReadScope({ current: 'group:55555', trusted }), /私聊一律不可读/);
+});
+
+t('白名单解析：裸号 / private: 前缀 / JSON 数组 / 逗号串都认，非法值丢掉', () => {
+  assert.deepEqual([...parseTrustedPrivates('[10001,"private:20002"]')].sort(), ['10001', '20002']);
+  assert.deepEqual([...parseTrustedPrivates('10001, 20002')].sort(), ['10001', '20002']);
+  assert.deepEqual([...parseTrustedPrivates('["abc", -1, ""]')], []);
+  assert.deepEqual([...parseTrustedPrivates('')], []);
+});
+
 await Promise.all(pending);
-const failed = cases.filter((c) => !c.ok);
-console.log(JSON.stringify({ passed, failed: failed.length, cases: failed }, null, 2));
+const failed = cases.filter((c) => !c.ok);console.log(JSON.stringify({ passed, failed: failed.length, cases: failed }, null, 2));
 if (failed.length) process.exitCode = 1;

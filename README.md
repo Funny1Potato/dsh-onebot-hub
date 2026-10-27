@@ -187,6 +187,7 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 | `imageGen.enabled` | 让 agent 自己生图（默认关，填 `model`/`baseUrl`/`apiKey` 才开） |
 | `anime.backend` | 二次元角色识别（默认 `off`；[anime-recognize](https://github.com/Funny1Potato/aigfm-anime-recognize) 本地 / `animetrace` 公共 API / `both`） |
 | `memory.isolation.level` | 记忆隔离：`strict` / `scoped` / `balanced`（默认）/ `open`，见[记忆系统](#-记忆系统) |
+| `memory.isolation.trustedPrivates` | 哪些**私聊**能读别的会话的消息（QQ 号列表 `["10001"]`）。留空则吃 `chatCommands.superUsers`；两个都空 = 谁都不能跨会话读，要问别处的内容请用 `onebot_session` |
 | `memory.peopleRoster` | 上下文里【本群认识的人】最多列几个（默认 20；`0` = 整段不注入） |
 | `retention.days` | 原始报文与媒体保留天数（默认 7） |
 | `probe.isolation` | 试探下游时怎么和真人消息隔开：`off`（默认）/ `time`（时间窗）/ `link`（另开探针账号），见[探针](#探针试探下游不惊动群) |

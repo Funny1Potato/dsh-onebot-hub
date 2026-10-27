@@ -1813,10 +1813,58 @@ async function runAsyncChecks() {
   });
 
   await checkAsync('onebot_context 能装配空会话', async () => {
-    const value = JSON.parse(await toolOf('onebot_context').execute({ sessionKey: 'group:55555', text: false }));
-    assert.equal(value.sessionKey, 'group:55555');
-    assert.ok(Array.isArray(value.sections));
-    assert.ok(value.sections.length > 0);
+    // `m28449` 起读取按"当前会话的受众"判定，所以要在**会话里**调（真机上永远是这样：
+    // 工具只在一轮里被调用，mind 记着那轮是哪个会话）。
+    const prev = hub.mind.activeSessionKey;
+    hub.mind.activeSessionKey = 'group:55555';
+    try {
+      const value = JSON.parse(await toolOf('onebot_context').execute({ sessionKey: 'group:55555', text: false }));
+      assert.equal(value.sessionKey, 'group:55555');
+      assert.ok(Array.isArray(value.sections));
+      assert.ok(value.sections.length > 0);
+    } finally {
+      hub.mind.activeSessionKey = prev;
+    }
+  });
+
+  await checkAsync('跨会话读取：群会话读不到私聊、白名单私聊读一切', async () => {
+    const prev = hub.mind.activeSessionKey;
+    const prevTrusted = hub.config.isolation.trustedPrivates;
+    try {
+      // 没配白名单：连群读群都拒（`m28425`「白名单为空则拒绝所有跨会话」）。
+      hub.config.isolation.trustedPrivates = [];
+      hub.mind.activeSessionKey = 'group:55555';
+      await assert.rejects(() => toolOf('onebot_context').execute({ sessionKey: 'group:66666' }), /白名单/);
+      // 配了白名单：群读群放行，群读私聊仍然拒（硬边界）。
+      hub.config.isolation.trustedPrivates = ['10001'];
+      const okGroup = JSON.parse(await toolOf('onebot_context').execute({ sessionKey: 'group:66666', text: false }));
+      assert.equal(okGroup.sessionKey, 'group:66666');
+      await assert.rejects(() => toolOf('onebot_context').execute({ sessionKey: 'private:10001' }), /私聊/);
+      // 白名单私聊读一切；非白名单私聊只读自己那条。
+      hub.mind.activeSessionKey = 'private:10001';
+      const okPrivate = JSON.parse(await toolOf('onebot_context').execute({ sessionKey: 'group:66666', text: false }));
+      assert.equal(okPrivate.sessionKey, 'group:66666');
+      hub.mind.activeSessionKey = 'private:20002';
+      await assert.rejects(() => toolOf('onebot_context').execute({ sessionKey: 'group:66666' }), /白名单/);
+    } finally {
+      hub.mind.activeSessionKey = prev;
+      hub.config.isolation.trustedPrivates = prevTrusted;
+    }
+  });
+
+  await checkAsync('长期记忆只准写当前会话（不能往别的群的记忆里种一条）', async () => {
+    const prev = hub.mind.activeSessionKey;
+    hub.mind.activeSessionKey = 'group:55555';
+    try {
+      const r = JSON.parse(
+        await toolOf('onebot_memory').execute({ sessionKey: 'group:66666', ops: { long_term: { add: [{ text: '替别的群记下的' }] } } }),
+      );
+      assert.equal(r.applied.long_term.add, 0, JSON.stringify(r.applied));
+      assert.ok(r.rejected.some((x) => /不能替别的会话写/.test(x.reason)), JSON.stringify(r.rejected));
+      assert.ok(!hub.store.all().some((e) => e.text === '替别的群记下的'), '不能替别的会话写长期记忆');
+    } finally {
+      hub.mind.activeSessionKey = prev;
+    }
   });
 
   await checkAsync('onebot_memory_audit 能执行', async () => {
