@@ -478,9 +478,21 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   assert.equal(providerOf('minimax').shape, 'minimax');
   assert.equal(providerOf('dashscope').shape, 'dashscope');
   assert.equal(providerOf('ark').shape, 'ark');
+  // 同一家的两种计费方式是两个独立选项，地址不能撞（`m30030`）：
+  // 小米 Token Plan = token-plan-cn…、按量付费 = api.xiaomimimo.com；百炼同理（compatible-mode）。
+  assert.equal(providerOf('mimo-pay').shape, 'chat');
+  assert.match(providerOf('mimo').url, /token-plan-cn\.xiaomimimo\.com/);
+  assert.match(providerOf('mimo-pay').url, /^https:\/\/api\.xiaomimimo\.com/);
+  assert.notEqual(providerOf('mimo').url, providerOf('mimo-pay').url);
+  assert.equal(providerOf('dashscope-plan').shape, 'speech');
+  assert.match(providerOf('dashscope-plan').url, /token-plan\.cn-beijing\.maas\.aliyuncs\.com/);
+  assert.notEqual(providerOf('dashscope').url, providerOf('dashscope-plan').url);
   assert.equal(providerOf('plugin').shape, 'plugin');
   assert.equal(providerOf('不认识').id, 'custom', '认不得就当自定义，不静默改用户的地址');
   assert.ok(PROVIDER_IDS.includes('custom') && PROVIDER_IDS.includes('openai'));
+  assert.equal(new Set(PROVIDER_IDS).size, PROVIDER_IDS.length, 'id 不许重复');
+  assert.equal(new Set(TTS_PROVIDERS.map((p) => p.url).filter(Boolean)).size,
+    TTS_PROVIDERS.filter((p) => p.url).length, '同一个地址不许挂两个选项（选哪条都一样，纯噪声）');
   for (const p of TTS_PROVIDERS) {
     assert.ok(p.id && p.label, '每家都要有 id 与 label');
     if (p.id !== 'custom' && p.id !== 'plugin') assert.match(p.url, /^https:\/\//, `${p.id} 要给完整地址`);

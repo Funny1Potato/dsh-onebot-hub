@@ -839,6 +839,11 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   - 顺手补的：OpenAI 官方那档的默认模型从空改成 `tts-1`——模型名一藏，用户就没地方填了，四家都带默认值、只有它空着，等于选了就报错。
   - 测试：`test/tts.mjs` 26 → **27**（预设盖过手填、custom 才听手填、认不出的服务商仍按 custom、plugin 形状、OpenAI 默认模型），`test/client-render.mjs` 24 → **25**（选了 mimo 三格消失、音色仍在、切回 custom 三格回来且旧值还在），全量 `npm test` 绿（load-check 89/89、client-render 25/25、tts 27/27）。
 
+- **同一家的两种计费方式是两个选项（用户 m30030「一些服务商如小米、阿里云的token plan和按量付费的请求地址是不一样的，注意一下，可以分成多个选项」）**：这是"预设"这个设计第一次真正付账的地方——上一版把 `mimo` 与 `dashscope` 各当成"一家一条"，而它们的 **Token Plan 与按量付费根本是两个 host**：小米按量付费是 `api.xiaomimimo.com`、Token Plan 是 `token-plan-{cn,sgp,ams}.xiaomimimo.com`；百炼按量付费是 `dashscope.aliyuncs.com`，Token Plan 走 `token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode`（连形状都不一样：一个原生 `multimodal-generation`、一个 OpenAI 兼容的 `/audio/speech`）。两边官方文档都把"用错 Base URL"列为**配置错误**：请求会被路由到另一条计费通道，报出来的却是鉴权错或额度错——正好是用户看不出"我选错了计费方式"的那类失败。所以拆成 `mimo` / `mimo-pay`、`dashscope` / `dashscope-plan` 四条，label 上直接写计费方式，`note` 里写清"和另一种不通用、混用报的是鉴权错"。两条配套纪律：
+  ① **同一地址不许挂两个选项**（测试断言：`PROVIDER_IDS` 不重复、`url` 去重后数量不变）——两条一样的选项等于让用户再猜一次"这两条有什么区别"。
+  ② 区域变体（`sgp`/`ams`、`dashscope-intl`）**不做选项**，只在 `note` 里说一句"换成它，或者切自定义"。理由：区域会跟着账号变，而"自定义"已经在手边；枚举一多，下拉本身就变成新的查询工作。
+  - 测试：`test/tts.mjs` 27（新增两条计费方式地址不撞、id 与 url 去重）。
+
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
 - 方案（原稿，章节号与完整版一致）：`../docs/dsh-onebot-hub-方案.md`

@@ -331,7 +331,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `url`/`apiKey`，缺一个仍然是关（`provider=plugin` 时不看地址）。 |
-| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo` / `minimax` / `dashscope` / `ark` / `plugin`。选了就整套按它来（下面三项由它决定，设置页会藏起来）；要自己填就选 `custom`。 |
+| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo`（Token Plan）/ `mimo-pay`（按量付费）/ `minimax` / `dashscope`（按量付费）/ `dashscope-plan`（Token Plan）/ `ark` / `plugin`。选了就整套按它来（下面三项由它决定，设置页会藏起来）；要自己填就选 `custom`。 |
 | `tts.plugin.tool` | 字符串 | 空 | **插件工具名**（`provider=plugin` 时）：多个用逗号分隔，如 `voice_tts`；留空＝按已知名单 + 名字里带 tts/speech 自动探测。 |
 | `tts.url` | 字符串 | 空 | **完整接口地址**：不自动拼路径。**仅 `provider=custom` 时生效**。 |
 | `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `dashscope` / `ark` / `plugin`。**仅 `provider=custom` 时生效**。 |
