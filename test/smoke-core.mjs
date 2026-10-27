@@ -1606,10 +1606,14 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
   assert.equal(inGroup.rows.some((r) => /私聊/.test(r.text)), false, '群里不许出现私聊 id');
   assert.ok(inGroup.tail.includes('私聊 2 个，不列编号'));
 
-  // 私聊里看到：自己那条写在末尾，别人的私聊仍然只报数量。
+  // 私聊里看到：全部私聊都列编号，自己那条标「这里」（`m32426` 放开了这条）。
   const inPrivate = mind.sessionDirectory('private:945126014');
-  assert.equal(inPrivate.rows.some((r) => /私聊/.test(r.text)), false);
-  assert.ok(inPrivate.tail.includes('这里：私聊 945126014'));
+  const privateRows = inPrivate.rows.filter((r) => /^私聊/.test(r.text));
+  assert.equal(privateRows.length, 2, '私聊视角要列出全部私聊编号');
+  assert.equal(privateRows.find((r) => r.text === '私聊 945126014').mine, true);
+  assert.equal(inPrivate.tail.some((x) => x.startsWith('私聊')), false);
+  // 群里永远只报数量，`m28349`「群里看不到私聊」这条红线不破。
+  assert.equal(inGroup.rows.some((r) => /私聊/.test(r.text)), false);
 
   // names 不带印象；full 才带，且只取群档案的 culture。
   assert.equal(inGroup.rows[1].note, null);
@@ -1620,12 +1624,6 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
   const withNote = full.sessionDirectory('group:111');
   assert.match(withNote.rows.find((r) => r.text.startsWith('群 111')).note, /^印象：聊显卡装机/);
   assert.equal(withNote.rows.find((r) => r.text.startsWith('群 222')).note, null);
-
-  // 白名单私聊本来就允许跨会话读，这时才列 id。
-  const trusted = new Mind({ hub, isolation: { trustedPrivates: new Set(['945126014']) }, log: () => {} });
-  const asTrusted = trusted.sessionDirectory('private:945126014');
-  assert.equal(asTrusted.rows.some((r) => r.text === '私聊 945126014' && r.mine), true);
-  assert.equal(asTrusted.tail.some((x) => x.startsWith('私聊')), false);
 });
 
 t('会话目录渲染：标题、当前会话标记与「还有 N 个没列」', () => {
