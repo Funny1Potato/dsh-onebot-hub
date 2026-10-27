@@ -39,7 +39,7 @@ const [
   { DOWNSTREAM_TYPES },
   { MODEL_LIST_PATH },
   { PERSONA_PATH },
-  { PROVIDER_IDS, SHAPE_IDS, TTS_MODELS, PROVIDER_FIELDS },
+  { PROVIDER_IDS, SHAPE_IDS, PROVIDER_FIELDS },
 ] = await Promise.all([
   import('../lib/agent/policy.js'),
   import('../lib/vision.js'),
@@ -226,8 +226,6 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
     'memory.isolation.privateFacts': PRIVATE_FACTS,
     'tts.provider': PROVIDER_IDS,
     'tts.shape': SHAPE_IDS,
-    // 模型下拉是并集（每家都能选模型，`m30480`），取值只认宿主那份 `TTS_MODELS`。
-    'tts.model': TTS_MODELS.map((item) => item.value),
   };
   for (const [key, values] of Object.entries(expect)) {
     const row = table[key];
@@ -238,6 +236,8 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
       assert.ok(typeof option.label === 'string' && option.label.length > 0, `${key} 的选项 ${option.value} 缺 label`);
     }
   }
+  // 模型是**手填**的（`m30612`）：一旦它出现在枚举表里，设置页就会退回成下拉，改不了自定义模型。
+  assert.ok(!('tts.model' in table), 'tts.model 不该是枚举（模型名由使用者手填）');
   // 键集本身也要盯住：新增/去掉枚举键都该在这里显式过一遍（免得"以为加了其实没加"）。
   assert.deepEqual(Object.keys(table).sort(), Object.keys(expect).sort(), 'ENUM_OPTIONS 的键集与宿主枚举清单不一致');
 });

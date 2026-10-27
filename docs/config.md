@@ -315,7 +315,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 地址是**一整个 URL**、请求体形状可选：`onebot_reply` 里写 `{"type":"tts","text":"…"}` 就在发送前当场合成语音。音色不枚举（兼容服务的自定义音色直接填）；要"照这个声音读"，给一段参考音频即可（字段名可配，各家不一样）。
 
-`provider` 是**服务商下拉**：选了哪家，**接口地址与请求形状**由它决定（这两格会藏起来，`tts.url` / `tts.shape` 只在 `custom` 下生效），**这一家不用的参数也不会显示**（`appId`/`cluster` 只在豆包、`groupId` 只在 MiniMax、`resourceId` 只在方舟）。**模型仍然可以换**：`tts.model` 每家都显示，留空用预设默认——同一家常有多档（`speech-02-hd`/`turbo`、`voicedesign`/`tts`），不让人换等于把选择成本还回去。想连地址一起自己填（自建中转、同一家的另一区域）就把服务商切回 `custom`，那时填的才算数；旧值不会被清掉，切回来还在。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
+`provider` 是**服务商下拉**：选了哪家，**接口地址与请求形状**由它决定（这两格会藏起来，`tts.url` / `tts.shape` 只在 `custom` 下生效），**这一家不用的参数也不会显示**（`appId`/`cluster` 只在豆包、`groupId` 只在 MiniMax、`resourceId` 只在方舟）。**模型仍然可以换**：`tts.model` 每家都显示、手填，留空用预设默认——同一家常有多档（`speech-02-hd`/`turbo`、`voicedesign`/`tts`），不让人换等于把选择成本还回去。想连地址一起自己填（自建中转、同一家的另一区域）就把服务商切回 `custom`，那时填的才算数；旧值不会被清掉，切回来还在。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
 
 | 服务商 | `provider` 取值 | 地址 | 形状 | 默认模型 |
 | --- | --- | --- | --- | --- |
@@ -346,7 +346,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `tts.cluster` | 字符串 | 空 | **Cluster**：只有豆包语音要，留空按 `volcano_tts`。 |
 | `tts.groupId` | 字符串 | 空 | **GroupId**：只有老版 MiniMax 要，填了就拼成 `?GroupId=xxx`。 |
 | `tts.resourceId` | 字符串 | 空 | **Resource-Id**：只有方舟 Agent Plan 用（`X-Api-Resource-Id`），TTS 模型是 `seed-tts-2.0`；留空按预设。 |
-| `tts.model` | 字符串 | 空 | **模型名**：每家都生效，留空用预设默认（例：`speech-02-turbo`、`mimo-v2.5-tts`、`qwen-tts`、`gpt-4o-mini-tts`）。方舟 / 豆包不吃模型名（那两家的「型号」是 `resourceId` 与接入点）。 |
+| `tts.model` | 字符串 | 空 | **模型名**：每家都生效、**手填**（不给下拉，各家模型名变化太快，选项表只会让它过期）。留空用预设默认。例：`speech-02-turbo`、`mimo-v2.5-tts`、`qwen-tts`、`gpt-4o-mini-tts`。方舟 / 豆包不吃模型名（那两家的「型号」是 `resourceId` 与接入点）。 |
 | `tts.voice` | 字符串 | 空 | **音色**：没有默认值，填了才进请求体；不做枚举校验。 |
 | `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`（QQ 最稳）。只影响落盘扩展名与 `speech` 形状的 `response_format`。 |
 | `tts.speed` | 数字 | 1 | **语速**：1＝原速；只在 ≠1 时才往请求体里带。 |
