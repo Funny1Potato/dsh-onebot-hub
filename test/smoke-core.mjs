@@ -37,9 +37,9 @@ import {
   toWireResponse,
   ttlOf,
 } from '../lib/capability.js';
-import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
+import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, renderSessionDirectory, assembleContext } from '../lib/memory/assembler.js';
 import { composeReply, buildSendParams } from '../lib/reply.js';
-import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel, scopeOfAgentId, callerOf } from '../lib/cross/relay.js';
+import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel, scopeOfAgentId, callerOf, callerScopeOf } from '../lib/cross/relay.js';
 import { ChannelStore } from '../lib/cross/channels.js';
 import { PackageStore } from '../lib/cross/packages.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
@@ -1563,6 +1563,92 @@ t('补描去重（`m24656`）：工具已经把描述交给模型，就别再排
   assert.equal(mind.markDescribed('group:1', []), 0);
   assert.equal(mind.markDescribed('group:1', null), 0);
   hub.stop?.();
+});
+
+t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只报数量', () => {
+  const rec = (worldKey, name, memberCount, at, culture) => ({
+    worldKey,
+    name,
+    memberCount,
+    culture,
+    activeMembers: [{ userId: '1', lastSentAt: at }],
+  });
+  const groups = [
+    rec('group:111', '闲聊群', 328, 1000, '聊显卡装机，晚上人多'),
+    rec('group:222', '测试群', 12, 5000, null),
+  ];
+  const hub = {
+    config: {
+      cross: { enabled: true, directory: 'names', rosterLimit: 30 },
+      agent: { groups: ['111', '222'], privates: ['945126014', '10001'] },
+    },
+    profiles: { groups: () => groups, group: (k) => groups.find((g) => g.worldKey === k) ?? null },
+  };
+  const mind = new Mind({ hub, log: () => {} });
+
+  // 三种"不出现"：cross 关着、目录关着、条数 0。
+  assert.equal(new Mind({ hub: { config: {} }, log: () => {} }).sessionDirectory('group:111'), null);
+  assert.equal(
+    new Mind({ hub: { config: { cross: { enabled: true, directory: 'off' } } }, log: () => {} }).sessionDirectory('group:111'),
+    null,
+  );
+  assert.equal(
+    new Mind({ hub: { config: { cross: { enabled: true, directory: 'names', rosterLimit: 0 } } }, log: () => {} }).sessionDirectory('group:111'),
+    null,
+  );
+
+  // 群里看到：按最近有人说话倒序，当前群标「这里」，别的私聊只报数量。
+  const inGroup = mind.sessionDirectory('group:222');
+  assert.equal(inGroup.rows[0].text, '群 222（测试群）· 12 人');
+  assert.equal(inGroup.rows[0].mine, true);
+  assert.equal(inGroup.rows[1].text, '群 111（闲聊群）· 328 人');
+  assert.equal(inGroup.rows[1].mine, false);
+  assert.equal(inGroup.rows.some((r) => /私聊/.test(r.text)), false, '群里不许出现私聊 id');
+  assert.ok(inGroup.tail.includes('私聊 2 个，不列编号'));
+
+  // 私聊里看到：自己那条写在末尾，别人的私聊仍然只报数量。
+  const inPrivate = mind.sessionDirectory('private:945126014');
+  assert.equal(inPrivate.rows.some((r) => /私聊/.test(r.text)), false);
+  assert.ok(inPrivate.tail.includes('这里：私聊 945126014'));
+
+  // names 不带印象；full 才带，且只取群档案的 culture。
+  assert.equal(inGroup.rows[1].note, null);
+  const full = new Mind({
+    hub: { ...hub, config: { ...hub.config, cross: { enabled: true, directory: 'full' } } },
+    log: () => {},
+  });
+  const withNote = full.sessionDirectory('group:111');
+  assert.match(withNote.rows.find((r) => r.text.startsWith('群 111')).note, /^印象：聊显卡装机/);
+  assert.equal(withNote.rows.find((r) => r.text.startsWith('群 222')).note, null);
+
+  // 白名单私聊本来就允许跨会话读，这时才列 id。
+  const trusted = new Mind({ hub, isolation: { trustedPrivates: new Set(['945126014']) }, log: () => {} });
+  const asTrusted = trusted.sessionDirectory('private:945126014');
+  assert.equal(asTrusted.rows.some((r) => r.text === '私聊 945126014' && r.mine), true);
+  assert.equal(asTrusted.tail.some((x) => x.startsWith('私聊')), false);
+});
+
+t('会话目录渲染：标题、当前会话标记与「还有 N 个没列」', () => {
+  assert.equal(renderSessionDirectory(null), '');
+  assert.equal(renderSessionDirectory({ rows: [] }), '');
+  const text = renderSessionDirectory({
+    title: '2 个群',
+    rows: [
+      { text: '群 833194406（测试群）· 12 人', mine: true },
+      { text: '群 451403506（示例群）· 328 人', note: '印象：聊显卡装机' },
+    ],
+    tail: ['私聊 1 个，不列编号', '还有 3 个没列'],
+  });
+  assert.equal(
+    text,
+    [
+      '【会话目录】这个插件接的群和私聊（2 个群）',
+      '- 群 833194406（测试群）· 12 人 · 这里',
+      '- 群 451403506（示例群）· 328 人 · 印象：聊显卡装机',
+      '私聊 1 个，不列编号',
+      '还有 3 个没列',
+    ].join('\n'),
+  );
 });
 
 t('识图等完了也要能回读（`m24656`）：没有 pending 时取最近几张图，否则"已经看完了"等于没有', () => {
@@ -3456,6 +3542,69 @@ t('跨会话转达的自查（m26473）：note 也是转述、递送失败不吃
   ]);
   assert.deepEqual(sendable.map((s) => s.type), ['text', 'at'], '@全体成员变文字，@个人照旧');
   assert.match(degraded[0] ?? '', /全体成员/);
+});
+
+t('外部会话开线要留住地址（2026-10-27 真机：字条写「未知会话」、回喊报「递不到 ：」）', async () => {
+  const now = 1_000_000;
+  const OUT = 'session-4760fa3f-7bf1-4e68-b3b7-a4dbc93cb7d4';
+  const hubLetters = []; // 递进枢纽会话的字条
+  const outLetters = []; // 递回外部会话的字条（followup）
+  const lookedUp = [];
+  const relay = new CrossRelay({
+    hub: { config: { agentGroups: { 222: {} }, agentPrivates: {} }, profiles: { person: () => null } },
+    mind: {
+      reawake: async (scope, opts) => {
+        hubLetters.push({ scope, text: opts.text });
+        return { woke: true };
+      },
+    },
+    host: {
+      getLive: (key) => {
+        lookedUp.push(key);
+        return key === OUT ? { followup: async (msg) => outLetters.push(msg) } : null;
+      },
+    },
+    config: { cross: { enabled: true, allowFrom: 'all' } },
+    now: () => now,
+  });
+
+  // 身份三态：解得出枢纽键是 hub；解不出但**有 id** 的是 external（要留住原 id）；什么都没有才是 none。
+  assert.deepEqual(callerScopeOf({ agent: { id: OUT } }), { kind: 'external', scope: OUT });
+  assert.deepEqual(callerScopeOf({ agent: { id: 'onebot-hub:private%3A945126014.amvq0zx9vok64' } }), {
+    kind: 'hub',
+    scope: 'private:945126014',
+  });
+  assert.deepEqual(callerScopeOf({}, () => 'group:1'), { kind: 'hub', scope: 'group:1' });
+  assert.deepEqual(callerScopeOf({}, ''), { kind: 'none', scope: '' });
+  assert.equal(labelOfScope(OUT), '另一个会话（4760fa3f）', '外部会话也要能对上是哪一条线');
+
+  // 开线：字条里得有地址，不能是「来自 未知会话」。
+  const open = await relay.relay({ from: OUT, fromKind: 'external', to: 'group:222', note: '想问一句', text: '那边在聊什么', as: 'message' });
+  assert.equal(open.ok, true, JSON.stringify(open));
+  assert.match(hubLetters.at(-1).text, /另一个会话（4760fa3f）/);
+  assert.doesNotMatch(hubLetters.at(-1).text, /未知会话/);
+
+  // 回话：`getLive` 必须拿到**原样**的会话 id——包成 `onebot-hub:<编码>` 就永远查不到（真机就是这么断的）。
+  const back = await relay.say({ from: 'group:222', channel: open.channel, text: '在聊显卡' });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.ok(lookedUp.includes(OUT), `getLive 要拿到原串，实际收到：${lookedUp.join(',')}`);
+  assert.match(String(outLetters.at(-1)?.content ?? ''), /在聊显卡/, '回话要真的落进外部会话');
+
+  // 认不出的身份：`allowFrom: all` 也不能开线——开了就是一条没有回信地址的线。
+  const anonymous = await relay.relay({ from: '', fromKind: 'none', to: 'group:222', note: 'x', text: '喂', as: 'message' });
+  assert.equal(anonymous.ok, false);
+  assert.match(anonymous.error, /认不出你是谁/);
+
+  // 默认 `allowFrom: hub`：外部会话仍然被拒，但理由要写清怎么放开。
+  const strict = new CrossRelay({
+    hub: { config: {}, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    config: { cross: { enabled: true } },
+    now: () => now,
+  });
+  const denied = await strict.relay({ from: OUT, fromKind: 'external', to: 'group:222', note: 'x', text: '喂', as: 'message' });
+  assert.equal(denied.ok, false);
+  assert.match(denied.error, /cross\.allowFrom/);
 });
 
 t('跨会话转达的第三轮自查（m27100）：去重不占名额、失败不白吃名额、引用段不当噪声、包 id 猜不到', async () => {

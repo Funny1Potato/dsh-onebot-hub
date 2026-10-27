@@ -38,6 +38,7 @@ const [
   { PRESETS, DELIVERY_MODES, PROBE_ISOLATIONS },
   { DOWNSTREAM_TYPES },
   { MODEL_LIST_PATH },
+  { DIRECTORY_MODES },
   { PERSONA_PATH },
   { PROVIDER_IDS, SHAPE_IDS, PROVIDER_FIELDS },
 ] = await Promise.all([
@@ -49,6 +50,7 @@ const [
   import('../lib/router.js'),
   import('../lib/index.js'),
   import('../lib/llm-models.js'),
+  import('../lib/cross/directory.js'),
   import('../lib/persona/route.js'),
   import('../lib/audio/providers.js'),
 ]);
@@ -221,6 +223,7 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
     'anime.backend': ANIME_BACKENDS,
     'imageGen.engine': IMAGEGEN_ENGINES,
     'imageGen.delivery': IMAGEGEN_DELIVERIES,
+    'cross.directory': DIRECTORY_MODES,
     'memory.isolation.level': ISOLATION_LEVELS,
     'memory.isolation.crossGroupFacts': CROSS_GROUP_FACTS,
     'memory.isolation.privateFacts': PRIVATE_FACTS,
