@@ -851,6 +851,13 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   - **顺手补的通用缺口**：上游在 **HTTP 200 里报错**是常态（MiniMax 的 `base_resp`、豆包的 `code`、方舟/兼容层的 `error`），以前一律落到"没返回音频（顶层字段：…）"——看起来像形状配错，实际是鉴权或参数错。现在这三种都单独认出来、把上游原话回给用户（`#upstreamError`）。同一个道理也适用于别处：**先看状态码再改代码**，404 是路径、400 是字段、401 才是密钥，三者混着猜能猜半小时。
   - 测试：`test/tts.mjs` 26 → **28**（doubao 的四段与 `Bearer;` 头、缺 appid 判没配全、200 里的 code=3001 要原样报、GroupId 拼与不拼、base_resp 1004 要认出来），全量 `npm test` EXIT=0（load-check 89/89、smoke-core 96/96、client-render 25/25）。
 
+- **火山方舟按它自己的文档接（用户 m30320 给出 Agent Plan 文档）**：`ark` 从"照猜的东西"换成了真正按 [接入语音模型](https://ark.volcengine.com/region:cn-beijing/docs/agent-plan-personal-voice-model) 实现的一套——它和豆包语音 V1 **不是同一个产品、不是同一套凭据**，所以两条预设各自独立（`doubao` 保留 V1，新增 `ark`）。三处跟别人不一样：
+  ① **鉴权在头里，不在 body 里**：`X-Api-Key` + `X-Api-Resource-Id`（TTS 是 `seed-tts-2.0`），而且**不要**带 `Authorization: Bearer`——所以 `#headers()` 按形状分家，方舟那条根本不生成 authorization 头。
+  ② **请求体是 `req_params:{ text, speaker, audio_params:{format,sample_rate} }`**：音色这一家叫 `speaker` 不叫 `voice`，语速叫 `speed_ratio` 在 `audio_params` 里，抽样率写死 24000（它只认这个）。
+  ③ **返回是分块 JSON 流**，一行一个对象，音频在每行 `data`（base64 片段），`code:20000000` 是结束标记——所以既不能当二进制读（会拿到一堆 `{`），也不能当单个 JSON 解析（第一行就已经是完整 JSON 了）。`#arkAudio` 单独走这条：按行切、跳 `[DONE]`、拼 `data`、`code>0` 且不等于结束码就把上游 `message` 原样抛出来。这条最容易踩：**结束码 20000000 在通用解析里会被当成"上游报错"**（因为它不是 0），所以它必须在 `#upstreamError` 之前被截住。
+  - `resourceId` 跟着预设走（`resolveTtsTarget` 也返回它），所以选「火山方舟」只需填 `apiKey` 和音色；`tts.resourceId` 只在要换资源（比如声音复刻的模型 id）时才填。
+  - 测试：`test/tts.mjs` 28 → **29**（分块按序拼回、`x-api-key`/`x-api-resource-id` 且无 authorization、`speaker` 与 `sample_rate:24000`、resourceId 可覆盖、流里 `code:45000001` 原样报、只有结束码没有 data 时要指向 Resource-Id 与 speaker），全量 `npm test` EXIT=0（load-check 89/89、smoke-core 96/96、client-render 25/25、tts 29/29）。
+
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
 - 方案（原稿，章节号与完整版一致）：`../docs/dsh-onebot-hub-方案.md`

@@ -458,6 +458,73 @@ t('doubao 形状：app/user/audio/request 四段，鉴权头是 `Bearer; token`'
   assert.match(r2.error, /app\.appid/, '上游怎么说就怎么说，不换成"没返回音频"');
 });
 
+t('ark 形状（方舟 Agent Plan）：req_params + X-Api-Key，返回分块 JSON 流', async () => {
+  const chunkA = AUDIO.subarray(0, 5).toString('base64');
+  const chunkB = AUDIO.subarray(5).toString('base64');
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => [
+      JSON.stringify({ code: 0, message: '', data: chunkA }),
+      JSON.stringify({ code: 0, message: '', data: chunkB }),
+      JSON.stringify({ code: 20000000, message: 'ok' }),
+    ].join('\n'),
+  }));
+  const r = await new Tts(base({
+    fetchImpl: f,
+    shape: 'ark',
+    url: 'https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional',
+    apiKey: 'ark-key',
+    voice: 'zh_female_vv_uranus_bigtts',
+  })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(fs.readFileSync(r.path), AUDIO, '分块要按顺序拼回去');
+  // 方舟认 X-Api-Key + X-Api-Resource-Id，而且**不能**塞 Bearer
+  assert.equal(f.calls[0].headers['x-api-key'], 'ark-key');
+  assert.equal(f.calls[0].headers['x-api-resource-id'], 'seed-tts-2.0', '留空按预设');
+  assert.equal(f.calls[0].headers.authorization, undefined, '方舟不接受 Bearer');
+  const body = f.calls[0].body;
+  assert.equal(body.req_params.text, '你好');
+  assert.equal(body.req_params.speaker, 'zh_female_vv_uranus_bigtts', '这一家的音色字段叫 speaker');
+  assert.equal(body.req_params.audio_params.format, 'mp3');
+  assert.equal(body.req_params.audio_params.sample_rate, 24000);
+  // resourceId 可显式覆盖
+  const f2 = fakeFetch(() => ({
+    ok: true, status: 200, headers: { get: () => 'application/json' },
+    text: async () => [
+      JSON.stringify({ code: 0, data: AUDIO.toString('base64') }),
+      JSON.stringify({ code: 20000000 }),
+    ].join('\n'),
+  }));
+  await new Tts(base({
+    fetchImpl: f2, shape: 'ark', url: 'https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional',
+    apiKey: 'k', resourceId: 'my-res',
+  })).synth({ text: '你好' });
+  assert.equal(f2.calls[0].headers['x-api-resource-id'], 'my-res');
+  // 流里报错（code>0 且不是结束码）：把上游的 message 原样给出来
+  const bad = fakeFetch(() => ({
+    ok: true, status: 200, headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ code: 45000001, message: 'resource id mismatch' }),
+  }));
+  const r2 = await new Tts(base({
+    fetchImpl: bad, shape: 'ark', url: 'https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional', apiKey: 'k',
+  })).synth({ text: '你好' });
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /45000001/);
+  assert.match(r2.error, /resource id mismatch/);
+  // 只有结束码、没有任何 data：要指名两个最可能的原因
+  const empty = fakeFetch(() => ({
+    ok: true, status: 200, headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ code: 20000000 }),
+  }));
+  const r3 = await new Tts(base({
+    fetchImpl: empty, shape: 'ark', url: 'https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional', apiKey: 'k',
+  })).synth({ text: '你好' });
+  assert.equal(r3.ok, false);
+  assert.match(r3.error, /seed-tts-2\.0/, '空流要指向 Resource-Id 与 speaker');
+});
+
 t('minimax 的 GroupId 拼在地址上；200 里的 base_resp 错误要认出来', async () => {
   const f = fakeFetch(() => ({
     ok: true,
@@ -546,6 +613,10 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   assert.equal(providerOf('minimax').shape, 'minimax');
   assert.equal(providerOf('dashscope').shape, 'dashscope');
   assert.equal(providerOf('doubao').shape, 'doubao');
+  assert.equal(providerOf('ark').shape, 'ark');
+  assert.match(providerOf('ark').url, /\/api\/v3\/plan\/tts\/unidirectional$/);
+  assert.equal(providerOf('ark').resourceId, 'seed-tts-2.0', '方舟的 Resource-Id 跟着预设走');
+  assert.notEqual(providerOf('ark').url, providerOf('doubao').url, '方舟 Agent Plan 与豆包 V1 是两个地址、两套凭据');
   // MiniMax 两个站点是两个选项（Key 不通用，跨域直接 401）：
   assert.equal(providerOf('minimaxi').shape, 'minimax');
   assert.match(providerOf('minimax').url, /^https:\/\/api\.minimax\.chat/);
@@ -577,14 +648,16 @@ t('resolveTtsTarget：选了服务商就整套听它的，只有 custom 才用�
   // 选了一家：手填的三项一律不算数（设置页已经把这三格藏了，代码不能再听那些看不见的旧值）
   assert.deepEqual(
     resolveTtsTarget({ provider: 'mimo', url: 'https://old.example/audio/speech', shape: 'speech', model: 'old-model' }),
-    { provider: 'mimo', url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions', shape: 'chat', model: 'mimo-v2.5-tts-voicedesign' },
+    { provider: 'mimo', url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions', shape: 'chat', model: 'mimo-v2.5-tts-voicedesign', resourceId: '' },
   );
   // custom：用户填的才算数，形状认不出退回 speech
   assert.deepEqual(
     resolveTtsTarget({ provider: 'custom', url: ' https://self.example/v1/tts ', shape: 'chat', model: 'my-model' }),
-    { provider: 'custom', url: 'https://self.example/v1/tts', shape: 'chat', model: 'my-model' },
+    { provider: 'custom', url: 'https://self.example/v1/tts', shape: 'chat', model: 'my-model', resourceId: '' },
   );
   assert.equal(resolveTtsTarget({ provider: 'custom', url: 'u', shape: '不认识的形状' }).shape, 'speech');
+  // 方舟那条预设的 Resource-Id 也跟着预设走，才能让 `ark` 开箱可用
+  assert.equal(resolveTtsTarget({ provider: 'ark' }).resourceId, 'seed-tts-2.0');
   // 认不出的服务商按 custom 处理（依旧用用户填的，不静默换成别家）
   assert.equal(resolveTtsTarget({ provider: '某家', url: 'https://x.example/tts' }).url, 'https://x.example/tts');
   // plugin 不打请求，形状固定成 plugin
