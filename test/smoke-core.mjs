@@ -39,7 +39,7 @@ import {
 } from '../lib/capability.js';
 import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, assembleContext } from '../lib/memory/assembler.js';
 import { composeReply, buildSendParams } from '../lib/reply.js';
-import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel } from '../lib/cross/relay.js';
+import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel, scopeOfAgentId, callerOf } from '../lib/cross/relay.js';
 import { ChannelStore } from '../lib/cross/channels.js';
 import { PackageStore } from '../lib/cross/packages.js';
 import { buildDigest, renderDigest } from '../lib/memory/digest.js';
@@ -3219,6 +3219,28 @@ t('跨会话转达：字条不说"已经发出去了"，包只能用一次且会
   // 超限直接拒绝，不悄悄截断。
   const big = store.put({ segments: [{ type: 'text', data: { text: 'x'.repeat(400 * 1024) } }] });
   assert.equal(big.rejected, 'too-large');
+});
+
+t('发起方身份：宿主给的 agent id 是包装过的，要能解回会话键', () => {
+  // 2026-10-27 真机：枢纽自己的私聊会话发起转达，被"只有枢纽自己拉起的会话能做跨会话转达"拒了。
+  // 根因是宿主给的 `exec.agent.id` 是 `SessionId('onebot-hub:' + encodeURIComponent(会话键))`
+  // 再拼上本次激活序号，不是裸的 `private:xxxx`——原来拿 `/^(group|private):/` 一测就假。
+  assert.equal(scopeOfAgentId('onebot-hub:private%3A945126014.amvq0zx9vok64'), 'private:945126014');
+  assert.equal(scopeOfAgentId('onebot-hub:group%3A833194406.amvq0zx9vok64'), 'group:833194406');
+  // 已经是裸会话键就直接认（别的宿主/嵌入场景可能就给这个）。
+  assert.equal(scopeOfAgentId('group:833194406'), 'group:833194406');
+  assert.equal(scopeOfAgentId('private:945126014'), 'private:945126014');
+  // 普通工作区会话认不出来 → 空串（不是"撮合一个"）。
+  assert.equal(scopeOfAgentId('main:3f2a9c'), '');
+  assert.equal(scopeOfAgentId(''), '');
+  assert.equal(scopeOfAgentId(undefined), '');
+  // 宿主给了 id 但认不出 → 保持空。**不**退回"枢纽最近活动的会话"，否则外部会话能借壳发言。
+  assert.equal(callerOf({ agent: { id: 'main:3f2a9c' } }, 'private:945126014'), '');
+  // 宿主给了 id 且认得出 → 用它，忽略 fallback。
+  assert.equal(callerOf({ agent: { id: 'onebot-hub:group%3A777.abc' } }, 'private:1'), 'group:777');
+  // 宿主压根没给 id（老版本 / 嵌入场景）→ 才用 fallback。
+  assert.equal(callerOf({}, 'private:945126014'), 'private:945126014');
+  assert.equal(callerOf({ agent: {} }, 'group:55'), 'group:55');
 });
 
 t('会话间通道：两条线能来回说，句数封顶，收线后就不再递（m26268）', async () => {
