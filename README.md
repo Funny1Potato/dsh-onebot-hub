@@ -448,6 +448,7 @@ agent 写在普通回复里的字**不会**发进 QQ——**只有调 `onebot_re
 | **生图** | `imageGen.enabled` + `model`/`baseUrl`/`apiKey` | 让 agent 自己画图发到群里；`engine: builtin` 用内置 OpenAI 兼容接口，`plugin` 接第三方生图工具；`maxPerTurn` 限每轮几张 |
 | **表情包** | `memes.enabled`（默认开） | 群里发表情时自动收集，agent 自己决定发哪张（只能发上下文里列出的 id，编造的会被丢掉并如实告知）；`maxSend` 限一次几张 |
 | **番剧识别** | `anime.backend`（默认 `off`） | 认出图片里的二次元角色并写进描述；本地 [anime-recognize](https://github.com/Funny1Potato/aigfm-anime-recognize) 或公共 `animetrace`，`both` 本地优先 |
+| **语音合成** | `tts.enabled` + `url`/`apiKey`（默认关） | agent 想让某句话"说出来"时，在 `onebot_reply` 里写 `{"type":"tts","text":"…"}`，枢纽当场合成再当语音发出去。地址填**完整 URL**，形状用 `tts.shape` 选（`speech` = OpenAI `/audio/speech`；`chat` = 塞进 `messages`，小米 MiMo 这类）；音色与模型都没有默认值，填了才进请求体 |
 
 语音转写也默认开着（`media.transcribe`）：实现端支持就转成文字，转不了会如实说明，不会假装听过。
 

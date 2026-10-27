@@ -313,19 +313,35 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 ## 语音合成（`tts.*`）
 
-OpenAI 兼容的 `POST /audio/speech`：`onebot_reply` 里写 `{"type":"tts","text":"…"}` 就在发送前当场合成语音。音色不枚举，兼容服务的自定义音色直接填；要"照这个声音读"，给一段参考音频即可（字段名可配，各家不一样）。
+地址是**一整个 URL**、请求体形状可选：`onebot_reply` 里写 `{"type":"tts","text":"…"}` 就在发送前当场合成语音。音色不枚举（兼容服务的自定义音色直接填）；要"照这个声音读"，给一段参考音频即可（字段名可配，各家不一样）。
+
+`provider` 是**服务商下拉**：选了哪家，就把「地址 / 形状 / 模型名」填成它那一套；**每一项仍然可以自己改**（自建中转、同一家的另一区域、改名后的模型，全靠"显式优先"活着）。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
+
+| 服务商 | `provider` 取值 | 地址 | 形状 | 默认模型 |
+| --- | --- | --- | --- | --- |
+| OpenAI 官方 | openai | `https://api.openai.com/v1/audio/speech` | `speech` | （自己填 `tts-1` / `gpt-4o-mini-tts`） |
+| 小米 MiMo | mimo | `https://token-plan-cn.xiaomimimo.com/v1/chat/completions` | `chat` | `mimo-v2.5-tts-voicedesign` |
+| MiniMax | minimax | `https://api.minimax.chat/v1/t2a_v2` | `minimax` | `speech-02-hd` |
+| 阿里云百炼 | dashscope | `https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` | `dashscope` | `qwen3-tts-flash` |
+| 火山方舟 | ark | `https://ark.cn-beijing.volces.com/api/v3/tts` | `ark` | （按方舟推理接入点填） |
+| 第三方插件 | plugin | —（不打请求） | `plugin` | —（用 `tts.plugin.tool`） |
+
+`shape` 一共五档：`speech` 是 OpenAI `/audio/speech` 那一套（`input` + `voice` + `response_format`）；`chat` 是把要读的话放进 `messages` 里一条 `assistant`（MiMo 那种，`instructions` 会作为一条 `system` 消息带过去）；`minimax` 是 `text` + `voice_setting`/`audio_setting`，**返回 hex 编码的音频**；`dashscope` 是 `input:{text,voice}`，**只返回 URL**，枢纽会再下载一次；`ark` 是 `model`/`text`/`voice` 平铺。**路径与请求体都要对上**——只改路径不改形状，只会从 404 变成 400；返回里没有音频时，错误会把实际收到的顶层字段列出来，照着改。
 
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
-| `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `baseUrl`/`apiKey`，缺一个仍然是关。 |
-| `tts.baseUrl` | 字符串 | 空 | **接口地址**：形如 `https://…/v1`（不要带 `/audio/speech`）。 |
+| `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `url`/`apiKey`，缺一个仍然是关（`provider=plugin` 时不看地址）。 |
+| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo` / `minimax` / `dashscope` / `ark` / `plugin`。选了就把下面三项填成默认值。 |
+| `tts.plugin.tool` | 字符串 | 空 | **插件工具名**（`provider=plugin` 时）：多个用逗号分隔，如 `voice_tts`；留空＝按已知名单 + 名字里带 tts/speech 自动探测。 |
+| `tts.url` | 字符串 | 空 | **完整接口地址**：不自动拼路径；留空才吃 `provider` 的预设。 |
+| `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `dashscope` / `ark` / `plugin`。 |
 | `tts.apiKey` | 字符串 | 空 | **API Key（凭据）**：留空＝不改。只进 `Authorization` 头，绝不进请求体。 |
-| `tts.model` | 字符串 | tts-1 | **模型名**：如 `tts-1` / `gpt-4o-mini-tts` / `cosyvoice-v1`。 |
-| `tts.voice` | 字符串 | alloy | **默认音色**：不做枚举校验，兼容服务写它注册的音色名或 id。 |
-| `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`，默认 mp3（QQ 最稳）。 |
+| `tts.model` | 字符串 | 空 | **模型名**：留空才吃 `provider` 的默认模型；填了按你的来。 |
+| `tts.voice` | 字符串 | 空 | **音色**：没有默认值，填了才进请求体；不做枚举校验。 |
+| `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`（QQ 最稳）。只影响落盘扩展名与 `speech` 形状的 `response_format`。 |
 | `tts.speed` | 数字 | 1 | **语速**：1＝原速；只在 ≠1 时才往请求体里带。 |
-| `tts.instructions` | 字符串 | 空 | **说话风格提示**：`gpt-4o-mini-tts` 支持；留空＝不发。 |
-| `tts.refAudio` | 字符串 | 空 | **参考音频**：URL / 本地路径 / `base64://…` / `data:…`；留空＝不做克隆。 |
+| `tts.instructions` | 字符串 | 空 | **风格/音色提示**：`speech` 里作 `instructions` 字段，`chat` 里作一条 `system` 消息；留空＝不发。 |
+| `tts.refAudio` | 字符串 | 空 | **参考音频**（仅 `speech` 形状）：URL / 本地路径 / `base64://…` / `data:…`；留空＝不做克隆。 |
 | `tts.refText` | 字符串 | 空 | **参考音频对应的文本**：多数克隆接口要求同时给。 |
 | `tts.refAudioField` | 字符串 | ref_audio | **参考音频的字段名**：`ref_audio` / `ref_audio_path` / `prompt_audio`…留空＝不发。 |
 | `tts.refTextField` | 字符串 | ref_text | **参考文本的字段名**：`ref_text` / `prompt_text`…留空＝不发。 |

@@ -60,7 +60,7 @@ function fakeFetch(respond = () => ({ ok: true, status: 200, headers: { get: () 
 
 const base = (over = {}) => ({
   enabled: true,
-  baseUrl: 'https://tts.example.com/v1',
+  url: 'https://tts.example.com/v1/audio/speech',
   apiKey: 'sk-secret-123',
   model: 'tts-1',
   voice: 'alloy',
@@ -72,11 +72,11 @@ const base = (over = {}) => ({
 
 t('没开 / 没配全：明确说缺什么，一个请求都不发', async () => {
   const f = fakeFetch();
-  const off = new Tts({ enabled: false, baseUrl: 'https://x/v1', apiKey: 'k', fetchImpl: f });
+  const off = new Tts({ enabled: false, url: 'https://x/v1/audio/speech', apiKey: 'k', fetchImpl: f });
   const r1 = await off.synth({ text: '你好' });
   assert.equal(r1.ok, false);
   assert.match(r1.error, /未启用或配置不完整/);
-  const noKey = new Tts({ enabled: true, baseUrl: 'https://x/v1', apiKey: '', fetchImpl: f });
+  const noKey = new Tts({ enabled: true, url: 'https://x/v1/audio/speech', apiKey: '', fetchImpl: f });
   assert.equal(noKey.enabled, false, '缺 apiKey 就该是关着的');
   assert.equal((await noKey.synth({ text: '你好' })).ok, false);
   assert.equal(f.calls.length, 0);
@@ -100,7 +100,7 @@ t('请求体：URL 拼对、密钥只在 Authorization 头里、默认只带必�
   const r = await tts.synth({ text: '今晚早点睡' });
   assert.equal(r.ok, true, r.error);
   const [call] = f.calls;
-  assert.equal(call.url, 'https://tts.example.com/v1/audio/speech');
+  assert.equal(call.url, 'https://tts.example.com/v1/audio/speech', '地址原样用，不自动拼路径');
   assert.equal(call.headers.authorization, 'Bearer sk-secret-123');
   assert.equal(call.body.model, 'tts-1');
   assert.equal(call.body.input, '今晚早点睡');
@@ -220,6 +220,84 @@ t('JSON 返回（中转站常见）：base64 与 url 两条路都认', async () 
   const r3 = await new Tts(base({ fetchImpl: bad })).synth({ text: '你好' });
   assert.equal(r3.ok, false);
   assert.match(r3.error, /没有返回音频/);
+  assert.match(r3.error, /顶层字段：oops/, '找不到音频时要把实际收到的字段列出来');
+});
+
+// ---- chat 形状（小米 MiMo 这类）-----------------------------------------------
+
+t('chat 形状：要读的话进 messages 的 assistant，instructions 变 system', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ choices: [{ message: { audio: { data: AUDIO.toString('base64') } } }] }),
+  }));
+  const tts = new Tts(base({
+    fetchImpl: f,
+    shape: 'chat',
+    url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions',
+    model: 'mimo-v2.5-tts-voicedesign',
+    voice: '',
+    instructions: '温柔的女声，语速偏慢',
+  }));
+  const r = await tts.synth({ text: '今晚早点睡' });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.bytes, AUDIO.length);
+  const [call] = f.calls;
+  assert.equal(call.url, 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions');
+  assert.deepEqual(call.body.messages, [
+    { role: 'system', content: '温柔的女声，语速偏慢' },
+    { role: 'assistant', content: '今晚早点睡' },
+  ]);
+  assert.equal(call.body.input, undefined, 'chat 形状不该有 input');
+  assert.equal(call.body.response_format, undefined, 'chat 形状不该有 response_format');
+  assert.equal(call.body.voice, undefined, '音色没填就不该带这个字段');
+  assert.equal(call.body.model, 'mimo-v2.5-tts-voicedesign');
+});
+
+t('chat 形状：没配 instructions 就只有一条 assistant；参考音频不掺进来', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ choices: [{ message: { audio: { data: AUDIO.toString('base64') } } }] }),
+  }));
+  const tts = new Tts(base({ fetchImpl: f, shape: 'chat', voice: 'v1', refAudio: '/nope/ref.wav' }));
+  const r = await tts.synth({ text: '嗯' });
+  assert.equal(r.ok, true, r.error);
+  const [call] = f.calls;
+  assert.deepEqual(call.body.messages, [{ role: 'assistant', content: '嗯' }]);
+  assert.equal(call.body.voice, 'v1');
+  assert.equal(call.body.ref_audio, undefined, 'chat 形状不带参考音频');
+});
+
+t('chat 形状：音频在 audio.url 里也能取到', async () => {
+  const f = async (url) => {
+    if (String(url).includes('/chat/completions')) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => 'application/json' },
+        json: async () => ({ choices: [{ message: { audio: { url: 'https://cdn.example.com/a.mp3' } } }] }),
+      };
+    }
+    return { ok: true, status: 200, headers: { get: () => 'audio/mpeg' }, arrayBuffer: async () => AUDIO };
+  };
+  const r = await new Tts(base({ fetchImpl: f, shape: 'chat', url: 'https://x/v1/chat/completions' })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(r.mediaType, 'audio/mpeg');
+});
+
+t('形状写错时给指路：Speech 形状收到 chat 的返回会提示改 tts.shape', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    json: async () => ({ choices: [{ message: { content: '这里是文字不是音频' } }] }),
+  }));
+  const r = await new Tts(base({ fetchImpl: f })).synth({ text: '你好' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /改 tts\.shape/);
 });
 
 // ---- 缓存 ---------------------------------------------------------------------
@@ -304,6 +382,109 @@ t('resolvePartsSpeech：合成失败的那条不会变成空消息', async () =>
   assert.equal(out.parts.length, 1, '失败的那条被丢掉，文字还留着');
   assert.equal(out.parts[0].type, 'text');
   assert.match(out.notes[0], /语音没合成出来/);
+});
+
+// ---- 多家服务商（`tts.provider` 的五档形状，`m29544`）-----------------------------
+
+t('minimax 形状：text + voice_setting/audio_setting，返回的 hex 要按 hex 解', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ data: { audio: AUDIO.toString('hex') }, base_resp: { status_code: 0 } }),
+  }));
+  const r = await new Tts(base({
+    fetchImpl: f,
+    shape: 'minimax',
+    url: 'https://api.minimax.chat/v1/t2a_v2',
+    model: 'speech-02-hd',
+    voice: 'male-qn-qingse',
+  })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(fs.readFileSync(r.path), AUDIO, 'hex 解错了就是一堆噪声字节');
+  const body = f.calls[0].body;
+  assert.equal(body.text, '你好');
+  assert.equal(body.stream, false);
+  assert.equal(body.voice_setting.voice_id, 'male-qn-qingse');
+  assert.equal(body.audio_setting.format, 'mp3');
+  assert.ok(!('input' in body), 'minimax 不认 input 字段');
+});
+
+t('dashscope 形状：input:{text,voice}，只给了 URL 就自己再下载一次', async () => {
+  const f = fakeFetch((n) => (n === 1
+    ? { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ output: { audio: { url: 'https://oss.example.com/a.mp3' } } }) }
+    : { ok: true, status: 200, headers: { get: () => 'audio/mpeg' }, arrayBuffer: async () => AUDIO }));
+  const r = await new Tts(base({
+    fetchImpl: f,
+    shape: 'dashscope',
+    url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    model: 'qwen3-tts-flash',
+    voice: 'Cherry',
+  })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(fs.readFileSync(r.path), AUDIO);
+  assert.equal(f.calls.length, 2, '第一次合成、第二次取音频');
+  assert.equal(f.calls[1].url, 'https://oss.example.com/a.mp3');
+  assert.equal(f.calls[0].body.input.text, '你好');
+  assert.equal(f.calls[0].body.input.voice, 'Cherry');
+});
+
+t('ark 形状：model/text/voice 平铺，返回的 data 里是 base64', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ data: AUDIO.toString('base64') }),
+  }));
+  const r = await new Tts(base({ fetchImpl: f, shape: 'ark', url: 'https://ark.cn-beijing.volces.com/api/v3/tts', model: 'm' })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(fs.readFileSync(r.path), AUDIO);
+  assert.equal(f.calls[0].body.text, '你好');
+  assert.equal(f.calls[0].body.response_format, 'mp3');
+});
+
+t('SSE 返回也能认（有些实现在音频模式下默认流式）', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'text/event-stream' },
+    text: async () => `data: ${JSON.stringify({ audio: { data: AUDIO.toString('base64') } })}\n\ndata: [DONE]\n`,
+  }));
+  const r = await new Tts(base({ fetchImpl: f, shape: 'speech' })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(fs.readFileSync(r.path), AUDIO);
+});
+
+t('provider=plugin：一个请求都不发，回执直接说下一步该调哪个工具', async () => {
+  const f = fakeFetch();
+  const r = await new Tts({
+    enabled: true,
+    provider: 'plugin',
+    pluginTools: ['voice_tts'],
+    apiKey: '',
+    url: '',
+    fetchImpl: f,
+  }).synth({ text: '你好' });
+  assert.equal(r.ok, false);
+  assert.equal(f.calls.length, 0, 'plugin 档不该打任何请求');
+  assert.match(r.error, /voice_tts/);
+  assert.match(r.error, /record/);
+});
+
+t('provider 预设：认得的给地址/形状/模型，认不得的退回自定义', async () => {
+  const { providerOf, PROVIDER_IDS, TTS_PROVIDERS } = await import('../lib/audio/providers.js');
+  assert.deepEqual(providerOf('mimo'), TTS_PROVIDERS.find((p) => p.id === 'mimo'));
+  assert.equal(providerOf('mimo').shape, 'chat');
+  assert.equal(providerOf('minimax').shape, 'minimax');
+  assert.equal(providerOf('dashscope').shape, 'dashscope');
+  assert.equal(providerOf('ark').shape, 'ark');
+  assert.equal(providerOf('plugin').shape, 'plugin');
+  assert.equal(providerOf('不认识').id, 'custom', '认不得就当自定义，不静默改用户的地址');
+  assert.ok(PROVIDER_IDS.includes('custom') && PROVIDER_IDS.includes('openai'));
+  for (const p of TTS_PROVIDERS) {
+    assert.ok(p.id && p.label, '每家都要有 id 与 label');
+    if (p.id !== 'custom' && p.id !== 'plugin') assert.match(p.url, /^https:\/\//, `${p.id} 要给完整地址`);
+  }
 });
 
 // ---- 汇总 ---------------------------------------------------------------------
