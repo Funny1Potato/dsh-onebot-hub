@@ -410,6 +410,88 @@ t('minimax 形状：text + voice_setting/audio_setting，返回的 hex 要按 he
   assert.ok(!('input' in body), 'minimax 不认 input 字段');
 });
 
+t('doubao 形状：app/user/audio/request 四段，鉴权头是 `Bearer; token`', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ reqid: 'r1', code: 3000, message: 'Success', data: AUDIO.toString('base64') }),
+  }));
+  const r = await new Tts(base({
+    fetchImpl: f,
+    shape: 'doubao',
+    url: 'https://openspeech.bytedance.com/api/v1/tts',
+    apiKey: 'tok-abc',
+    appId: 'app-123',
+    voice: 'zh_female_shuangkuaisisi_moon_bigtts',
+  })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(fs.readFileSync(r.path), AUDIO);
+  // 分号，不是空格：写成标准 Bearer 豆包那边直接 401，且报错看不出是头写错了。
+  assert.equal(f.calls[0].headers.authorization, 'Bearer; tok-abc');
+  const body = f.calls[0].body;
+  assert.equal(body.app.appid, 'app-123');
+  assert.equal(body.app.token, 'tok-abc');
+  assert.equal(body.app.cluster, 'volcano_tts', 'cluster 留空按默认');
+  assert.ok(body.user.uid, 'user.uid 是必填项（真机 400 试出来的）');
+  assert.equal(body.audio.voice_type, 'zh_female_shuangkuaisisi_moon_bigtts');
+  assert.equal(body.audio.encoding, 'mp3');
+  assert.equal(body.request.text, '你好');
+  assert.equal(body.request.operation, 'query');
+  assert.ok(body.request.reqid, 'request.reqid 是必填项');
+  // 缺 appid = 没配全：不硬发一个空 appid 去撞 400
+  assert.equal(new Tts(base({
+    fetchImpl: f, shape: 'doubao', url: 'https://openspeech.bytedance.com/api/v1/tts', apiKey: 'k',
+  })).configured, false);
+  // 200 里带错（code≠3000）要把上游原话给出来
+  const bad = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ reqid: '', code: 3001, message: 'Missing required: app.appid' }),
+  }));
+  const r2 = await new Tts(base({
+    fetchImpl: bad, shape: 'doubao', url: 'https://openspeech.bytedance.com/api/v1/tts', apiKey: 'k', appId: 'a',
+  })).synth({ text: '你好' });
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /3001/);
+  assert.match(r2.error, /app\.appid/, '上游怎么说就怎么说，不换成"没返回音频"');
+});
+
+t('minimax 的 GroupId 拼在地址上；200 里的 base_resp 错误要认出来', async () => {
+  const f = fakeFetch(() => ({
+    ok: true,
+    status: 200,
+    headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ data: { audio: AUDIO.toString('hex') }, base_resp: { status_code: 0 } }),
+  }));
+  const r = await new Tts(base({
+    fetchImpl: f,
+    shape: 'minimax',
+    url: 'https://api.minimax.chat/v1/t2a_v2',
+    groupId: '1234567890',
+    apiKey: 'k',
+  })).synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  assert.match(f.calls[0].url, /GroupId=1234567890$/);
+  // 没填就不拼（新接口不要它，多带一个查询串反而可能被拒）
+  const f2 = fakeFetch(() => ({
+    ok: true, status: 200, headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ data: { audio: AUDIO.toString('hex') }, base_resp: { status_code: 0 } }),
+  }));
+  await new Tts(base({ fetchImpl: f2, shape: 'minimax', url: 'https://api.minimax.chat/v1/t2a_v2', apiKey: 'k' })).synth({ text: '你好' });
+  assert.ok(!f2.calls[0].url.includes('GroupId'));
+  // 跨域用错 Key：MiniMax 回的是 HTTP 200 + status_code 1004，不认就变成"没返回音频"
+  const bad = fakeFetch(() => ({
+    ok: true, status: 200, headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify({ base_resp: { status_code: 1004, status_msg: 'login fail: Please carry the API secret key' } }),
+  }));
+  const r2 = await new Tts(base({ fetchImpl: bad, shape: 'minimax', url: 'https://api.minimax.chat/v1/t2a_v2', apiKey: 'k' })).synth({ text: '你好' });
+  assert.equal(r2.ok, false);
+  assert.match(r2.error, /1004/);
+  assert.match(r2.error, /login fail/);
+});
+
 t('dashscope 形状：input:{text,voice}，只给了 URL 就自己再下载一次', async () => {
   const f = fakeFetch((n) => (n === 1
     ? { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ output: { audio: { url: 'https://oss.example.com/a.mp3' } } }) }
@@ -427,20 +509,6 @@ t('dashscope 形状：input:{text,voice}，只给了 URL 就自己再下载一�
   assert.equal(f.calls[1].url, 'https://oss.example.com/a.mp3');
   assert.equal(f.calls[0].body.input.text, '你好');
   assert.equal(f.calls[0].body.input.voice, 'Cherry');
-});
-
-t('ark 形状：model/text/voice 平铺，返回的 data 里是 base64', async () => {
-  const f = fakeFetch(() => ({
-    ok: true,
-    status: 200,
-    headers: { get: () => 'application/json' },
-    text: async () => JSON.stringify({ data: AUDIO.toString('base64') }),
-  }));
-  const r = await new Tts(base({ fetchImpl: f, shape: 'ark', url: 'https://ark.cn-beijing.volces.com/api/v3/tts', model: 'm' })).synth({ text: '你好' });
-  assert.equal(r.ok, true, r.error);
-  assert.deepEqual(fs.readFileSync(r.path), AUDIO);
-  assert.equal(f.calls[0].body.text, '你好');
-  assert.equal(f.calls[0].body.response_format, 'mp3');
 });
 
 t('SSE 返回也能认（有些实现在音频模式下默认流式）', async () => {
@@ -477,7 +545,12 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   assert.equal(providerOf('mimo').shape, 'chat');
   assert.equal(providerOf('minimax').shape, 'minimax');
   assert.equal(providerOf('dashscope').shape, 'dashscope');
-  assert.equal(providerOf('ark').shape, 'ark');
+  assert.equal(providerOf('doubao').shape, 'doubao');
+  // MiniMax 两个站点是两个选项（Key 不通用，跨域直接 401）：
+  assert.equal(providerOf('minimaxi').shape, 'minimax');
+  assert.match(providerOf('minimax').url, /^https:\/\/api\.minimax\.chat/);
+  assert.match(providerOf('minimaxi').url, /^https:\/\/api\.minimaxi\.com/);
+  assert.notEqual(providerOf('minimax').url, providerOf('minimaxi').url);
   // 同一家的两种计费方式是两个独立选项，地址不能撞（`m30030`）：
   // 小米 Token Plan = token-plan-cn…、按量付费 = api.xiaomimimo.com；百炼同理（compatible-mode）。
   assert.equal(providerOf('mimo-pay').shape, 'chat');

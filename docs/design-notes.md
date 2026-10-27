@@ -844,6 +844,13 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   ② 区域变体（`sgp`/`ams`、`dashscope-intl`）**不做选项**，只在 `note` 里说一句"换成它，或者切自定义"。理由：区域会跟着账号变，而"自定义"已经在手边；枚举一多，下拉本身就变成新的查询工作。
   - 测试：`test/tts.mjs` 27（新增两条计费方式地址不撞、id 与 url 去重）。
 
+- **把"没验证过的预设"全部验一遍（用户 m30073「其它的提供商检查过了吗」）**：上一版五家预设里，只有小米与百炼是有真机证据的，其余是照文档抄的。这次用**无密钥 POST 看状态码**把每条路由先验一遍（`404` = 这条路径不存在、`401/400` = 存在但缺凭据或字段、`000` = 这台机器连不上），再对着 400 的原文把形状试出来。三处结论：
+  ① **MiniMax 不是一个选项而是两个**：`api.minimax.chat` 与 `api.minimaxi.com` 都活着，但**Key 的域名必须与地址一致**（跨域回 HTTP 200 + `base_resp.status_code:1004 login fail`），所以拆成"国内站 / 海外站"两条；同时补 `tts.groupId`——老账号要把 `?GroupId=` 拼在地址上，不拼回的也是鉴权失败而且不告诉你少了什么。
+  ② **火山方舟那条预设是错的**：`ark.cn-beijing.volces.com/api/v3/tts` 确实存在（401 而不是 404），但它的请求体与我们猜的 `model/text/voice` 平铺毫无关系；火山真正好接的是**豆包语音** `openspeech.bytedance.com/api/v1/tts`，形状靠真机 400 一句句试出来：`Missing required: app.appid → app.cluster → user.uid → audio → request.reqid`（文档只把这些写在示例里，不试就不知道哪些是硬的）。鉴权头是 `Authorization: Bearer; <token>`——**分号不是空格**，写成标准 Bearer 直接 401。于是 `ark` 换成 `doubao`，并补 `tts.appId` / `tts.cluster`（缺 appid 直接判"没配全"，不硬发一个空 appid 去撞 400）。
+  ③ **OpenAI 那条没能验证**：这台机器对 `api.openai.com` 是 `000`（连不上），所以只能保持标准形态不动；百炼两个端点都探到 `401`（路由存在），按量付费那条按文档形态。
+  - **顺手补的通用缺口**：上游在 **HTTP 200 里报错**是常态（MiniMax 的 `base_resp`、豆包的 `code`、方舟/兼容层的 `error`），以前一律落到"没返回音频（顶层字段：…）"——看起来像形状配错，实际是鉴权或参数错。现在这三种都单独认出来、把上游原话回给用户（`#upstreamError`）。同一个道理也适用于别处：**先看状态码再改代码**，404 是路径、400 是字段、401 才是密钥，三者混着猜能猜半小时。
+  - 测试：`test/tts.mjs` 26 → **28**（doubao 的四段与 `Bearer;` 头、缺 appid 判没配全、200 里的 code=3001 要原样报、GroupId 拼与不拼、base_resp 1004 要认出来），全量 `npm test` EXIT=0（load-check 89/89、smoke-core 96/96、client-render 25/25）。
+
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
 - 方案（原稿，章节号与完整版一致）：`../docs/dsh-onebot-hub-方案.md`
