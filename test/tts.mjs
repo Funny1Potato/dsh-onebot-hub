@@ -225,7 +225,7 @@ t('JSON 返回（中转站常见）：base64 与 url 两条路都认', async () 
 
 // ---- chat 形状（小米 MiMo 这类）-----------------------------------------------
 
-t('chat 形状：只发 assistant，绝不带 system 角色（小米 TTS 模型不收）', async () => {
+t('chat 形状：音色描述走 user，正文走 assistant，绝不带 system（MiMo 官方形状，`m30769`）', async () => {
   const f = fakeFetch(() => ({
     ok: true,
     status: 200,
@@ -245,12 +245,17 @@ t('chat 形状：只发 assistant，绝不带 system 角色（小米 TTS 模型�
   assert.equal(r.bytes, AUDIO.length);
   const [call] = f.calls;
   assert.equal(call.url, 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions');
-  assert.deepEqual(call.body.messages, [{ role: 'assistant', content: '今晚早点睡' }], '真机 400：messages[0] system role is not allowed for TTS model');
   assert.ok(!call.body.messages.some((m) => m.role === 'system'), 'chat 形状一个 system 都不能有');
+  assert.deepEqual(call.body.messages, [
+    { role: 'user', content: '温柔的女声，语速偏慢' },
+    { role: 'assistant', content: '今晚早点睡' },
+  ], '音色描述是 user，正文是 assistant');
   assert.equal(call.body.input, undefined, 'chat 形状不该有 input');
   assert.equal(call.body.response_format, undefined, 'chat 形状不该有 response_format');
-  assert.equal(call.body.voice, '温柔的女声，语速偏慢', '音色没填时，instructions 顶到 voice 上');
+  assert.equal(call.body.voice, undefined, 'voice 在 audio 里面，不在顶层');
+  assert.equal(call.body.audio.format, 'mp3');
   assert.equal(call.body.model, 'mimo-v2.5-tts-voicedesign');
+  assert.equal(call.body.audio.voice, undefined, 'voicedesign 不能带 audio.voice');
 });
 
 t('上游又说"不许 system"时，错误里写清本地到底发了几条 assistant（`m30659`）', async () => {
@@ -261,14 +266,81 @@ t('上游又说"不许 system"时，错误里写清本地到底发了几条 assi
     json: async () => ({ error: { message: 'messages[0] system role is not allowed for TTS model' } }),
     text: async () => JSON.stringify({ error: { message: 'messages[0] system role is not allowed for TTS model' } }),
   }));
-  const tts = new Tts(base({ fetchImpl: f, shape: 'chat', model: 'mimo-v2.5-tts' }));
+  const diagFile = path.join(os.tmpdir(), `onebot-tts-test-${process.pid}.json`);
+  try { fs.unlinkSync(diagFile); } catch {}
+  const tts = new Tts(base({ fetchImpl: f, shape: 'chat', model: 'mimo-v2.5-tts', diagFile }));
   const r = await tts.synth({ text: '你好' });
   assert.equal(r.ok, false);
   assert.match(r.error, /system role is not allowed/, '上游原话要原样保留');
-  assert.match(r.error, /只发了 1 条 assistant/, '要写清本地实际发了几条');
+  assert.match(r.error, /\[(user, )?assistant\]/, '要写清本地实际发的角色');
+  assert.match(r.error, /model=mimo-v2\.5-tts/, '模型名也要在里面');
+  assert.match(r.error, /每条 \d+\/\d+ 字/, '还要有每条的长度：空消息和描述被误当正文，看一眼就能分');
+  // 指纹进回执（`m31125`）：用户贴回这句话就能和本地复刻逐字节比对，不必等重启翻 tmp。
+  assert.match(r.error, /共 \d+ 字节 \/ 指纹 [0-9a-f]{12}/, '要有这次请求体的字节数与指纹');
+
+  // 落盘诊断：记录"我们拼的"和"谁在发"，用来判断是不是链路中段改了请求体。
+  const diag = JSON.parse(fs.readFileSync(diagFile, 'utf8'));
+  assert.equal(diag.shape, 'chat');
+  assert.deepEqual(diag.messages.map((m) => m.role), ['user', 'assistant'], '角色要如实记下来');
+  assert.ok(diag.messages.every((m) => m.len > 0), '每条的字符数也要有（空消息一眼就能看出来）');
+  assert.equal(diag.status, 400);
+  assert.ok(diag.wireBytes > 0 && /^[0-9a-f]{16}$/.test(diag.wireSha));
+  assert.equal(diag.fetchSame, false, '注入的假 fetch 显然不是全局那个，这里要如实记录');
+  assert.ok(!/sk-|Bearer [A-Za-z0-9]/.test(JSON.stringify(diag)), '诊断文件里不许留密钥');
+  fs.unlinkSync(diagFile);
 });
 
-t('chat 形状：没配 instructions 就只有一条 assistant；参考音频不掺进来', async () => {
+t('不注入 fetch 时自己走 node:http，请求体原样到达上游（绕开全局 fetch 包装，`m31125`）', async () => {
+  const http = await import('node:http');
+  const seen = [];
+  const server = http.createServer((req, res) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { audio: { data: AUDIO.toString('base64') } } }] }));
+    });
+  });
+  await new Promise((r) => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    // 故意把全局 fetch 换成一个"会改写请求体"的实现：模拟宿主里装了会包 fetch 的插件。
+    const original = globalThis.fetch;
+    let touched = 0;
+    globalThis.fetch = async () => {
+      touched += 1;
+      return new Response('{}', { status: 500 });
+    };
+    try {
+      const tts = new Tts({
+        enabled: true,
+        provider: 'custom',
+        url: `http://127.0.0.1:${port}/v1/chat/completions`,
+        shape: 'chat',
+        apiKey: 'k-test',
+        model: 'mimo-v2.5-tts',
+        voice: '温柔女声',
+        format: 'mp3',
+      });
+      const r = await tts.synth({ text: '你好' });
+      assert.equal(r.ok, true, '合成要成功（不被那个假 fetch 影响）');
+      assert.equal(touched, 0, '一次都不该碰全局 fetch');
+      assert.equal(seen.length, 1);
+      const body = JSON.parse(seen[0].body);
+      assert.deepEqual(body.messages.map((m) => m.role), ['user', 'assistant'], '角色顺序原样到达');
+      assert.equal(body.messages[0].content, '温柔女声', '描述型音色进 user');
+      assert.equal(body.model, 'mimo-v2.5-tts');
+      assert.equal(seen[0].headers['content-length'], String(Buffer.byteLength(seen[0].body)), '要带长度头');
+    } finally {
+      globalThis.fetch = original;
+    }
+  } finally {
+    await new Promise((r) => server.close(r));
+  }
+});
+
+t('chat 形状：内置音色进 audio.voice，描述型音色进 user；参考音频不掺进来', async () => {
   const f = fakeFetch(() => ({
     ok: true,
     status: 200,
@@ -279,8 +351,12 @@ t('chat 形状：没配 instructions 就只有一条 assistant；参考音频不
   const r = await tts.synth({ text: '嗯' });
   assert.equal(r.ok, true, r.error);
   const [call] = f.calls;
-  assert.deepEqual(call.body.messages, [{ role: 'assistant', content: '嗯' }]);
-  assert.equal(call.body.voice, 'v1');
+  assert.deepEqual(call.body.messages, [
+    { role: 'user', content: 'v1' },
+    { role: 'assistant', content: '嗯' },
+  ]);
+  assert.equal(call.body.audio.voice, undefined, '不认识的字符串不当音色发');
+  assert.equal(call.body.voice, undefined);
   assert.equal(call.body.ref_audio, undefined, 'chat 形状不带参考音频');
 });
 
@@ -572,25 +648,6 @@ t('minimax 的 GroupId 拼在地址上；200 里的 base_resp 错误要认出来
   assert.match(r2.error, /login fail/);
 });
 
-t('dashscope 形状：input:{text,voice}，只给了 URL 就自己再下载一次', async () => {
-  const f = fakeFetch((n) => (n === 1
-    ? { ok: true, status: 200, headers: { get: () => 'application/json' }, text: async () => JSON.stringify({ output: { audio: { url: 'https://oss.example.com/a.mp3' } } }) }
-    : { ok: true, status: 200, headers: { get: () => 'audio/mpeg' }, arrayBuffer: async () => AUDIO }));
-  const r = await new Tts(base({
-    fetchImpl: f,
-    shape: 'dashscope',
-    url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
-    model: 'qwen3-tts-flash',
-    voice: 'Cherry',
-  })).synth({ text: '你好' });
-  assert.equal(r.ok, true, r.error);
-  assert.deepEqual(fs.readFileSync(r.path), AUDIO);
-  assert.equal(f.calls.length, 2, '第一次合成、第二次取音频');
-  assert.equal(f.calls[1].url, 'https://oss.example.com/a.mp3');
-  assert.equal(f.calls[0].body.input.text, '你好');
-  assert.equal(f.calls[0].body.input.voice, 'Cherry');
-});
-
 t('SSE 返回也能认（有些实现在音频模式下默认流式）', async () => {
   const f = fakeFetch(() => ({
     ok: true,
@@ -624,7 +681,6 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   assert.deepEqual(providerOf('mimo'), TTS_PROVIDERS.find((p) => p.id === 'mimo'));
   assert.equal(providerOf('mimo').shape, 'chat');
   assert.equal(providerOf('minimax').shape, 'minimax');
-  assert.equal(providerOf('dashscope').shape, 'dashscope');
   assert.equal(providerOf('doubao').shape, 'doubao');
   assert.equal(providerOf('ark').shape, 'ark');
   assert.match(providerOf('ark').url, /\/api\/v3\/plan\/tts\/unidirectional$/);
@@ -636,18 +692,18 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   assert.match(providerOf('minimaxi').url, /^https:\/\/api\.minimaxi\.com/);
   assert.notEqual(providerOf('minimax').url, providerOf('minimaxi').url);
   // 同一家的两种计费方式是两个独立选项，地址不能撞（`m30030`）：
-  // 小米 Token Plan = token-plan-cn…、按量付费 = api.xiaomimimo.com；百炼同理（compatible-mode）。
+  // 小米 Token Plan = token-plan-cn…、按量付费 = api.xiaomimimo.com。
   assert.equal(providerOf('mimo-pay').shape, 'chat');
   assert.match(providerOf('mimo').url, /token-plan-cn\.xiaomimimo\.com/);
   assert.match(providerOf('mimo-pay').url, /^https:\/\/api\.xiaomimimo\.com/);
   assert.notEqual(providerOf('mimo').url, providerOf('mimo-pay').url);
-  assert.equal(providerOf('dashscope-plan').shape, 'speech');
-  assert.match(providerOf('dashscope-plan').url, /token-plan\.cn-beijing\.maas\.aliyuncs\.com/);
-  assert.notEqual(providerOf('dashscope').url, providerOf('dashscope-plan').url);
   assert.equal(providerOf('plugin').shape, 'plugin');
   assert.equal(providerOf('不认识').id, 'custom', '认不得就当自定义，不静默改用户的地址');
   assert.ok(PROVIDER_IDS.includes('custom') && PROVIDER_IDS.includes('openai'));
   assert.equal(new Set(PROVIDER_IDS).size, PROVIDER_IDS.length, 'id 不许重复');
+  // 百炼下线（`m31611`）：模型仍认不认得这两个 id 都无所谓，但不许再出现在下拉里。
+  assert.ok(!PROVIDER_IDS.includes('dashscope') && !PROVIDER_IDS.includes('dashscope-plan'),
+    '百炼的两个预设已移除');
   assert.equal(new Set(TTS_PROVIDERS.map((p) => p.url).filter(Boolean)).size,
     TTS_PROVIDERS.filter((p) => p.url).length, '同一个地址不许挂两个选项（选哪条都一样，纯噪声）');
   for (const p of TTS_PROVIDERS) {
@@ -665,7 +721,7 @@ t('resolveTtsTarget：地址与形状听服务商，模型听用户（`m29830` /
     { provider: 'mimo', url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions', shape: 'chat', model: 'mimo-v2.5-tts', resourceId: '' },
   );
   // 模型留空才回落到预设默认
-  assert.equal(resolveTtsTarget({ provider: 'mimo', model: '' }).model, 'mimo-v2.5-tts-voicedesign');
+  assert.equal(resolveTtsTarget({ provider: 'mimo', model: '' }).model, 'mimo-v2.5-tts');
   assert.equal(resolveTtsTarget({ provider: 'ark' }).resourceId, 'seed-tts-2.0');
   assert.equal(resolveTtsTarget({ provider: 'ark', resourceId: 'seed-tts-2.0-replica' }).resourceId, 'seed-tts-2.0-replica');
   // custom：用户填的才算数，形状认不出退回 speech
@@ -682,6 +738,123 @@ t('resolveTtsTarget：地址与形状听服务商，模型听用户（`m29830` /
   assert.equal(resolveTtsTarget({ provider: 'plugin' }).shape, 'plugin');
   // OpenAI 官方那条要能开箱用（模型名不能是空）
   assert.equal(resolveTtsTarget({ provider: 'openai' }).model, 'tts-1');
+});
+
+// ---- 每家请求体对着官方文档逐字钉住（`m30792`：不要反复让用户拿真机试） -------
+
+const okJson = (payload) => fakeFetch(() => ({
+  ok: true,
+  status: 200,
+  headers: { get: () => 'application/json' },
+  json: async () => payload,
+}));
+
+t('MiMo voicedesign：user 是音色描述、assistant 是正文、audio 里没有 voice', async () => {
+  const f = okJson({ choices: [{ message: { audio: { data: AUDIO.toString('base64') } } }] });
+  const tts = new Tts({ enabled: true, apiKey: 'k', shape: 'chat', fetchImpl: f,
+    url: 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5-tts-voicedesign', voice: '低沉的中年男声' });
+  const r = await tts.synth({ text: '今天下雨' });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(f.calls[0].body, {
+    model: 'mimo-v2.5-tts-voicedesign',
+    messages: [
+      { role: 'user', content: '低沉的中年男声' },
+      { role: 'assistant', content: '今天下雨' },
+    ],
+    audio: { format: 'mp3' },
+  });
+});
+
+t('MiMo 普通模型 + 内置音色：只进 audio.voice，不当描述发 user 消息', async () => {
+  const f = okJson({ choices: [{ message: { audio: { data: AUDIO.toString('base64') } } }] });
+  const tts = new Tts({ enabled: true, apiKey: 'k', shape: 'chat', fetchImpl: f,
+    url: 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5-tts', voice: '冰糖' });
+  const r = await tts.synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  const body = f.calls[0].body;
+  assert.deepEqual(body.messages, [{ role: 'assistant', content: '你好' }]);
+  assert.equal(body.audio.voice, '冰糖');
+});
+
+t('MiMo voicedesign 没给音色描述：本地直接说清，不发请求', async () => {
+  const f = okJson({});
+  const tts = new Tts({ enabled: true, apiKey: 'k', shape: 'chat', fetchImpl: f,
+    url: 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5-tts-voicedesign' });
+  const r = await tts.synth({ text: '你好' });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /voicedesign/);
+  assert.equal(f.calls.length, 0, '缺必填项就别发一个必然 400 的请求');
+});
+
+t('MiMo voiceclone：参考音频的裸 base64 进 audio.voice', async () => {
+  const ref = path.join(os.tmpdir(), `tts-ref-${process.pid}.wav`);
+  fs.writeFileSync(ref, AUDIO);
+  const f = okJson({ choices: [{ message: { audio: { data: AUDIO.toString('base64') } } }] });
+  const tts = new Tts({ enabled: true, apiKey: 'k', shape: 'chat', fetchImpl: f,
+    url: 'https://api.xiaomimimo.com/v1/chat/completions', model: 'mimo-v2.5-tts-voiceclone', refAudio: ref });
+  const r = await tts.synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  const body = f.calls[0].body;
+  assert.match(body.audio.voice, /^data:audio\/[a-z0-9.+-]+;base64,/, '必须是 DataURL（上游原话：must be a DataURL）');
+  assert.ok(body.audio.voice.endsWith(AUDIO.toString('base64')), '里面还得是这份参考音频');
+  assert.deepEqual(body.messages, [{ role: 'assistant', content: '你好' }], '克隆模型不需要 user 描述');
+});
+
+t('MiniMax：speed 夹进 [0.5,2]，不支持的格式退回 mp3', async () => {
+  const f = okJson({ data: { audio: AUDIO.toString('hex') } });
+  const tts = new Tts({ enabled: true, apiKey: 'k', shape: 'minimax', fetchImpl: f,
+    url: 'https://api.minimaxi.com/v1/t2a_v2', model: 'speech-02-hd', voice: 'female-shaonv',
+    format: 'aac', speed: 3 });
+  const r = await tts.synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  const body = f.calls[0].body;
+  assert.equal(body.voice_setting.speed, 2, '超过上限就按上限发，别让上游判参数错');
+  assert.equal(body.audio_setting.format, 'mp3', 'aac 不在它认的四种里');
+  assert.equal(body.text, '你好');
+  assert.equal(body.stream, false);
+});
+
+t('豆包语音：四段齐全，编码不支持的退回 mp3', async () => {
+  const f = okJson({ code: 3000, data: AUDIO.toString('base64') });
+  const tts = new Tts({ enabled: true, apiKey: 'tok', shape: 'doubao', fetchImpl: f,
+    url: 'https://openspeech.bytedance.com/api/v1/tts', appId: 'app', cluster: 'volcano_tts',
+    voice: 'zh_female_vv_uranus_bigtts', format: 'flac' });
+  const r = await tts.synth({ text: '你好' });
+  assert.equal(r.ok, true, r.error);
+  const body = f.calls[0].body;
+  assert.equal(body.app.appid, 'app');
+  assert.equal(body.app.cluster, 'volcano_tts');
+  assert.equal(body.audio.encoding, 'mp3');
+  assert.equal(body.request.text, '你好');
+  assert.equal(body.request.operation, 'query');
+  assert.ok(body.request.reqid, 'reqid 必须给');
+});
+
+t('方舟：req_params 里 text/speaker/audio_params，音色叫 speaker', async () => {
+  const f = okJson({});
+  const tts = new Tts({ enabled: true, apiKey: 'k', shape: 'ark', fetchImpl: f,
+    url: 'https://ark.cn-beijing.volces.com/api/v3/plan/tts/unidirectional',
+    voice: 'zh_female_vv_uranus_bigtts' });
+  await tts.synth({ text: '你好' });
+  const body = f.calls[0].body;
+  assert.equal(body.req_params.text, '你好');
+  assert.equal(body.req_params.speaker, 'zh_female_vv_uranus_bigtts');
+  assert.ok(body.req_params.audio_params.sample_rate);
+});
+
+t('语音段：tts 没开启/没装配时不打上游，只留一条 note', async () => {
+  const { resolvePartsSpeech } = await import('../lib/reply.js');
+  const off = await resolvePartsSpeech({ tts: { enabled: false } }, [{ type: 'tts', text: '你好' }]);
+  assert.equal(off.parts.length, 0);
+  assert.match(off.notes[0], /没开启/);
+  const none = await resolvePartsSpeech({}, [{ type: 'tts', text: '你好' }]);
+  assert.equal(none.parts.length, 0);
+  // 开着的正常情况：换成 record 段
+  const on = await resolvePartsSpeech(
+    { tts: { enabled: true, synth: async () => ({ ok: true, path: '/tmp/a.mp3' }) } },
+    [{ type: 'tts', text: '你好' }],
+  );
+  assert.deepEqual(on.parts, [{ type: 'record', source: '/tmp/a.mp3', tts: true }]);
 });
 
 // ---- 汇总 ---------------------------------------------------------------------

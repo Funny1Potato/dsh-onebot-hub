@@ -320,34 +320,41 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 服务商 | `provider` 取值 | 地址 | 形状 | 默认模型 |
 | --- | --- | --- | --- | --- |
 | OpenAI 官方 | openai | `https://api.openai.com/v1/audio/speech` | `speech` | （自己填 `tts-1` / `gpt-4o-mini-tts`） |
-| 小米 MiMo（Token Plan） | mimo | `https://token-plan-cn.xiaomimimo.com/v1/chat/completions` | `chat` | `mimo-v2.5-tts-voicedesign` |
-| 小米 MiMo（按量付费） | mimo-pay | `https://api.xiaomimimo.com/v1/chat/completions` | `chat` | `mimo-v2.5-tts-voicedesign` |
+| 小米 MiMo（Token Plan） | mimo | `https://token-plan-cn.xiaomimimo.com/v1/chat/completions` | `chat` | `mimo-v2.5-tts` |
+| 小米 MiMo（按量付费） | mimo-pay | `https://api.xiaomimimo.com/v1/chat/completions` | `chat` | `mimo-v2.5-tts` |
 | MiniMax（国内站） | minimax | `https://api.minimax.chat/v1/t2a_v2` | `minimax` | `speech-02-hd` |
 | MiniMax（海外站） | minimaxi | `https://api.minimaxi.com/v1/t2a_v2` | `minimax` | `speech-02-hd` |
-| 阿里云百炼（按量付费） | dashscope | `https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation` | `dashscope` | `qwen3-tts-flash` |
-| 阿里云百炼（Token Plan） | dashscope-plan | `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1/audio/speech` | `speech` | `qwen3-tts-flash` |
 | 火山方舟（Agent Plan） | ark | `https://openspeech.bytedance.com/api/v3/plan/tts/unidirectional` | `ark` | —（`X-Api-Resource-Id` 默认 `seed-tts-2.0`） |
 | 火山引擎（豆包语音 V1） | doubao | `https://openspeech.bytedance.com/api/v1/tts` | `doubao` | —（填 `tts.appId` + `tts.cluster`） |
 | 第三方插件 | plugin | —（不打请求） | `plugin` | —（用 `tts.plugin.tool`） |
 
-同一家的不同计费方式（小米的 Token Plan / 按量付费、百炼的按量付费 / Token Plan、MiniMax 的国内 / 海外站）**各是一个选项**：地址与 Key 都不通用，跨着用报的是鉴权错，看起来像 Key 失效。
+同一家的不同计费方式（小米的 Token Plan / 按量付费、MiniMax 的国内 / 海外站）**各是一个选项**：地址与 Key 都不通用，跨着用报的是鉴权错，看起来像 Key 失效。
 
-`shape` 一共七档：`speech` 是 OpenAI `/audio/speech` 那一套（`input` + `voice` + `response_format`）；`chat` 是把要读的话放进 `messages` 里一条 `assistant`（MiMo 那种，`instructions` 会作为一条 `system` 消息带过去）；`minimax` 是 `text` + `voice_setting`/`audio_setting`，**返回 hex 编码的音频**（老账号要 `?GroupId=`，填 `tts.groupId` 即可）；`dashscope` 是 `input:{text,voice}`，**只返回 URL**，枢纽会再下载一次；`doubao` 是 `app`/`user`/`audio`/`request` 四段，鉴权头写 `Authorization: Bearer; <token>`（分号不是空格），`apiKey` 当 token、`tts.appId` 当 `app.appid`；`ark` 是方舟 Agent Plan 的 `req_params:{text,speaker,audio_params}`，头里认 `X-Api-Key` + `X-Api-Resource-Id`（**不用 Bearer**），返回是**分块 JSON 流**（每行一个对象，`data` 是 base64 片段，`code:20000000` 结束），音色字段叫 `speaker`；`plugin` 不打请求。**路径与请求体都要对上**——只改路径不改形状，只会从 404 变成 400；返回里没有音频时，错误会把实际收到的顶层字段列出来，照着改。
+`shape` 一共六档：`speech` 是 OpenAI `/audio/speech` 那一套（`input` + `voice` + `response_format`）；`chat` 是把要读的话放进 `messages` 里一条 `assistant`（MiMo 那种，`instructions` 会作为一条 `system` 消息带过去）；`minimax` 是 `text` + `voice_setting`/`audio_setting`，**返回 hex 编码的音频**（老账号要 `?GroupId=`，填 `tts.groupId` 即可）；`doubao` 是 `app`/`user`/`audio`/`request` 四段，鉴权头写 `Authorization: Bearer; <token>`（分号不是空格），`apiKey` 当 token、`tts.appId` 当 `app.appid`；`ark` 是方舟 Agent Plan 的 `req_params:{text,speaker,audio_params}`，头里认 `X-Api-Key` + `X-Api-Resource-Id`（**不用 Bearer**），返回是**分块 JSON 流**（每行一个对象，`data` 是 base64 片段，`code:20000000` 结束），音色字段叫 `speaker`；`plugin` 不打请求。**路径与请求体都要对上**——只改路径不改形状，只会从 404 变成 400；返回里没有音频时，错误会把实际收到的顶层字段列出来，照着改。
 
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `url`/`apiKey`，缺一个仍然是关（`provider=plugin` 时不看地址）。 |
-| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo`（Token Plan）/ `mimo-pay`（按量付费）/ `minimax` / `minimaxi`（海外站）/ `dashscope`（按量付费）/ `dashscope-plan`（Token Plan）/ `ark`（方舟 Agent Plan）/ `doubao`（豆包语音 V1）/ `plugin`。选了就按它定**地址与形状**（这两格由它决定、设置页会藏），**模型仍可换**；要连地址自己填就选 `custom`。 |
+| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo`（Token Plan）/ `mimo-pay`（按量付费）/ `minimax` / `minimaxi`（海外站）/ `ark`（方舟 Agent Plan）/ `doubao`（豆包语音 V1）/ `plugin`。选了就按它定**地址与形状**（这两格由它决定、设置页会藏），**模型仍可换**；要连地址自己填就选 `custom`。 |
 | `tts.plugin.tool` | 字符串 | 空 | **插件工具名**（`provider=plugin` 时）：多个用逗号分隔，如 `voice_tts`；留空＝按已知名单 + 名字里带 tts/speech 自动探测。 |
 | `tts.url` | 字符串 | 空 | **完整接口地址**：不自动拼路径。**仅 `provider=custom` 时生效**。 |
-| `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `dashscope` / `doubao` / `ark` / `plugin`。**仅 `provider=custom` 时生效**。 |
+| `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `doubao` / `ark` / `plugin`。**仅 `provider=custom` 时生效**。 |
 | `tts.apiKey` | 字符串 | 空 | **API Key（凭据）**：留空＝不改。只进 `Authorization` 头，绝不进请求体（豆包例外：它要求 body 里也放一份 token）。 |
 | `tts.appId` | 字符串 | 空 | **AppID**：只有豆包语音要（`app.appid`），缺了算没配全。 |
 | `tts.cluster` | 字符串 | 空 | **Cluster**：只有豆包语音要，留空按 `volcano_tts`。 |
 | `tts.groupId` | 字符串 | 空 | **GroupId**：只有老版 MiniMax 要，填了就拼成 `?GroupId=xxx`。 |
 | `tts.resourceId` | 字符串 | 空 | **Resource-Id**：只有方舟 Agent Plan 用（`X-Api-Resource-Id`），TTS 模型是 `seed-tts-2.0`；留空按预设。 |
 | `tts.model` | 字符串 | 空 | **模型名**：每家都生效、**手填**（不给下拉，各家模型名变化太快，选项表只会让它过期）。留空用预设默认。例：`speech-02-turbo`、`mimo-v2.5-tts`、`qwen-tts`、`gpt-4o-mini-tts`。方舟 / 豆包不吃模型名（那两家的「型号」是 `resourceId` 与接入点）。 |
-| `tts.voice` | 字符串 | 空 | **音色**：没有默认值，填了才进请求体；不做枚举校验。 |
+| `tts.voice` | 字符串 | 空 | **音色**：没有默认值，填了才进请求体；不做枚举校验。小米 MiMo 三种模型规矩不同（见下表）：普通模型填内置音色，`voicedesign` 填一段音色描述（作为 `user` 消息发出），`voiceclone` 不用填（改填 `refAudio`，走 `audio.voice` 的裸 base64）。 |
+
+
+小米 MiMo 的三个 TTS 模型走同一个 `chat/completions`，但规矩各不相同（官方文档：<https://mimo.mi.com/static/docs/api/audio/tts.md>）：
+
+| 模型 | 音色怎么给 | 发出去的消息 | 备注 |
+| --- | --- | --- | --- |
+| `mimo-v2.5-tts` | `tts.voice` 填内置音色（`mimo_default`、冰糖、茉莉、苏打、白桦、Mia、Chloe、Milo、Dean） | 一条 `assistant`（正文）；音色在 `audio.voice` | 填一段描述会被当成无效音色，所以描述型内容会改走 `user` 消息 |
+| `mimo-v2.5-tts-voicedesign` | `tts.voice` 填**一段音色描述** | `user`（描述）+ `assistant`（正文） | **不能带 `audio.voice`**，否则报 `audio.voice is not supported for voice design model`；缺描述会在本地就拒 |
+| `mimo-v2.5-tts-voiceclone` | 不用填 `tts.voice`，改填 `tts.refAudio`（mp3/wav 文件或 data URL） | `assistant`（正文） | 参考音频的**裸 base64** 放 `audio.voice`；缺参考音频会在本地就拒 |
 | `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`（QQ 最稳）。只影响落盘扩展名与 `speech` 形状的 `response_format`。 |
 | `tts.speed` | 数字 | 1 | **语速**：1＝原速；只在 ≠1 时才往请求体里带。 |
 | `tts.instructions` | 字符串 | 空 | **风格/音色提示**：`speech` 里作 `instructions` 字段，`chat` 里作一条 `system` 消息；留空＝不发。 |

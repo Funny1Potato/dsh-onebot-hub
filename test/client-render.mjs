@@ -339,6 +339,23 @@ await check('布局自适应：标签列按比例分、窄容器整栏堆叠（�
   }
 });
 
+await check('保存按钮吸顶：标题行与工具条包在 oh-sticky 里，滚到哪都够得着', () => {
+  const app = boot(BASE_VALUE);
+  const tree = app.render();
+  const clsOf = (node) => String((node && node.props && node.props.className) || '');
+  let stick;
+  walk(tree, (node) => { if (!stick && node.type === 'div' && clsOf(node) === 'oh-sticky') stick = node; });
+  assert.ok(stick, '没找到 oh-sticky 吸顶块');
+  const sheet = textOf((tree.children || []).find((child) => child && child.type === 'style')
+    || (() => { let st; walk(tree, (n) => { if (!st && n.type === 'style') st = n; }); return st; })());
+  assert.ok(/\.oh-sticky\{position:sticky/.test(sheet), `样式表里要有 position:sticky：${sheet.slice(0, 120)}`);
+  assert.ok(/top:0/.test(sheet), '吸顶要贴到滚动区顶部');
+  // 保存按钮必须在这块里面，否则"固定"只是在固定一个空壳。
+  const save = [];
+  walk(stick, (node) => { if (node.type === 'button' && String(textOf(node) || '').startsWith('保存')) save.push(node); });
+  assert.ok(save.length > 0, '保存按钮不在吸顶块里');
+});
+
 await check('过滤框同时认配置键与中文名（记得住"看图"记不住 vision.mode）', () => {
   const app = boot(BASE_VALUE);
   const box = () => {

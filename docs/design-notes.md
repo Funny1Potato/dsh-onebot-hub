@@ -839,9 +839,9 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   - 顺手补的：OpenAI 官方那档的默认模型从空改成 `tts-1`——模型名一藏，用户就没地方填了，四家都带默认值、只有它空着，等于选了就报错。
   - 测试：`test/tts.mjs` 26 → **27**（预设盖过手填、custom 才听手填、认不出的服务商仍按 custom、plugin 形状、OpenAI 默认模型），`test/client-render.mjs` 24 → **25**（选了 mimo 三格消失、音色仍在、切回 custom 三格回来且旧值还在），全量 `npm test` 绿（load-check 89/89、client-render 25/25、tts 27/27）。
 
-- **同一家的两种计费方式是两个选项（用户 m30030「一些服务商如小米、阿里云的token plan和按量付费的请求地址是不一样的，注意一下，可以分成多个选项」）**：这是"预设"这个设计第一次真正付账的地方——上一版把 `mimo` 与 `dashscope` 各当成"一家一条"，而它们的 **Token Plan 与按量付费根本是两个 host**：小米按量付费是 `api.xiaomimimo.com`、Token Plan 是 `token-plan-{cn,sgp,ams}.xiaomimimo.com`；百炼按量付费是 `dashscope.aliyuncs.com`，Token Plan 走 `token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode`（连形状都不一样：一个原生 `multimodal-generation`、一个 OpenAI 兼容的 `/audio/speech`）。两边官方文档都把"用错 Base URL"列为**配置错误**：请求会被路由到另一条计费通道，报出来的却是鉴权错或额度错——正好是用户看不出"我选错了计费方式"的那类失败。所以拆成 `mimo` / `mimo-pay`、`dashscope` / `dashscope-plan` 四条，label 上直接写计费方式，`note` 里写清"和另一种不通用、混用报的是鉴权错"。两条配套纪律：
+- **同一家的两种计费方式是两个选项（用户 m30030「一些服务商如小米、阿里云的token plan和按量付费的请求地址是不一样的，注意一下，可以分成多个选项」）**：这是"预设"这个设计第一次真正付账的地方——上一版把 `mimo` 与 `dashscope` 各当成"一家一条"，而它们的 **Token Plan 与按量付费根本是两个 host**：小米按量付费是 `api.xiaomimimo.com`、Token Plan 是 `token-plan-{cn,sgp,ams}.xiaomimimo.com`；百炼按量付费是 `dashscope.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer`，Token Plan 走 `token-plan.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer`（域名前缀是业务空间 ID，路径与形状完全相同）。两边官方文档都把"用错 Base URL"列为**配置错误**：请求会被路由到另一条计费通道，报出来的却是鉴权错或额度错——正好是用户看不出"我选错了计费方式"的那类失败。所以拆成 `mimo` / `mimo-pay` 等独立选项（百炼那两条已按用户 `m31611`「把百炼的支持去掉吧」下线），label 上直接写计费方式，`note` 里写清"和另一种不通用、混用报的是鉴权错"。两条配套纪律：
   ① **同一地址不许挂两个选项**（测试断言：`PROVIDER_IDS` 不重复、`url` 去重后数量不变）——两条一样的选项等于让用户再猜一次"这两条有什么区别"。
-  ② 区域变体（`sgp`/`ams`、`dashscope-intl`）**不做选项**，只在 `note` 里说一句"换成它，或者切自定义"。理由：区域会跟着账号变，而"自定义"已经在手边；枚举一多，下拉本身就变成新的查询工作。
+  ② 区域变体（`sgp`/`ams`）**不做选项**，只在 `note` 里说一句"换成它，或者切自定义"。理由：区域会跟着账号变，而"自定义"已经在手边；枚举一多，下拉本身就变成新的查询工作。
   - 测试：`test/tts.mjs` 27（新增两条计费方式地址不撞、id 与 url 去重）。
 
 - **把"没验证过的预设"全部验一遍（用户 m30073「其它的提供商检查过了吗」）**：上一版五家预设里，只有小米与百炼是有真机证据的，其余是照文档抄的。这次用**无密钥 POST 看状态码**把每条路由先验一遍（`404` = 这条路径不存在、`401/400` = 存在但缺凭据或字段、`000` = 这台机器连不上），再对着 400 的原文把形状试出来。三处结论：
@@ -857,6 +857,12 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   ③ **返回是分块 JSON 流**，一行一个对象，音频在每行 `data`（base64 片段），`code:20000000` 是结束标记——所以既不能当二进制读（会拿到一堆 `{`），也不能当单个 JSON 解析（第一行就已经是完整 JSON 了）。`#arkAudio` 单独走这条：按行切、跳 `[DONE]`、拼 `data`、`code>0` 且不等于结束码就把上游 `message` 原样抛出来。这条最容易踩：**结束码 20000000 在通用解析里会被当成"上游报错"**（因为它不是 0），所以它必须在 `#upstreamError` 之前被截住。
   - `resourceId` 跟着预设走（`resolveTtsTarget` 也返回它），所以选「火山方舟」只需填 `apiKey` 和音色；`tts.resourceId` 只在要换资源（比如声音复刻的模型 id）时才填。
   - 测试：`test/tts.mjs` 28 → **29**（分块按序拼回、`x-api-key`/`x-api-resource-id` 且无 authorization、`speaker` 与 `sample_rate:24000`、resourceId 可覆盖、流里 `code:45000001` 原样报、只有结束码没有 data 时要指向 Resource-Id 与 speaker），全量 `npm test` EXIT=0（load-check 89/89、smoke-core 96/96、client-render 25/25、tts 29/29）。
+
+- **百炼整个下线（用户 m31611「把百炼的支持去掉吧」）**：起因是真 key 实测——`compatible-mode/v1/audio/speech` 对它**任何 body** 都回 `400 url error, please check url`（兼容模式只服务 `chat/completions`；拿一个模型名去冒充才回 `Model not exist`，说明路径活着、只是那里没有 TTS）。换成业务路径 `/api/v1/services/audio/tts/SpeechSynthesizer` 后请求确实进到引擎了，但引擎回 `411 TTS speak operation failed`——三个音色、`mp3`/`wav`、SSE 全都一样，属于业务空间没开语音合成或音色不在授权范围，不是请求形状的问题。用户据此决定不再支持这家。
+  - 移除范围：`lib/audio/providers.js` 两条预设（`dashscope` / `dashscope-plan`）与 `SHAPE_HINTS.dashscope`；`lib/audio/tts.js` 的 `dashscope` 形状（`#dashscopeBody`、`SHAPES` 集合、形状写错时的提示文案）；`lib/client.js` 的两个下拉项与 `PROVIDER_EXTRA` 两行；测试里对应的两条用例与预设断言；`docs/config.md` 的两行表格与形状列表。
+  - 连带清理：`#audioIn` 里"百炼流式给 `base64`"的认法、注释里"百炼挂在 `multimodal-generation` 上"这类过期理由一并删掉——留下的注释若指向已删的代码，下一次改这块的人会照着它找半天。
+  - 旧配置兼容：`tts.provider` 写成 `dashscope`/`dashscope-plan` 时 `providerOf` 认不出，按既有规则退回 `custom`（不报错、不改用户的值），设置页会显示成自定义、地址留空——**不会静默拿一个错地址去打**。
+  - 测试：`test/tts.mjs` **40 → 38**（删两条百炼用例），新增一条反向断言「`PROVIDER_IDS` 里不许再有 `dashscope*`」，防止以后有人照着旧文档加回来。
 
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
