@@ -898,24 +898,40 @@ await check('读不到 configForms 时安静降级（页面给出文字，不抛
   assert.ok(reports.some((row) => row.kind === 'configForms'), '读失败要上报（分诊依据）');
 });
 
-await check('选了服务商就藏掉地址/形状/模型，切回自定义再露出来（`m29830`）', () => {
+await check('选了服务商就藏掉地址/形状，模型留着；别家的参数也不露（`m29830` / `m30480`）', () => {
   const value = {
     ...BASE_VALUE,
-    tts: { provider: 'mimo', url: 'https://old.example/v1/audio/speech', shape: 'speech', model: 'old-model', voice: 'zh_female_01' },
+    tts: { provider: 'mimo', url: 'https://old.example/v1/audio/speech', shape: 'speech', model: 'mimo-v2.5-tts', voice: 'zh_female_01', appId: 'a', cluster: 'c', groupId: 'g', resourceId: 'r' },
   };
   const app = boot(value);
   const hidden = controlsFor(app.render());
-  for (const key of ['tts.url', 'tts.shape', 'tts.model']) {
-    assert.ok(!hidden.has(key), `provider=mimo 时 ${key} 不该出现（它由预设决定，填了也不生效）`);
+  for (const key of ['tts.url', 'tts.shape']) {
+    assert.ok(!hidden.has(key), `provider=mimo 时 ${key} 不该出现（地址与形状由预设决定）`);
   }
+  // 每个服务商都要能选模型（同一家有 hd/turbo、voicedesign/tts 这些档）。
+  assert.ok(hidden.has('tts.model'), 'provider=mimo 时 tts.model 必须留着');
+  // 别家的参数一个都不许露出来。
+  for (const key of ['tts.appId', 'tts.cluster', 'tts.groupId', 'tts.resourceId']) {
+    assert.ok(!hidden.has(key), `provider=mimo 时 ${key} 是别家的参数，不该出现`);
+  }
+  assert.ok(!hidden.has('tts.plugin.tool'), '插件工具名只对 plugin 有意义');
   assert.ok(hidden.has('tts.voice'), '音色不在预设里，必须一直能改');
   assert.ok(hidden.has('tts.provider'), '服务商自己当然要在');
 
   // **跟着下拉立即变**，不等保存：否则选完还要再保存一次才消失，等于又让人猜一次。
-  hidden.get('tts.provider').props.onChange({ target: { value: 'custom' } });
+  hidden.get('tts.provider').props.onChange({ target: { value: 'doubao' } });
+  const doubao = controlsFor(app.render());
+  for (const key of ['tts.appId', 'tts.cluster']) assert.ok(doubao.has(key), `provider=doubao 时 ${key} 要出现`);
+  assert.ok(!doubao.has('tts.groupId'), 'provider=doubao 时 MiniMax 的 groupId 不该出现');
+  assert.ok(!doubao.has('tts.resourceId'), 'provider=doubao 时方舟的 resourceId 不该出现');
+
+  doubao.get('tts.provider').props.onChange({ target: { value: 'custom' } });
   const shown = controlsFor(app.render());
   for (const key of ['tts.url', 'tts.shape', 'tts.model']) {
     assert.ok(shown.has(key), `切回 custom 后 ${key} 要回来`);
+  }
+  for (const key of ['tts.appId', 'tts.cluster', 'tts.groupId', 'tts.resourceId']) {
+    assert.ok(shown.has(key), `切回 custom 后 ${key} 要给出来（手填的人得找得到地方）`);
   }
   assert.equal(String(shown.get('tts.url').props.value), 'https://old.example/v1/audio/speech', '旧值没被清掉，切回来还在');
 });

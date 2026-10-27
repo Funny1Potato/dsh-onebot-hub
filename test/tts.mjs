@@ -225,7 +225,7 @@ t('JSON 返回（中转站常见）：base64 与 url 两条路都认', async () 
 
 // ---- chat 形状（小米 MiMo 这类）-----------------------------------------------
 
-t('chat 形状：要读的话进 messages 的 assistant，instructions 变 system', async () => {
+t('chat 形状：只发 assistant，绝不带 system 角色（小米 TTS 模型不收）', async () => {
   const f = fakeFetch(() => ({
     ok: true,
     status: 200,
@@ -245,13 +245,11 @@ t('chat 形状：要读的话进 messages 的 assistant，instructions 变 syste
   assert.equal(r.bytes, AUDIO.length);
   const [call] = f.calls;
   assert.equal(call.url, 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions');
-  assert.deepEqual(call.body.messages, [
-    { role: 'system', content: '温柔的女声，语速偏慢' },
-    { role: 'assistant', content: '今晚早点睡' },
-  ]);
+  assert.deepEqual(call.body.messages, [{ role: 'assistant', content: '今晚早点睡' }], '真机 400：messages[0] system role is not allowed for TTS model');
+  assert.ok(!call.body.messages.some((m) => m.role === 'system'), 'chat 形状一个 system 都不能有');
   assert.equal(call.body.input, undefined, 'chat 形状不该有 input');
   assert.equal(call.body.response_format, undefined, 'chat 形状不该有 response_format');
-  assert.equal(call.body.voice, undefined, '音色没填就不该带这个字段');
+  assert.equal(call.body.voice, '温柔的女声，语速偏慢', '音色没填时，instructions 顶到 voice 上');
   assert.equal(call.body.model, 'mimo-v2.5-tts-voicedesign');
 });
 
@@ -643,13 +641,18 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   }
 });
 
-t('resolveTtsTarget：选了服务商就整套听它的，只有 custom 才用用户填的（`m29830`）', async () => {
+t('resolveTtsTarget：地址与形状听服务商，模型听用户（`m29830` / `m30480`）', async () => {
   const { resolveTtsTarget } = await import('../lib/audio/providers.js');
-  // 选了一家：手填的三项一律不算数（设置页已经把这三格藏了，代码不能再听那些看不见的旧值）
+  // 选了一家：地址/形状由它决定，手填的旧地址不算数（看不见的配置不许管事）；
+  // 但模型是可以换的——同一家有 hd/turbo、voicedesign/tts 这些档，不让人换等于把选择成本还回去。
   assert.deepEqual(
-    resolveTtsTarget({ provider: 'mimo', url: 'https://old.example/audio/speech', shape: 'speech', model: 'old-model' }),
-    { provider: 'mimo', url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions', shape: 'chat', model: 'mimo-v2.5-tts-voicedesign', resourceId: '' },
+    resolveTtsTarget({ provider: 'mimo', url: 'https://old.example/audio/speech', shape: 'speech', model: 'mimo-v2.5-tts' }),
+    { provider: 'mimo', url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions', shape: 'chat', model: 'mimo-v2.5-tts', resourceId: '' },
   );
+  // 模型留空才回落到预设默认
+  assert.equal(resolveTtsTarget({ provider: 'mimo', model: '' }).model, 'mimo-v2.5-tts-voicedesign');
+  assert.equal(resolveTtsTarget({ provider: 'ark' }).resourceId, 'seed-tts-2.0');
+  assert.equal(resolveTtsTarget({ provider: 'ark', resourceId: 'seed-tts-2.0-replica' }).resourceId, 'seed-tts-2.0-replica');
   // custom：用户填的才算数，形状认不出退回 speech
   assert.deepEqual(
     resolveTtsTarget({ provider: 'custom', url: ' https://self.example/v1/tts ', shape: 'chat', model: 'my-model' }),

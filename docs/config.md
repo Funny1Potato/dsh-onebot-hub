@@ -315,7 +315,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 地址是**一整个 URL**、请求体形状可选：`onebot_reply` 里写 `{"type":"tts","text":"…"}` 就在发送前当场合成语音。音色不枚举（兼容服务的自定义音色直接填）；要"照这个声音读"，给一段参考音频即可（字段名可配，各家不一样）。
 
-`provider` 是**服务商下拉**：选了哪家就**整套按它来**——地址、形状、模型都由预设决定，设置页会把那三格藏起来，`tts.url` / `tts.shape` / `tts.model` 只在 `custom` 下生效。想自己填（自建中转、同一家的另一区域、改名后的模型）就把服务商切回 `custom`，那时填的才算数；旧值不会被清掉，切回来还在。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
+`provider` 是**服务商下拉**：选了哪家，**接口地址与请求形状**由它决定（这两格会藏起来，`tts.url` / `tts.shape` 只在 `custom` 下生效），**这一家不用的参数也不会显示**（`appId`/`cluster` 只在豆包、`groupId` 只在 MiniMax、`resourceId` 只在方舟）。**模型仍然可以换**：`tts.model` 每家都显示，留空用预设默认——同一家常有多档（`speech-02-hd`/`turbo`、`voicedesign`/`tts`），不让人换等于把选择成本还回去。想连地址一起自己填（自建中转、同一家的另一区域）就把服务商切回 `custom`，那时填的才算数；旧值不会被清掉，切回来还在。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
 
 | 服务商 | `provider` 取值 | 地址 | 形状 | 默认模型 |
 | --- | --- | --- | --- | --- |
@@ -337,7 +337,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `url`/`apiKey`，缺一个仍然是关（`provider=plugin` 时不看地址）。 |
-| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo`（Token Plan）/ `mimo-pay`（按量付费）/ `minimax` / `dashscope`（按量付费）/ `dashscope-plan`（Token Plan）/ `ark` / `plugin`。选了就整套按它来（下面三项由它决定，设置页会藏起来）；要自己填就选 `custom`。 |
+| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo`（Token Plan）/ `mimo-pay`（按量付费）/ `minimax` / `minimaxi`（海外站）/ `dashscope`（按量付费）/ `dashscope-plan`（Token Plan）/ `ark`（方舟 Agent Plan）/ `doubao`（豆包语音 V1）/ `plugin`。选了就按它定**地址与形状**（这两格由它决定、设置页会藏），**模型仍可换**；要连地址自己填就选 `custom`。 |
 | `tts.plugin.tool` | 字符串 | 空 | **插件工具名**（`provider=plugin` 时）：多个用逗号分隔，如 `voice_tts`；留空＝按已知名单 + 名字里带 tts/speech 自动探测。 |
 | `tts.url` | 字符串 | 空 | **完整接口地址**：不自动拼路径。**仅 `provider=custom` 时生效**。 |
 | `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `dashscope` / `doubao` / `ark` / `plugin`。**仅 `provider=custom` 时生效**。 |
@@ -346,7 +346,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | `tts.cluster` | 字符串 | 空 | **Cluster**：只有豆包语音要，留空按 `volcano_tts`。 |
 | `tts.groupId` | 字符串 | 空 | **GroupId**：只有老版 MiniMax 要，填了就拼成 `?GroupId=xxx`。 |
 | `tts.resourceId` | 字符串 | 空 | **Resource-Id**：只有方舟 Agent Plan 用（`X-Api-Resource-Id`），TTS 模型是 `seed-tts-2.0`；留空按预设。 |
-| `tts.model` | 字符串 | 空 | **模型名**：留空就不往请求体里带。**仅 `provider=custom` 时生效**。 |
+| `tts.model` | 字符串 | 空 | **模型名**：每家都生效，留空用预设默认（例：`speech-02-turbo`、`mimo-v2.5-tts`、`qwen-tts`、`gpt-4o-mini-tts`）。方舟 / 豆包不吃模型名（那两家的「型号」是 `resourceId` 与接入点）。 |
 | `tts.voice` | 字符串 | 空 | **音色**：没有默认值，填了才进请求体；不做枚举校验。 |
 | `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`（QQ 最稳）。只影响落盘扩展名与 `speech` 形状的 `response_format`。 |
 | `tts.speed` | 数字 | 1 | **语速**：1＝原速；只在 ≠1 时才往请求体里带。 |

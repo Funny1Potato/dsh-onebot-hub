@@ -39,7 +39,7 @@ const [
   { DOWNSTREAM_TYPES },
   { MODEL_LIST_PATH },
   { PERSONA_PATH },
-  { PROVIDER_IDS, SHAPE_IDS },
+  { PROVIDER_IDS, SHAPE_IDS, TTS_MODELS, PROVIDER_FIELDS },
 ] = await Promise.all([
   import('../lib/agent/policy.js'),
   import('../lib/vision.js'),
@@ -226,6 +226,8 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
     'memory.isolation.privateFacts': PRIVATE_FACTS,
     'tts.provider': PROVIDER_IDS,
     'tts.shape': SHAPE_IDS,
+    // 模型下拉是并集（每家都能选模型，`m30480`），取值只认宿主那份 `TTS_MODELS`。
+    'tts.model': TTS_MODELS.map((item) => item.value),
   };
   for (const [key, values] of Object.entries(expect)) {
     const row = table[key];
@@ -238,6 +240,19 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
   }
   // 键集本身也要盯住：新增/去掉枚举键都该在这里显式过一遍（免得"以为加了其实没加"）。
   assert.deepEqual(Object.keys(table).sort(), Object.keys(expect).sort(), 'ENUM_OPTIONS 的键集与宿主枚举清单不一致');
+});
+
+check('client.js：服务商 → 额外参数 的对应表与宿主一致（不一致 = 该藏的没藏、该显示的没显示）', () => {
+  // 用户诉求（`m30480`）：选了某一家，就别再显示别家的参数。表在浏览器半侧只能抄一份，
+  // 所以这里逐项对齐宿主 `lib/audio/providers.js` 的 `PROVIDER_FIELDS`，防"改了一边忘了另一边"。
+  const clientText2 = fs.readFileSync(clientPath, 'utf8');
+  const m = clientText2.match(/const PROVIDER_EXTRA = (\{[\s\S]*?\n    \});/);
+  assert.ok(m, 'client.js 里找不到 PROVIDER_EXTRA');
+  const table = JSON.parse(m[1]);
+  assert.deepEqual(table, PROVIDER_FIELDS, '服务商额外参数表与宿主不一致');
+  // 表里出现的键必须都是真配置项，否则藏/显示都作用在一个不存在的字段上。
+  const all = new Set(Object.values(PROVIDER_FIELDS).flat());
+  for (const key of all) assert.ok(['appId', 'cluster', 'groupId', 'resourceId'].includes(key), `未知的额外参数 ${key}`);
 });
 
 check('client.js：模型清单路由的字面量与宿主那份一致（不一致 = 永远取不到清单）', () => {
