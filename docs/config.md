@@ -315,7 +315,7 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 
 地址是**一整个 URL**、请求体形状可选：`onebot_reply` 里写 `{"type":"tts","text":"…"}` 就在发送前当场合成语音。音色不枚举（兼容服务的自定义音色直接填）；要"照这个声音读"，给一段参考音频即可（字段名可配，各家不一样）。
 
-`provider` 是**服务商下拉**：选了哪家，就把「地址 / 形状 / 模型名」填成它那一套；**每一项仍然可以自己改**（自建中转、同一家的另一区域、改名后的模型，全靠"显式优先"活着）。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
+`provider` 是**服务商下拉**：选了哪家就**整套按它来**——地址、形状、模型都由预设决定，设置页会把那三格藏起来，`tts.url` / `tts.shape` / `tts.model` 只在 `custom` 下生效。想自己填（自建中转、同一家的另一区域、改名后的模型）就把服务商切回 `custom`，那时填的才算数；旧值不会被清掉，切回来还在。`custom`＝全自己填，`plugin`＝枢纽不合成、把第三方插件的语音工具放进模型工具面（和生图的 `engine: plugin` 同一条纪律）。
 
 | 服务商 | `provider` 取值 | 地址 | 形状 | 默认模型 |
 | --- | --- | --- | --- | --- |
@@ -331,12 +331,12 @@ agent 用 `onebot_invoke` / `onebot_relay_probe` 试探下游命令时，注入�
 | 键 | 类型 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `tts.enabled` | 布尔 | false | **语音合成**：默认关；开了还要配 `url`/`apiKey`，缺一个仍然是关（`provider=plugin` 时不看地址）。 |
-| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo` / `minimax` / `dashscope` / `ark` / `plugin`。选了就把下面三项填成默认值。 |
+| `tts.provider` | 字符串 | custom | **服务商**：`custom` / `openai` / `mimo` / `minimax` / `dashscope` / `ark` / `plugin`。选了就整套按它来（下面三项由它决定，设置页会藏起来）；要自己填就选 `custom`。 |
 | `tts.plugin.tool` | 字符串 | 空 | **插件工具名**（`provider=plugin` 时）：多个用逗号分隔，如 `voice_tts`；留空＝按已知名单 + 名字里带 tts/speech 自动探测。 |
-| `tts.url` | 字符串 | 空 | **完整接口地址**：不自动拼路径；留空才吃 `provider` 的预设。 |
-| `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `dashscope` / `ark` / `plugin`。 |
+| `tts.url` | 字符串 | 空 | **完整接口地址**：不自动拼路径。**仅 `provider=custom` 时生效**。 |
+| `tts.shape` | 字符串 | speech | **请求形状**：`speech` / `chat` / `minimax` / `dashscope` / `ark` / `plugin`。**仅 `provider=custom` 时生效**。 |
 | `tts.apiKey` | 字符串 | 空 | **API Key（凭据）**：留空＝不改。只进 `Authorization` 头，绝不进请求体。 |
-| `tts.model` | 字符串 | 空 | **模型名**：留空才吃 `provider` 的默认模型；填了按你的来。 |
+| `tts.model` | 字符串 | 空 | **模型名**：留空就不往请求体里带。**仅 `provider=custom` 时生效**。 |
 | `tts.voice` | 字符串 | 空 | **音色**：没有默认值，填了才进请求体；不做枚举校验。 |
 | `tts.format` | 字符串 | mp3 | **音频格式**：`mp3\|opus\|aac\|flac\|wav\|pcm`（QQ 最稳）。只影响落盘扩展名与 `speech` 形状的 `response_format`。 |
 | `tts.speed` | 数字 | 1 | **语速**：1＝原速；只在 ≠1 时才往请求体里带。 |

@@ -823,7 +823,7 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 
 - **地址改成"用户给全的 URL"、请求体分两种形状（用户 m29304 真机：小米 MiMo 的 TTS 在 `chat/completions` 上）**：上一版把路径写死成 `POST {baseUrl}/audio/speech`，等于替所有上游假定"OpenAI 那一套"。用户拿 curl 逐个试过：`api.xiaomimimo.com/v1/audio/speech` 与 `token-plan-cn.xiaomimimo.com/v1/audio/speech` **全是 404**（openresty 的默认页），而 `chat/completions` 回的是 400「messages must contain an assistant role for TTS model」——**路径不一样，请求体也不一样**。所以光把路径改成可配仍然不通，两件事得一起改：① `tts.url` 是**一整个 URL**，插件不再拼任何路径（拼路径等于替用户猜，猜错就是 404，而 404 的报错完全看不出是拼接错还是服务没有）；② 新增 `tts.shape`——`speech` 是原来那套（`input` + `voice` + `response_format`），`chat` 把要读的话放进 `messages` 里一条 `assistant`，`instructions` 则作为一条 `system`（`voicedesign` 这类"用文字描述音色"的模型正好需要它）。返回侧跟着多认三处：`choices[0].message.audio.data`（base64）、`choices[0].message.audio.url`、以及 `message.content` 里直接塞 base64 或 URL 的实现——`content` 里本来就是正常文字，所以用"长度 > 256 且整串都是 base64 字符"来区分，短字符串永远不当音频。**默认值一并清空**：`model` 与 `voice` 从 `tts-1`/`alloy` 改成空，空就不出现在请求体里（各家叫法不同，填一个 OpenAI 的名字给别家反而是噪声）；`format` 保留 `mp3`，但它现在只影响落盘扩展名与 `speech` 形状的 `response_format`。**形状猜错时不许让用户再猜一次**：找不到音频的错误里会列出实际收到的**顶层字段**（`顶层字段：id、object、choices…`），`speech` 形状收到 chat 的返回时再追加一句"把 `tts.shape` 改成 chat"。参考音频只在 `speech` 形状里带（`chat` 那套没有公认的克隆字段，硬塞多半 400），工具描述里明写这一点。测试：`test/tts.mjs` 16 → **20**（chat 的 `messages` 形状与 `system` 位置、没 instructions 时只有一条 assistant、`audio.url` 也能取、形状错时的指路、找不到音频时列出字段），全量 `npm test` 绿。
 
-- **语音合成补服务商下拉 + "交给第三方插件"档（用户 m29544「每种功能的接口都加个服务商的下拉框吧」、m29571「再参考ai生图功能的设计，留一个调用第三方插件工具的选择」）**：上一版只有"地址 + 形状 + 模型"三个空，等于把"这家怎么填"的查询工作全部甩给用户（MiMo 那次就是逐个 curl 试出来的）。这次补 `tts.provider` 六选一 + plugin 档，**但刻意不引入适配器类**：这五家的差异几乎全在请求体与返回形状上，而形状本来就是可配项，所以预设只登记三样——地址、形状、默认模型，选了下拉就等于填好这三项。**每一项仍然可改，且显式写的永远优先**（`cfg.tts.url = 显式值 || 预设值`）：自建中转、同一家的另一区域、改名后的模型，全靠这条活着——预设是"填空助手"，不是"托管"。四处取舍：
+- **语音合成补服务商下拉 + "交给第三方插件"档（用户 m29544「每种功能的接口都加个服务商的下拉框吧」、m29571「再参考ai生图功能的设计，留一个调用第三方插件工具的选择」）**：上一版只有"地址 + 形状 + 模型"三个空，等于把"这家怎么填"的查询工作全部甩给用户（MiMo 那次就是逐个 curl 试出来的）。这次补 `tts.provider` 六选一 + plugin 档，**但刻意不引入适配器类**：这五家的差异几乎全在请求体与返回形状上，而形状本来就是可配项，所以预设只登记三样——地址、形状、默认模型，选了下拉就等于填好这三项。四处取舍：
   ① **地址继续是一整个 URL**，不拼任何路径。拼路径等于替用户猜，猜错的报错（404）完全看不出是拼接错还是服务没有。
   ② **新增三档形状**（`minimax` / `dashscope` / `ark`），返回侧跟着多认四种挂法：`data.audio` 的 **hex**（MiniMax 不是 base64，按 base64 解会得到一堆噪声字节，所以 `decodeAudio` 按形状选姿势、解出来是空的再换一种试）、`output.audio.data`/`b64_json`（百炼）、`data` 直接是串（方舟）、`output.audio.url`（只给 URL 的，枢纽再下载一次）。挑音频的顺序是"本体优先于 URL"——本体已经在手，没必要再取一次。
   ③ **plugin 档与生图的 `engine: plugin` 同构**：枢纽不合成，只把第三方语音工具（`voice_tts` 这类）放进模型工具面（`tts.plugin.tool` 可配，留空按已知名单 → 名字里带 tts/speech 自动探测，结果只 log 一次），模型自己调、再把文件按 `record` 段发。与生图唯一的不同在于"提醒"：`tts` 段在 plugin 档下的失败回执**直接写出下一步**——"用 `voice_tts` 生成音频文件，再按 `{"type":"record"}` 段发出去"。让模型猜"为什么说了没声音"是最贵的失败。
@@ -831,6 +831,13 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   - 设置页：`tts.provider` / `tts.shape` 两个枚举进 `ENUM_OPTIONS`（带"自定义…"逃生口），`client-manifest` 的枚举键集与取值同时加两条，防两边漂移（`test/client-manifest.mjs` 16/16）。
   - 测试：`test/tts.mjs` 20 → **26**（minimax 的 hex 往返、dashscope 的两次请求与 `input.voice`、ark 的平铺体与 base64、SSE 返回、plugin 档"零请求 + 说出工具名与 record"、provider 预设表完整性），全量 `npm test` 绿（load-check 89/89、smoke-core 96/96、reply 25/25）。
   - 分诊经验：真机连不上时先看**状态码**再改代码——`404` 是路径不对、`400` 是请求体不对、`401` 才是密钥。这三者混在一起猜，会把"路径错"当成"密钥错"改上半小时。
+
+- **选了服务商之后，那三格就不该再露出来（用户 m29830「既然提供了provider，那一些请求形状、请求地址之类的就不需要再手动填写/选择了，仅在选择自定义的时候修改即可」）**：上一版的规则是"显式写的永远优先"（`cfg.tts.url = 显式值 || 预设值`），本意是保住自建中转与改名后的模型，但和下拉摆在一起就变成了**看不见的配置在管事**：设置页为了少让人填而把三格藏起来之后，那三个藏在文件里的旧值照样生效——更糟的是用户在别家下面改过 `model`，切到 MiMo 时它还在，而界面上根本看不到这几个字。所以规则反过来：**选了谁就按谁，只有 `custom` 才用用户填的**（`resolveTtsTarget` 一处收口，`lib/index.js` 的 `cfg.tts` 三项都从它取）。三个决定：
+  ① **藏掉而不是解释**。三格在非 `custom` 下不渲染（`lib/client.js` 的 `presetHidden`），判据跟着**正在编辑的值**走（`edits` 优先）——选完下拉当场消失，不等保存；否则"选完还要再保存一次才生效"又是一个要让人猜的状态。
+  ② **旧值不清掉**。切回 `custom` 时原样回来（`test/client-render.mjs` 断言了这一点）：清掉才是不可逆的破坏，而"留着但不生效"既安全又能反悔。
+  ③ **`plugin` 也藏**。那条命令根本不打请求，地址与形状对它没有意义；只有模型名在"给它一点提示"的意义上勉强有用，但一个半有用的空格比没有更让人困惑。
+  - 顺手补的：OpenAI 官方那档的默认模型从空改成 `tts-1`——模型名一藏，用户就没地方填了，四家都带默认值、只有它空着，等于选了就报错。
+  - 测试：`test/tts.mjs` 26 → **27**（预设盖过手填、custom 才听手填、认不出的服务商仍按 custom、plugin 形状、OpenAI 默认模型），`test/client-render.mjs` 24 → **25**（选了 mimo 三格消失、音色仍在、切回 custom 三格回来且旧值还在），全量 `npm test` 绿（load-check 89/89、client-render 25/25、tts 27/27）。
 
 ## 10. 相关文档
 - 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）

@@ -487,6 +487,27 @@ t('provider 预设：认得的给地址/形状/模型，认不得的退回自定
   }
 });
 
+t('resolveTtsTarget：选了服务商就整套听它的，只有 custom 才用用户填的（`m29830`）', async () => {
+  const { resolveTtsTarget } = await import('../lib/audio/providers.js');
+  // 选了一家：手填的三项一律不算数（设置页已经把这三格藏了，代码不能再听那些看不见的旧值）
+  assert.deepEqual(
+    resolveTtsTarget({ provider: 'mimo', url: 'https://old.example/audio/speech', shape: 'speech', model: 'old-model' }),
+    { provider: 'mimo', url: 'https://token-plan-cn.xiaomimimo.com/v1/chat/completions', shape: 'chat', model: 'mimo-v2.5-tts-voicedesign' },
+  );
+  // custom：用户填的才算数，形状认不出退回 speech
+  assert.deepEqual(
+    resolveTtsTarget({ provider: 'custom', url: ' https://self.example/v1/tts ', shape: 'chat', model: 'my-model' }),
+    { provider: 'custom', url: 'https://self.example/v1/tts', shape: 'chat', model: 'my-model' },
+  );
+  assert.equal(resolveTtsTarget({ provider: 'custom', url: 'u', shape: '不认识的形状' }).shape, 'speech');
+  // 认不出的服务商按 custom 处理（依旧用用户填的，不静默换成别家）
+  assert.equal(resolveTtsTarget({ provider: '某家', url: 'https://x.example/tts' }).url, 'https://x.example/tts');
+  // plugin 不打请求，形状固定成 plugin
+  assert.equal(resolveTtsTarget({ provider: 'plugin' }).shape, 'plugin');
+  // OpenAI 官方那条要能开箱用（模型名不能是空）
+  assert.equal(resolveTtsTarget({ provider: 'openai' }).model, 'tts-1');
+});
+
 // ---- 汇总 ---------------------------------------------------------------------
 
 await Promise.all(pending);

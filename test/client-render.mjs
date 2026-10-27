@@ -898,6 +898,28 @@ await check('读不到 configForms 时安静降级（页面给出文字，不抛
   assert.ok(reports.some((row) => row.kind === 'configForms'), '读失败要上报（分诊依据）');
 });
 
+await check('选了服务商就藏掉地址/形状/模型，切回自定义再露出来（`m29830`）', () => {
+  const value = {
+    ...BASE_VALUE,
+    tts: { provider: 'mimo', url: 'https://old.example/v1/audio/speech', shape: 'speech', model: 'old-model', voice: 'zh_female_01' },
+  };
+  const app = boot(value);
+  const hidden = controlsFor(app.render());
+  for (const key of ['tts.url', 'tts.shape', 'tts.model']) {
+    assert.ok(!hidden.has(key), `provider=mimo 时 ${key} 不该出现（它由预设决定，填了也不生效）`);
+  }
+  assert.ok(hidden.has('tts.voice'), '音色不在预设里，必须一直能改');
+  assert.ok(hidden.has('tts.provider'), '服务商自己当然要在');
+
+  // **跟着下拉立即变**，不等保存：否则选完还要再保存一次才消失，等于又让人猜一次。
+  hidden.get('tts.provider').props.onChange({ target: { value: 'custom' } });
+  const shown = controlsFor(app.render());
+  for (const key of ['tts.url', 'tts.shape', 'tts.model']) {
+    assert.ok(shown.has(key), `切回 custom 后 ${key} 要回来`);
+  }
+  assert.equal(String(shown.get('tts.url').props.value), 'https://old.example/v1/audio/speech', '旧值没被清掉，切回来还在');
+});
+
 const failed = results.filter((row) => !row.ok);
 for (const row of results) console.log(`${row.ok ? 'PASS' : 'FAIL'}  ${row.name}${row.ok ? '' : `  ← ${row.error}`}`);
 console.log(`\nclient-render: ${results.length - failed.length}/${results.length} 通过`);
