@@ -22,6 +22,7 @@ import { DEFAULT_GUIDANCE, Mind } from '../lib/mind.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { PERSONA_PATH, installPersonaRoute } from '../lib/persona/route.js';
+import { OFFICIAL_QR_PATH, installOfficialQrRoute } from '../lib/official/route.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
 import { COMMAND_SPECS } from '../lib/chat-commands.js';
 import { filterForScope, resolveIsolation, setGroupMembershipProvider } from '../lib/memory/isolation.js';
@@ -609,6 +610,30 @@ check('人设配置项已删：只剩 persona.enabled，旧键只记一句提示
   assert.equal(resolveConfig({}).persona.legacyKeys, undefined);
 });
 
+check('上游类型：默认 onebot，选 official 才算官方，老配置的 official.enabled 仍按 official（`m34751`）', () => {
+  // 扫码绑定的 appId/appSecret 存在插件状态里，配置文件里两个字段是空的——
+  // 早先这里判 `enabled && 有 appId && 有 appSecret` → 扫码成功也还是"关"，
+  // 官方那一路一次都不连，用户看到的就是"拿到凭据后一直连不上"（`m34664` 真机）。
+  const off = resolveConfig({});
+  assert.equal(off.upstreamType, 'onebot');
+  assert.equal(off.official.enabled, false);
+
+  const on = resolveConfig({ upstreamType: 'official' });
+  assert.equal(on.upstreamType, 'official');
+  assert.equal(on.official.enabled, true, '选了官方就是启用的，凭据由 Hub 从配置或扫码那份补');
+  assert.equal(on.official.appId, '');
+
+  // 老配置：只有 official.enabled: true → 仍然当官方（不能静默退回 OneBot，那会直接连不上）
+  const legacy = resolveConfig({ official: { enabled: true } });
+  assert.equal(legacy.upstreamType, 'official');
+  assert.equal(legacy.official.enabled, true);
+  assert.equal(legacy.official.legacyEnabled, true);
+  // 显式选了 onebot 就以新键为准，老键只是提醒
+  const both = resolveConfig({ upstreamType: 'onebot', official: { enabled: true } });
+  assert.equal(both.upstreamType, 'onebot');
+  assert.equal(both.official.enabled, false);
+});
+
 check('会话目录读的是解析后的 agentGroups/agentPrivates（真机形状，`m32493`）', () => {
   const cfg = resolveConfig({
     cross: { enabled: true, directory: 'names' },
@@ -1039,8 +1064,9 @@ check('下游接入端不再挂宿主 webServer：改由目标自己的地址监
 
 check('浏览器自诊断通道：上报路由 + head 注入', () => {
   // 路由：精确路径、每条各一份（重复 (kind,path) 在真宿主会抛错，这里防回归）。
-  // 三条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）。
-  assert.equal(recorded.routes.length, 3);
+  // 四条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）；
+  // ④ 设置页的官方通道扫码（m34313）。
+  assert.equal(recorded.routes.length, 4);
   assert.equal(recorded.routes[0].kind, 'exact');
   assert.equal(recorded.routes[0].path, CLIENT_PROBE_PATH);
   assert.equal(typeof recorded.routes[0].handler, 'function');
@@ -1053,6 +1079,11 @@ check('浏览器自诊断通道：上报路由 + head 注入', () => {
   assert.ok(personaRoute, `人设库路由没注册：${PERSONA_PATH}`);
   assert.equal(personaRoute.kind, 'exact');
   assert.equal(typeof personaRoute.handler, 'function');
+  // 官方扫码那条同理：设置页上的「扫码连接」按钮点下去，走的就是它。
+  const officialRoute = recorded.routes.find((route) => route.path === OFFICIAL_QR_PATH);
+  assert.ok(officialRoute, `官方扫码路由没注册：${OFFICIAL_QR_PATH}`);
+  assert.equal(officialRoute.kind, 'exact');
+  assert.equal(typeof officialRoute.handler, 'function');
   // 注入：监听 webserver/index-inject，往表里 push 一条 head 内的内联脚本。
   const injectEvent = recorded.onEvents.find((entry) => entry.name === 'webserver/index-inject');
   assert.ok(injectEvent, '应当监听 webserver/index-inject');

@@ -62,6 +62,8 @@
     }
   },
   "dependencies": {
+    "@tencent-connect/qqbot-connector": "^1.2.0",
+    "qrcode-generator": "^1.4.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -85,7 +87,7 @@
   ],
   "license": "MIT",
   "scripts": {
-    "test": "node test/smoke-core.mjs && node test/reply.mjs && node test/tts.mjs && node test/policy-modes.mjs && node test/chat-commands.mjs && node test/quota.mjs && node test/models.mjs && node test/memes.mjs && node test/persona.mjs && node test/anime.mjs && node test/media-gif.mjs && node test/imagegen.mjs && node test/patch-media.mjs && node test/tool-schema.mjs && node test/link-listener.mjs && node test/multi-downstream.mjs && node test/isolation.mjs && node test/client-manifest.mjs && node test/client-render.mjs && node test/client-probe.mjs && node test/m15-e2e.mjs && node --import ./test/register-stubs.mjs test/load-check.mjs",
+    "test": "node test/smoke-core.mjs && node test/reply.mjs && node test/tts.mjs && node test/policy-modes.mjs && node test/chat-commands.mjs && node test/quota.mjs && node test/models.mjs && node test/memes.mjs && node test/persona.mjs && node test/anime.mjs && node test/media-gif.mjs && node test/imagegen.mjs && node test/patch-media.mjs && node test/tool-schema.mjs && node test/link-listener.mjs && node test/multi-downstream.mjs && node test/isolation.mjs && node test/client-manifest.mjs && node test/client-render.mjs && node test/client-probe.mjs && node test/official.mjs && node test/official-qr.mjs && node test/m15-e2e.mjs && node --import ./test/register-stubs.mjs test/load-check.mjs",
     "test:core": "node test/smoke-core.mjs",
     "test:reply": "node test/reply.mjs",
     "test:tts": "node test/tts.mjs",

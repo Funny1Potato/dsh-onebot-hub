@@ -61,7 +61,7 @@ import {
 import { MemoryStore, memoryDedupeKey, normalizeMemoryText } from '../lib/memory/store.js';
 import { resolveIsolation } from '../lib/memory/isolation.js';
 import { applyMemoryOps, memoryBlocks } from '../lib/memory/writer.js';
-import { ActiveStore, buildShareContext, filterActive, renderActive, isActiveVisible } from '../lib/memory/active.js';
+import { ActiveStore, activeWhitelist, buildShareContext, filterActive, renderActive, isActiveVisible } from '../lib/memory/active.js';
 import { tokenize, RecallStore } from '../lib/memory/recall.js';
 import { decayStrength, isWeak, weakMessageIds } from '../lib/memory/decay.js';
 import { collectCues, cueKey, Reminders } from '../lib/memory/cues.js';
@@ -85,7 +85,7 @@ import {
   splitCommand,
 } from '../lib/learn.js';
 import { Mind, mediaTag } from '../lib/mind.js';
-import { mergePolicyMode, resolveAgentPolicy, sessionOverrideOf } from '../lib/agent/policy.js';
+import { mergePolicyMode, resolveAgentPolicy, sessionAllowlistOff, sessionOverrideOf } from '../lib/agent/policy.js';
 import { canRead, describeReadScope, parseTrustedPrivates } from '../lib/read-scope.js';
 
 let passed = 0;
@@ -1055,6 +1055,18 @@ t('活跃层：跨群共享要同时过白名单与"共同活跃群友"两关，
   assert.equal(view('group:55555').visible.length, 2, '自己的群两条都看得见');
   assert.equal(view('group:77777').visible.length, 2, 'balanced + 有共同活跃群友 ⇒ 跨群可共享');
   assert.equal(view('group:99999').visible.length, 0, '不在白名单里的群一条都拿不到');
+  // 官方上游下白名单整体关闭（`m34897`）：活跃层也得跟着放行，否则"配了一堆群"会让
+  // 共享面只剩那几个群——而官方那边根本收不到它们。
+  // 官方上游下"不生效"不等于"全放开"（`m35008` 用户定案：默认不共享，留开关）：
+  // 返回空集 = 活跃条目仍然在自己那个群看得见，但一条都不往外走。
+  const offNoShare = activeWhitelist({ upstreamType: 'official', agentGroups: { '1': {} } });
+  assert.ok(offNoShare instanceof Set && offNoShare.size === 0, '官方默认：不跨群共享');
+  assert.equal(
+    activeWhitelist({ upstreamType: 'official', agentGroups: { '1': {} }, official: { crossShare: true } }),
+    null,
+    '打开 crossShare 才全放开（null = 名单不启用）',
+  );
+  assert.ok(Array.isArray([...activeWhitelist({ agentGroups: { '1': {} } })]), '非官方时照旧按名单共享');
   assert.ok(view('group:99999').denied.every((d) => /not-in-whitelist/.test(d.reason)));
   assert.equal(view('private:10001').visible.length, 1, '私聊来源默认 privateFacts=never ⇒ 只在本私聊');
 
@@ -3182,6 +3194,13 @@ t('会话白名单：sessionOverrideOf / mergePolicyMode（m31030）', () => {
   assert.equal(sessionOverrideOf('group:99999', cfg), null, '功能启用中，没列出的群 = 拒');
   assert.equal(sessionOverrideOf('private:99999', cfg), null);
   assert.equal(sessionOverrideOf('unknown', cfg), null, '认不出的会话键不喂');
+  // 官方上游下白名单整个不生效（`m34897`）：开放平台那边已经限定了能收到哪些群与人。
+  // 否则本地名单里写的是真 QQ 号、官方通道是派生的虚拟号，两边对不上 = 一条都不喂。
+  const official = { ...cfg, upstreamType: 'official' };
+  assert.deepEqual(sessionOverrideOf('group:99999', official), {}, '官方上游：没列出来的群也放行');
+  assert.deepEqual(sessionOverrideOf('private:99999', official), {});
+  assert.equal(sessionAllowlistOff(official), true);
+  assert.equal(sessionAllowlistOff(cfg), false);
   // 两张名单都没写 = 功能没启用（老配置 / 测试桩）→ 放行；只写一张 → 另一类全拒。
   assert.deepEqual(sessionOverrideOf('group:55555', {}), {});
   assert.deepEqual(sessionOverrideOf('private:10001', null), {});

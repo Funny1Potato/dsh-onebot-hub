@@ -41,6 +41,7 @@ const [
   { DIRECTORY_MODES },
   { PERSONA_PATH },
   { PROVIDER_IDS, SHAPE_IDS, PROVIDER_FIELDS },
+  { UPSTREAM_TYPES },
 ] = await Promise.all([
   import('../lib/agent/policy.js'),
   import('../lib/vision.js'),
@@ -53,6 +54,7 @@ const [
   import('../lib/cross/directory.js'),
   import('../lib/persona/route.js'),
   import('../lib/audio/providers.js'),
+  import('../lib/upstream/official.js'),
 ]);
 
 /** 把 `const <marker> = {…}` 抠出来（括号配对，跳过字符串）并 JSON.parse。 */
@@ -227,6 +229,7 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
     'memory.isolation.level': ISOLATION_LEVELS,
     'memory.isolation.crossGroupFacts': CROSS_GROUP_FACTS,
     'memory.isolation.privateFacts': PRIVATE_FACTS,
+    upstreamType: UPSTREAM_TYPES,
     'tts.provider': PROVIDER_IDS,
     'tts.shape': SHAPE_IDS,
   };

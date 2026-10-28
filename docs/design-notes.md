@@ -885,8 +885,49 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
   - 档案枚举：`profiles.groups()` 新增。文件名是 `safeName(worldKey)`（`group:123` → `group_123`），**反推不回世界键**，所以从记录体的 `worldKey` 读；早年写坏的空记录直接跳过，不猜。
   - **`m32493` 自查抓到的三类错**（都是"测试在验证一个不存在的形状"）：① 目录读的是 `cfg.agent.groups`，而解析后的配置里根本没有 `agent` 这个键、只有 `agentGroups`/`agentPrivates` 两个对象映射——**私聊那一整排在生产里从来没渲染过**，测试里假 hub 用了那个不存在的形状所以全绿。② `agent.groups` 写成裸号码数组 `["111"]` 会被 `parseWhitelist` 静默丢掉（它只认 `{id:…}`），现在裸号码也认。③ `cross.channelSilentMs` 在配置层又被 `|| 600000` 把 0 吃回去（relay 侧早就按有限数判了）。三条都补了断言：load-check 加了"用 `resolveConfig` 真解析一遍再看目录"的用例，`smoke-core` 的假 hub 改用真形状。
   - 测试：`test/smoke-core.mjs` 97 → **99**（三档不出现、群内不列私聊 id、私聊里列全部 id 且自己那条标「这里」、`names` 无印象而 `full` 有、印象只给白名单、条数不够先留私聊、渲染层的标题/`这里`/`还有 N 个没列`），`test/client-manifest.mjs` 17、load-check **89 → 90**，全量 `npm test` EXIT=0（client-render 26/26、m15 230/230）。
+  - **官方通道阶段 1：附件与扫码**（`m34313`）。两件事都是"官方给的东西和 OneBot 的常识不一致"：
+    - **附件要先上传**：OneBot 侧一个 `image` 段给 URL 就完事，官方要 `POST /v2/groups|users/{id}/files` 换 `file_info`，再用 `msg_type: 7` + `media.file_info` 发。做法是**先全部上传、再按顺序发**——上传失败就整条不发，因为"文本已经发出去了、图没发出去、回执还说成功"是模型永远发现不了的那类错。公网地址直接交 `url` 让官方去拉（省一次下载），本地文件与 `base64://` 读成 `file_data`，超 `mediaMaxBytes`（默认 10MB）在**上传之前**拒——传一半失败会留下孤儿媒体。
+    - **图文不能混排**：官方一条消息只有一种 `msg_type`。所以带图的回复拆成"文本一条 + 每个附件一条"，并且**被动回复只挂在第一条**：同一个 `msg_id` 全生命周期 4 次额度，被附件吃掉的话这一轮就再也回不了话。
+    - **`toContent` 只喂非附件段**：图片单独发出去之后，正文里再留一个 `[图片]` 就是重复，而"给你 [图片]"在真机上看着像模型写错了。`validateSend` 也相应放宽——只认 `image` 的话纯语音会被判成"内容为空"。
+    - **扫码**：官方给了 `@tencent-connect/qqbot-connector`（`startQrConnect` 回调式，`onQrDisplayed` 给 URL）。三条取舍：① 凭据存插件状态（`official/credentials.json`）而不写回 `cordis.patch.yml`——配置文件的写权在宿主，插件去改有并发与格式两重风险；配置文件里显式写了的优先。② `displayQrCodeToConsole: false`：宿主是 GUI，二维码要出现在设置页上。③ **二维码自己画 PNG**：`qrcode-generator` 只算矩阵，PNG 由 `lib/official/qr.js` 手写四十行（灰度 + zlib），比为了出图拉 pngjs/yargs 那串依赖划算，出错的面也小。④ 重连走 `hub.reconnectOfficial()`——只重建官方那一路，不重跑 `#startRetention()`（那会把保留期定时器叠一份）。
+    - 测试：`test/official.mjs` 16 → **19**（附件先传后发、公网地址走 `url`、`base64://` 剥前缀、没 `file_info` 就不发、上传失败整条不发），新增 `test/official-qr.mjs` **7 例**（PNG 结构与可重复性、扫码三态、过期、缺依赖、`current/forget`），load-check 90/90。
 
 ## 10. 相关文档- 方案（完整版，按阅读顺序重排）：`../docs/dsh-onebot-hub-方案-完整版.md`（§0 一页纸 → §16 全知时间线、§17 用法学习、§18 透传保真度、§21 记忆/上下文/Agent 接入、§22 能力全覆盖、§23 聊天拟人化、§24 拟人化记忆、§19 M2 前置实验）
 - 方案（原稿，章节号与完整版一致）：`../docs/dsh-onebot-hub-方案.md`
 - OneBot v11 action 清单（标准 39 + 扩展 177，含"同名不同形"与"标准拿不到的信息"）：`../docs/onebot11-action-inventory.md`
 - OneBot v11 协议：`.research/onebot-11/`
+
+### 上游类型：一个下拉代替一个开关（`m34751`）
+
+**起因**：真机扫码绑定成功后官方通道一直连不上（`m34664`）。根因不是网络也不是凭据——是另一条链：扫码把 `appId`/`appSecret` 写进**插件状态**（`official/credentials.json`），配置文件里那两个字段是空的；而 `resolveConfig` 里判断的是 `official.enabled === true && 有 appId && 有 appSecret`。于是"扫到了码 + 开关是开的"依然解析成 `enabled: false`，`connectUpstream()` 根本走不到官方分支，用户看到的是一句"绑定成功"和一条永远连不上的通道。
+
+**改法**：把「官方通道开/关」这个独立开关删掉，上游改成**一个类型**：
+
+- `upstreamType: onebot | official`（默认 `onebot`），空串 = 没选过；
+- `cfg.official.enabled` 变成**派生值**（`upstreamType === 'official'`），hub 里那几处按它分流的地方一行不用改；
+- 凭据从哪儿来（配置文件 / 扫码那份）与原开关无关，判断"缺凭据"仍然在 `#connectOfficialUpstream()`；
+- 老配置的 `official.enabled: true` 兜底成 `upstreamType: official`，并在启动日志里说一句"这个键没了，请在设置页「基础」里改选"——直接换键会让老配置静默退回 OneBot，那是最坏的结果。
+
+为什么不是"加一个校验，扫码时顺手把 `official.enabled` 也写成 true"：那会留下两个能自相矛盾的状态（开关 true + 类型 onebot），而"上游只有一条"这件事本身就该用一个单值表达。同样的道理，设置页选 `official` 时把 `upstreamUrl` / `upstreamListen` / `upstreamSelfId` / `upstreamNickname` / `upstreamAccessToken` 全部隐藏，选 `onebot` 时隐藏 `official.appId` / `appSecret` / `sandbox`——两套字段同时显示，等于把"哪几个算数"的判断交给用户。
+
+顺带修了同一件事的另一面：扫码面板以前只报"已绑定应用 xxx"，不说"这会儿连没连上"，而这两件事在用户眼里是同一件事。现在路由把 `enabled` / `connected` 一起回给页面，面板据此写三种话（没选官方 / 选了但这会儿没连上 / 已连上）。
+
+### 官方上游下，会话白名单整个不生效（`m34897`）
+
+**理由**：QQ 开放平台那边已经限定了这台机器人能收到哪些群与 C2C（沙箱群、只允许的群与人），本地再叠一层 `agent.groups` / `agent.privates` 只会制造"配了却收不到消息"。这不是理论问题——官方通道给出的 id 是**派生的虚拟号**（`virtualId()`：`sha256(appId|kind|openid)` 落进 3e9–4e9），而本地名单里写的是真 QQ 号，两边永远对不上；不关掉它，切到官方之后是一条消息都喂不进模型的。
+
+**落点**（一处判断，三处跟着退）：
+
+- `lib/agent/policy.js` 新增 `sessionAllowlistOff(config)` → `config.upstreamType === 'official'`；`sessionOverrideOf()` 开头直接返回 `{}`（= 放行且无覆盖）。所有读白名单的地方（`#policyFor`、`hub.#enrichImages`、`hub.#willDescribe`、`mind` 的批量窗口入口与下游应答记账）都走它，所以只改一处即可。
+- `lib/memory/active.js` 的 `activeWhitelist()` 同样返回 `null`（= 名单未启用、不做限制）。否则"本地配了一堆群"会让活跃层的共享面只剩那几个群，而官方那边根本收不到它们——同一个根因的另一个出口。
+- `lib/mind.js` 的会话目录：私聊那一排改成 **配置 ∪ 档案**（人物 `groups` 里每个 `private:<id>` 都是一次真实的私聊）。官方模式下列表很可能是空的，只看配置的话私聊会从目录里整排消失；群那一排本来就已经并了档案，这次把私聊补齐成同一口径。
+
+**为什么不做成"把官方虚拟号自动写进白名单"**：那等于把开放平台的配置抄一份到本地，抄错了就是静默丢消息，而两边永远不会同时更新。能收到谁，让知道这件事的那一方去管。
+
+### 官方模式下活跃层默认不跨群（`official.crossShare`，`m35008`）
+
+白名单在官方上游下不生效（上一节），于是"哪些群之间能共享活跃条目"这个问题本身没有答案了。用户定的是**默认不共享、留开关**：
+
+- `activeWhitelist()` 在官方模式下返回**空集**而不是 `null`。这个区别是刻意的：`isActiveVisible()` 判同会话时早退放行，所以空集的效果正好是"自己那个群里照常看得见，一条都不往外走"；返回 `null` 则是"名单未启用、不做限制"，等于全放开——两个 intent 完全不同，不能混用同一个返回值。
+- 打开 `official.crossShare` 才返回 `null`（全放开）。
+- 只影响「进行中的话题 / 我正在做的事」这一层；长期记忆走隔离矩阵，人物档案走 `relatedUsersGate`，都另有规则。
