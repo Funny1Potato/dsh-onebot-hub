@@ -1580,7 +1580,10 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
   const hub = {
     config: {
       cross: { enabled: true, directory: 'names', rosterLimit: 30 },
-      agent: { groups: ['111', '222'], privates: ['945126014', '10001'] },
+      // 必须是 `resolveConfig` 解析后的**对象映射**形状：真机上根本没有 `agent.groups`
+      // 这个键，`m32493` 自查前这里用了不存在的形状，私聊那一排从来没渲染过却没被抓住。
+      agentGroups: { 111: {}, 222: {} },
+      agentPrivates: { 10001: {}, 945126014: {} },
     },
     profiles: { groups: () => groups, group: (k) => groups.find((g) => g.worldKey === k) ?? null },
   };
@@ -1597,12 +1600,13 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
     null,
   );
 
-  // 群里看到：按最近有人说话倒序，当前群标「这里」，别的私聊只报数量。
+  // 群里看到：按 id 升序（稳定，不按活跃——快照每回合重算，活跃序会把前缀缓存洗掉），
+  // 当前群标「这里」，别的私聊只报数量。
   const inGroup = mind.sessionDirectory('group:222');
-  assert.equal(inGroup.rows[0].text, '群 222（测试群）· 12 人');
-  assert.equal(inGroup.rows[0].mine, true);
-  assert.equal(inGroup.rows[1].text, '群 111（闲聊群）· 328 人');
-  assert.equal(inGroup.rows[1].mine, false);
+  assert.equal(inGroup.rows[0].text, '群 111（闲聊群）· 328 人');
+  assert.equal(inGroup.rows[0].mine, false);
+  assert.equal(inGroup.rows[1].text, '群 222（测试群）· 12 人');
+  assert.equal(inGroup.rows[1].mine, true);
   assert.equal(inGroup.rows.some((r) => /私聊/.test(r.text)), false, '群里不许出现私聊 id');
   assert.ok(inGroup.tail.includes('私聊 2 个，不列编号'));
 
@@ -1612,6 +1616,7 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
   assert.equal(privateRows.length, 2, '私聊视角要列出全部私聊编号');
   assert.equal(privateRows.find((r) => r.text === '私聊 945126014').mine, true);
   assert.equal(inPrivate.tail.some((x) => x.startsWith('私聊')), false);
+  assert.match(inPrivate.title, /2 个群 · 2 个私聊/);
   // 群里永远只报数量，`m28349`「群里看不到私聊」这条红线不破。
   assert.equal(inGroup.rows.some((r) => /私聊/.test(r.text)), false);
 
@@ -1624,6 +1629,30 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
   const withNote = full.sessionDirectory('group:111');
   assert.match(withNote.rows.find((r) => r.text.startsWith('群 111')).note, /^印象：聊显卡装机/);
   assert.equal(withNote.rows.find((r) => r.text.startsWith('群 222')).note, null);
+
+  // 印象只给"本来就能看到那边"的人：白名单私聊给，普通私聊不给（`m32493`）。
+  const fullUntrusted = new Mind({
+    hub: { ...hub, config: { ...hub.config, cross: { enabled: true, directory: 'full' }, isolation: { trustedPrivates: [] } } },
+    log: () => {},
+  });
+  const plainPrivate = fullUntrusted.sessionDirectory('private:10001');
+  assert.equal(plainPrivate.rows.every((r) => r.note === null), true, '普通私聊不该看到别处群的印象');
+  const fullTrusted = new Mind({
+    hub: { ...hub, config: { ...hub.config, cross: { enabled: true, directory: 'full' }, isolation: { trustedPrivates: ['10001'] } } },
+    log: () => {},
+  });
+  const trustedPrivate = fullTrusted.sessionDirectory('private:10001');
+  assert.match(trustedPrivate.rows.find((r) => r.text.startsWith('群 111')).note, /^印象：/);
+
+  // 私聊视角先给私聊留位：条数不够时宁可少列群，也要让私聊知道还有哪几个私聊（`m32493`）。
+  const tight = new Mind({
+    hub: { ...hub, config: { ...hub.config, cross: { enabled: true, directory: 'names', rosterLimit: 2 } } },
+    log: () => {},
+  });
+  const tightDir = tight.sessionDirectory('private:945126014');
+  assert.equal(tightDir.rows.filter((r) => /^私聊/.test(r.text)).length, 2, '两条私聊必须都列出来');
+  assert.equal(tightDir.rows.some((r) => /^群/.test(r.text)), false, '条数只够私聊时就不列群');
+  assert.ok(tightDir.tail.includes('还有 2 个没列'), JSON.stringify(tightDir.tail));
 });
 
 t('会话目录渲染：标题、当前会话标记与「还有 N 个没列」', () => {

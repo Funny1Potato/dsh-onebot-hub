@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url';
 
 import { Config, apply, auditClientModules, buildHubGuidance, claimImageQuota, describeCodeScopes, inject, makeReplyTool, name, normalizeTargets, parseCodeRoots, parseCodeScopes, parseListenTarget, parseModelRef, resolveConfig } from '../lib/index.js';
 import { ReplyBuffer } from '../lib/reply.js';
-import { DEFAULT_GUIDANCE } from '../lib/mind.js';
+import { DEFAULT_GUIDANCE, Mind } from '../lib/mind.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { PERSONA_PATH, installPersonaRoute } from '../lib/persona/route.js';
@@ -607,6 +607,25 @@ check('人设配置项已删：只剩 persona.enabled，旧键只记一句提示
   assert.equal(legacy.persona.enabled, true);
   // 没写就是没有 legacyKeys 这个字段（别给正常配置也挂一个空数组）。
   assert.equal(resolveConfig({}).persona.legacyKeys, undefined);
+});
+
+check('会话目录读的是解析后的 agentGroups/agentPrivates（真机形状，`m32493`）', () => {
+  const cfg = resolveConfig({
+    cross: { enabled: true, directory: 'names' },
+    agent: { groups: JSON.stringify([{ id: '111' }]), privates: JSON.stringify([{ id: '945126014' }]) },
+  });
+  // 解析后是对象映射，不是 array，也没有 `agent.groups`——目录必须按这个形状读才对得上真机。
+  assert.deepEqual(Object.keys(cfg.agentGroups), ['111']);
+  assert.deepEqual(Object.keys(cfg.agentPrivates), ['945126014']);
+  assert.equal(cfg.agent, undefined, '解析后的配置里没有 agent 这个键');
+  // 裸号码写法（`["111"]`）也要认：不认就是整份名单被静默丢掉，用户只会看到"配了没生效"。
+  assert.deepEqual(Object.keys(resolveConfig({ agent: { groups: JSON.stringify(['222']) } }).agentGroups), ['222']);
+  const mind = new Mind({ hub: { config: cfg, profiles: { groups: () => [] } }, log: () => {} });
+  const dir = mind.sessionDirectory('private:945126014');
+  assert.ok(dir, '私聊视角要有目录');
+  const row = dir.rows.find((r) => r.text === '私聊 945126014');
+  assert.ok(row, JSON.stringify(dir.rows));
+  assert.equal(row.mine, true);
 });
 
 check('上游监听地址自带路径：parseListenTarget 认 host:port/path，upstreamListenPath 已从 schema 移除', () => {
