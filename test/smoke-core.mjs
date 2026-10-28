@@ -1906,6 +1906,44 @@ t('语音转写：两个扩展都试，都拿不到就诚实说听不了（绝�
   });
 });
 
+t('远程下载有硬天花板：流式读到上限就停，绝不整包读进内存', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-cap-'));
+  const store = new JsonStore({ dir, debounceMs: 0 });
+  let cancelled = 0;
+  let reads = 0;
+  // 无限流：只有调用方主动停才会结束。老实现会把这块直接 arrayBuffer() 到 OOM。
+  const infinite = {
+    ok: true,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: async () => {
+          reads += 1;
+          return { done: false, value: new Uint8Array(1024 * 1024) };
+        },
+        cancel: async () => {
+          cancelled += 1;
+        },
+      }),
+    },
+  };
+  const media = new MediaStore({
+    storage: store,
+    linkId: 'up:test',
+    log: () => {},
+    maxBytes: 1024 * 1024,
+    fetchImpl: async () => infinite,
+  });
+
+  return Promise.resolve().then(async () => {
+    const ref = await media.resolve({ type: 'file', data: { file: 'http://x/big.bin' }, name: 'big.bin' }, { messageId: 41 });
+    assert.match(String(ref.error ?? ''), /太大|过大|上限/);
+    assert.equal(cancelled, 1, '到上限要主动取消读取，不能继续读完');
+    assert.ok(reads <= 80, `读取要尽早停（实际读了 ${reads} 块）`);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 t('媒体上限与关开关：超限只记元信息，关掉就只标注不落盘', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-limit-'));
   const store = new JsonStore({ dir, debounceMs: 0 });
@@ -2492,7 +2530,8 @@ t('成员名解析：@ 到没名字的人才问、问过就冷却、实现端不
   // ⑤ 实现端说"没有这个接口"就停机：继续问只是每次白等一次超时。
   const unsupported = new MemberResolver({
     profile: profiles,
-    callAction: async () => ({ ok: false, retcode: 1404, note: '未知的 action' }),
+    // 文案说"未知的 action"＝真的没有这个接口；注意不要拿 1404（目标不存在）当这个信号。
+    callAction: async () => ({ ok: false, retcode: 100, note: '未知的 action' }),
   });
   unsupported.note(groupMsg(6, ['30001', '30002', '30003']));
   const res = await unsupported.pump();
@@ -2504,6 +2543,11 @@ t('成员名解析：@ 到没名字的人才问、问过就冷却、实现端不
   // 注册表里已知"不支持"（source: registry）同样算停机信号。
   assert.equal(isUnsupported({ ok: false, source: 'registry' }), true);
   assert.equal(isUnsupported({ ok: false, retcode: 1400, note: '查无此人' }), false, '"查无此人"是失败，不是不支持');
+  // 1404 是"目标不存在"，不是"没有这个接口"：判错会永久停机（审查 P1-16）。
+  assert.equal(isUnsupported({ ok: false, retcode: 1404, note: '群成员不存在' }), false, '问错一个人不该把整条能力关掉');
+  assert.equal(isUnsupported({ ok: false, retcode: 1404, note: '找不到该群成员' }), false, '泛词"找不到"也不该当成不支持');
+  // 1400/102 只说明这次参数或实现端出了状况，别拿它停机。
+  assert.equal(isUnsupported({ ok: false, retcode: 1400, note: '内部错误' }), false);
   assert.equal(isUnsupported({ ok: true }), false);
 
   // ⑥ 关掉开关就完全不动。
@@ -3311,7 +3355,12 @@ t('跨会话转达：字条不说"已经发出去了"，包只能用一次且会
   // `m26026` 用户指出的问题：早一版字条写"已经放到这个群里了"，会让 B 以为消息已经发出去。
   // 现在是"东西在我这儿，是个包"——B 才是发送方。
   const letter = letterFor({ fromScope: 'group:123456789', fromLabel: '群 123456789', note: '这边有人在问显卡', packageId: 'pkg_7f3a' });
-  assert.match(letter, /【会话间的转达】来自 group:123456789（群 123456789）/);
+  assert.match(letter, /【会话间的转达】来自 群 123456789。/);
+  // 原始会话键不进字条：外部会话时它是宿主的 session-<uuid>，等于把内部 id 贴给对方模型看。
+  assert.ok(!letter.includes('group:123456789'), '字条不该出现原始会话键');
+  // 外部会话的 id 也必须被 masking 掉
+  const extLetter = letterFor({ fromScope: 'session-4760fa3f-7bf1-4e68-b3b7-a4dbc93cb7d4', fromLabel: '另一个会话（4760fa3f）' });
+  assert.ok(!extLetter.includes('4760fa3f-7bf1'), '字条不该出现完整外部会话 id');
   assert.match(letter, /递信的是那边的另一个你/);
   assert.match(letter, /pkg_7f3a/);
   assert.match(letter, /不想接就不用动/);
