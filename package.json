@@ -1,6 +1,6 @@
 {
   "name": "dsh-onebot-hub",
-  "version": "0.12.0-beta.6",
+  "version": "0.12.0-beta.7",
   "description": "OneBot v11 hub for DeepSeek Harness: connects to an upstream OneBot v11 implementation (forward WebSocket client) and serves/dials downstream bot implementations with the same protocol, relaying events and actions verbatim so DSH can observe every message and learn how each downstream bot is used.",
   "type": "module",
   "keywords": [
@@ -87,7 +87,7 @@
   ],
   "license": "MIT",
   "scripts": {
-    "test": "node test/smoke-core.mjs && node test/reply.mjs && node test/tts.mjs && node test/policy-modes.mjs && node test/chat-commands.mjs && node test/quota.mjs && node test/models.mjs && node test/memes.mjs && node test/persona.mjs && node test/anime.mjs && node test/media-gif.mjs && node test/imagegen.mjs && node test/patch-media.mjs && node test/tool-schema.mjs && node test/link-listener.mjs && node test/multi-downstream.mjs && node test/isolation.mjs && node test/client-manifest.mjs && node test/client-render.mjs && node test/client-probe.mjs && node test/official.mjs && node test/official-qr.mjs && node test/m15-e2e.mjs && node --import ./test/register-stubs.mjs test/load-check.mjs",
+    "test": "node test/smoke-core.mjs && node test/reply.mjs && node test/tts.mjs && node test/policy-modes.mjs && node test/chat-commands.mjs && node test/quota.mjs && node test/models.mjs && node test/memes.mjs && node test/persona.mjs && node test/anime.mjs && node test/media-gif.mjs && node test/imagegen.mjs && node test/patch-media.mjs && node test/tool-schema.mjs && node test/link-listener.mjs && node test/multi-downstream.mjs && node test/isolation.mjs && node test/client-manifest.mjs && node test/client-render.mjs && node test/client-probe.mjs && node test/tasks.mjs && node test/official.mjs && node test/official-qr.mjs && node test/m15-e2e.mjs && node --import ./test/register-stubs.mjs test/load-check.mjs",
     "test:core": "node test/smoke-core.mjs",
     "test:reply": "node test/reply.mjs",
     "test:tts": "node test/tts.mjs",

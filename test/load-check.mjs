@@ -844,8 +844,8 @@ check('apply 返回 hub 并挂出内部件', () => {
   assert.equal(hub.mind.selfId, '30001000');
 });
 
-check('注册了 29 个工具且形状合法', () => {
-  assert.equal(hubTools().length, 29);
+check('注册了 30 个工具且形状合法', () => {
+  assert.equal(hubTools().length, 30);
   const names = hubTools().map((t) => t.name).sort();
   assert.deepEqual(names, [
     'onebot_admin',
@@ -873,6 +873,7 @@ check('注册了 29 个工具且形状合法', () => {
     'onebot_relay_probe',
     'onebot_reply',
     'onebot_sessions',
+    'onebot_task',
     'onebot_timeline',
     'onebot_tools',
     'onebot_topic',
@@ -920,7 +921,7 @@ await checkAsync('枢纽工具只挂在会话装配的 agent 作用域，profile
   );
   assert.equal(refused.ok, false, '默认关闭时调用要被拒');
   assert.match(refused.error, /cross\.enabled/, '要说清是哪个开关');
-  assert.equal(hubTools().length, 29, '会话装配（宿主 create/resume 走的就是同一条路）里应当收全 29 个');
+  assert.equal(hubTools().length, 30, '会话装配（宿主 create/resume 走的就是同一条路）里应当收全 30 个');
   assert.deepEqual(hubSections().map((s) => s.name), ['plugin:dsh-onebot-hub'], '指导段同理：只跟着枢纽会话走，不再是全局段落');
   // m11162 真机事故：同名工具硬撞会让宿主抛错并**连坐**后面 22 个注册（真机会话里只剩 6 个 onebot_*）。
   // 现在 setup 主动让位：会话缓冲版占 `onebot_reply`，直发版不注册（它的本体在 hubDirectProbe 里验）。
@@ -935,7 +936,7 @@ check('会话版回复工具挂不上时，直发版 onebot_reply 顶位（m1116
   const direct = hubDirectReply();
   assert.ok(direct, '直发版应当注册：会话版一坏，回复能力不能整个丢');
   assert.ok(direct.parameters.group_id, '直发版要能发到指定目标（group_id / user_id）');
-  assert.equal(hubDirectProbe.agentTools.length, 29, '让位场景下同样该收全 29 个工具');
+  assert.equal(hubDirectProbe.agentTools.length, 30, '让位场景下同样该收全 30 个工具');
 });
 
 await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent 需要时调 onebot_code_scopes 取（m14477）', async () => {
@@ -1016,7 +1017,7 @@ await checkAsync('下游源码范围（可多条）+ 位置不进 prompt：agent
   const altSections = altProbe.agentSections;
   try {
     // 自带扫描器已移除：两个实例的工具数一样，都不该有 onebot_scan_code。
-    assert.equal(altTools.length, 29, '工具数应当与主实例一致（扫描器已移除）');
+    assert.equal(altTools.length, 30, '工具数应当与主实例一致（扫描器已移除）');
     assert.equal(altTools.some((t) => t.name === 'onebot_scan_code'), false, '扫描器工具已移除');
     const section = altSections.find((s) => s.name === 'plugin:dsh-onebot-hub');
     assert.equal(section?.order, 160);
