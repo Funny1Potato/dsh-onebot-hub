@@ -3012,6 +3012,21 @@ t('聊天记录不展开也不解析：合并转发与多消息卡片只留标�
   // 普通卡片照旧挖标题（这条不是聊天记录）
   const normal = describeSegments([{ type: 'json', data: { data: JSON.stringify({ meta: { detail_1: { title: '某新闻', desc: '摘要' } } }) } }]);
   assert.match(normal, /卡片：某新闻/);
+
+  // 红包（`m36521`）：协议里没有这个类型，靠 xml 认出 `[红包：…]`——认出来只为说得出口，领不了。
+  const packet = describeSegments([
+    { type: 'xml', data: { data: '<msg serviceID="6" brief="[QQ红包]恭喜发财" url="https://mqq.tenpay.com/x"><item><title>恭喜发财</title></item></msg>' } },
+  ]);
+  assert.match(packet, /^\[红包：恭喜发财\]$/);
+  const bare = describeSegments([{ type: 'xml', data: { data: '<msg serviceID="6" url="https://mqq.tenpay.com/x"/>' } }]);
+  assert.equal(bare, '[红包]', '取不到字就只报红包，不装懂标题');
+  // 正文里聊到红包不算：只认 xml/json 载荷
+  assert.equal(describeSegments([{ type: 'text', data: { text: '我刚抢了个红包' } }]), '我刚抢了个红包');
+  // 普通 xml 卡片不受影响
+  assert.match(
+    describeSegments([{ type: 'xml', data: { data: '<msg serviceID="1" brief="新闻"><item><title>标题</title></item></msg>' } }]),
+    /卡片：标题/,
+  );
 });
 
 t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m03091）', () => {
