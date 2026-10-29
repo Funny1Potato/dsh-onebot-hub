@@ -942,3 +942,33 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 1. **中间人只拿 id，不拿内容和目标**。内容和目标在 `tasks.json` 里，由 `fire` 查。这样它不可能把提醒说岔、也不可能叫错群——而这两件事恰恰是"让一个没有上下文的 agent 自由发挥"最容易出的错。
 2. **总机会话不注任何记忆与档案**（`snapshot()` 里 `bare` 分支）。它没有世界观，也不需要：到点只转发一个 id，注进去的每一份群档案它都用不上。
 3. **它永不交还**（`#retireAfterDormant` 直接 return）。代价是上下文只涨不清，所以留了 `agent.tasks.resetEvery`：累计触发 N 次后换一条新会话、把排期整体搬过去（先建后删，重叠期靠 `fire` 的 60 秒去重挡重复）。
+
+### 2026-10-29：通道回话为什么"当前轮次收不到"，以及补上 read（`m36610`）
+
+真机（外部会话 14:54 那一轮）三条回话全部落进宿主的 `next-turn` 队列，那一轮从头到尾没结束（被手动中断），于是一条都没被取走。模型只知道 `turns.b` 从 1 涨到 3，看不到内容，反复 `say` + `list` 空转。
+
+宿主的 agent handle 有三个投递口，落点不同：
+
+| 方法 | 队列 | 何时可见 |
+|---|---|---|
+| `followup()` | `next-turn` | 下一轮开始 |
+| `steer()` | `next-step` | 正在跑的那一轮的**下一个 step** |
+| `inject()` | `next-step` | 同上，但不唤醒 |
+
+枢纽原来用的是 `followup`，等于把答案塞进一个"要等这边这一轮结束才打开"的信箱——而这边正在等的就是它。改成 **steer 优先、followup 兜底**：steer 抛错（老宿主/被拒）才退回，至少下一轮能看见，不直接报"递不到"。
+
+同时补了 `onebot_session({op:'read'})`：通道记录里从"只有计数"改成也存正文（`ChannelStore.record`，每句 ≤600 字、最多 40 句），读出时按视角标 `mine`/`theirs`。没有它，"对面没回"和"回了但我看不见"分不开——这是这次空转的真正推手。
+
+两条都只在递送成功后记账（失败走 `refund`，历史里就不该有那一句）。
+
+### 跨会话递送不能等目标那一轮（m36748）
+
+2026-10-29 真机：两个私聊会话（`private:945126014` / `private:3820113110`）互相递了一句话，双双冻住——两边日志都停在各自的 `tool/call` 上，再没有 `tool/result`。
+
+链条是这样的：A 调 `onebot_session.relay` → `#deliver` → `await mind.reawake(B)`；`reawake` 的 promise 要等 **B 整轮跑完**才 resolve。B 醒之后在它那一轮里调 `say` 回给 A → 同样 `await reawake(A)` → 而 A 的那一轮正挂着等 B。互相等，谁都不结束。
+
+修法：`#deliver` 对枢纽会话的唤醒改成**最多等 `cross.wakeGraceMs`（默认 1200ms）**，超时按"已送出"返回并在回执里标 `queued: true`，失败在后台记进 `lastWakeError`。留这个宽限期而不是直接 fire-and-forget，是为了还能认出"当场就失败"（readonly、没有 pool、唤醒被拒）——那些不该被当成投递成功。
+
+顺带改回执口径：`queued: true` 明确表示"已递进对方的队列"，不是"对方已经收到并处理"。模型据此少说一句"它已经知道了"。
+
+教训：凡是"递出去"的动作（cross 的 relay/say、tasks 的 fire），都不该 await 对方那一整轮。进程内的等待链一旦成环，就是两个会话一起冻死，而且日志上只会看到两个孤零零的 `tool/call`。

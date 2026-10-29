@@ -3717,6 +3717,164 @@ t('外部会话开线要留住地址（2026-10-27 真机：字条写「未知会
   assert.match(denied.error, /cross\.allowFrom/);
 });
 
+t('外部会话名册（m36838）：来往过的、还活着的才进 list', async () => {
+  const disk = new Map();
+  const storage = { read: (k, d) => disk.get(k) ?? d, write: (k, v) => disk.set(k, v) };
+  const mkRelay = () => new CrossRelay({
+    hub: { config: { upstreamType: '', agentGroups: {}, agentPrivates: {} }, storage },
+    mind: { reawake: async () => ({ woke: true }), get statsSnapshot() { return { wakeStates: [] }; } },
+    host: {
+      getLive: (id) => (id === 'session-alive-1' ? { steer: async () => {}, followup: async () => {} } : null),
+      createUserMessage: () => ({ role: 'user', content: 'x' }),
+    },
+    config: { cross: { enabled: true, allowFrom: 'all' } },
+  });
+
+  const relay = mkRelay();
+  const ok = await relay.relay({ from: 'group:1', fromKind: 'hub', to: 'session-alive-1', note: 'x', text: '喂', as: 'message' });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  const dead = await relay.relay({ from: 'group:1', fromKind: 'hub', to: 'session-dead-2', note: 'x', text: '喂', as: 'message' });
+  assert.equal(dead.ok, false, '递不到就不该记进名册');
+
+  const listed = relay.externalPeers();
+  assert.deepEqual(listed.map((p) => p.to), ['session-alive-1']);
+  assert.equal(listed[0].label, '外部会话');
+
+  // 落盘后新实例仍认得（重启不该把名册清空）。
+  const again = mkRelay();
+  assert.deepEqual(again.externalPeers().map((p) => p.to), ['session-alive-1']);
+  // 已关掉的会话不报：同一份名册，把活着的那条拿掉。
+  const gone = (() => {
+    const r = mkRelay();
+    r.host = { getLive: () => null };
+    r.peers.isAlive = () => false;
+    return r;
+  })();
+  assert.deepEqual(gone.externalPeers(), []);
+});
+
+t('两个会话互相递话不该死锁（m36748）：投递只发起、不等待目标整轮', async () => {
+  const states = [
+    { sessionKey: 'private:945126014', state: 'awake' },
+    { sessionKey: 'private:3820113110', state: 'awake' },
+  ];
+  // reawake 返回一个**永远不 resolve** 的 promise，模拟"目标那一轮还没结束"。
+  // 修之前 relay/say 会一起挂在这个 await 上，两边互相等，谁也不返回。
+  const relay = new CrossRelay({
+    hub: { config: { upstreamType: '', agentGroups: {}, agentPrivates: { 945126014: {}, 3820113110: {} } } },
+    mind: { reawake: () => new Promise(() => {}), get statsSnapshot() { return { wakeStates: states }; } },
+    config: { cross: { enabled: true, allowFrom: 'all', wakeGraceMs: 20 } },
+  });
+  const first = await relay.relay({ from: 'private:945126014', fromKind: 'hub', to: 'private:3820113110', note: 'x', text: '喂', as: 'message' });
+  assert.equal(first.ok, true, JSON.stringify(first));
+  assert.equal(first.queued, true, '回执要标明"已送出"而不是"对方已收到"');
+  // 反向再递一条（真机上就是这一步把两边一起冻住的）。
+  const back = await relay.relay({ from: 'private:3820113110', fromKind: 'hub', to: 'private:945126014', note: 'y', text: '嗯', as: 'message' });
+  assert.equal(back.ok, true, JSON.stringify(back));
+});
+
+t('官方通道上的 list / 递送（m36698）：本地名单是旧号，不能拿来当"能递给谁"', async () => {
+  const now = 3_000_000;
+  const states = [
+    { sessionKey: 'group:451403506', state: 'sleeping' },
+    { sessionKey: 'private:3820113110', state: 'awake' },
+    { sessionKey: 'task:hub', state: 'awake' },
+  ];
+  const mk = (upstreamType) => new CrossRelay({
+    hub: {
+      // 旧号残留：这是 LLOneBot 时代的配置，官方通道下它一个都递不到。
+      config: { upstreamType, agentGroups: {}, agentPrivates: { 945126014: {} } },
+      profiles: { person: () => null },
+    },
+    mind: { reawake: async () => ({ woke: true }), get statsSnapshot() { return { wakeStates: states }; } },
+    config: { cross: { enabled: true, allowFrom: 'all' } },
+    now: () => now,
+  });
+
+  // 官方：只认真实活着的会话，旧号不出现，内部会话也不出现。
+  const official = mk('official');
+  assert.deepEqual(official.list().map((x) => x.to), ['group:451403506', 'private:3820113110']);
+  assert.ok(!official.list().some((x) => x.to === 'task:hub'), '内部总机会话不该出现在可投递列表里');
+
+  // 官方：本地名单里没有的目标也能递（平台的名单管这事）。
+  const ok = await official.relay({ from: 'group:451403506', fromKind: 'hub', to: 'group:833194406', note: 'x', text: '喂', as: 'message' });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+
+  // OneBot：名单仍是唯一依据，旧号能递、名单外的拒。
+  const onebot = mk('');
+  assert.deepEqual(onebot.list().map((x) => x.to), ['private:945126014', 'group:451403506', 'private:3820113110']);
+  const stale = await onebot.relay({ from: 'group:451403506', fromKind: 'hub', to: 'private:945126014', note: 'x', text: '喂', as: 'message' });
+  assert.equal(stale.ok, true, JSON.stringify(stale));
+  const blocked = await onebot.relay({ from: 'group:1', fromKind: 'hub', to: 'group:99999', note: 'x', text: '喂', as: 'message' });
+  assert.equal(blocked.ok, false);
+  assert.match(blocked.error, /不归枢纽管/);
+
+  // wakeStates 是数组这件事：以前按对象取键，会列出 to:"0"/"1" 这种假地址。
+  assert.ok(!official.list().some((x) => /^\d+$/.test(x.to)), 'list 里不该出现纯数字的假地址');
+});
+
+t('通道要读得到、投递要走 next-step（m36610：对面回话全卡在 next-turn，模型只能从句数猜）', async () => {
+  const now = 2_000_000;
+  const OUT = 'session-abc123';
+  const steered = [];
+  const followed = [];
+  const relay = new CrossRelay({
+    hub: { config: { agentGroups: { 222: {} }, agentPrivates: {} }, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    host: {
+      getLive: () => ({
+        steer: async (msg) => steered.push(msg),
+        followup: async (msg) => followed.push(msg),
+      }),
+    },
+    config: { cross: { enabled: true, allowFrom: 'all' } },
+    now: () => now,
+  });
+
+  const open = await relay.relay({ from: OUT, fromKind: 'external', to: 'group:222', note: '想问一句', text: '那边在聊显卡', as: 'message' });
+  assert.equal(open.ok, true, JSON.stringify(open));
+
+  // 读：自己说的标 mine，对面说的标 theirs。
+  const mine = relay.read({ from: OUT, channel: open.channel });
+  assert.equal(mine.ok, true, JSON.stringify(mine));
+  assert.equal(mine.entries.length, 1);
+  assert.equal(mine.entries[0].from, 'mine');
+  assert.match(mine.entries[0].text, /那边在聊显卡/);
+  const theirs = relay.read({ from: 'group:222', channel: open.channel });
+  assert.equal(theirs.entries[0].from, 'theirs', '同一句话在对面的视角里是 theirs');
+  assert.equal(theirs.with, OUT);
+
+  // 说完一句也要进历史（以前只记计数，`say` 出去的话在对端 read 里看不见）。
+  // 这一句的目标是外部会话，正好验证投递口：steer 优先，因为它落 next-step。
+  const said = await relay.say({ from: 'group:222', channel: open.channel, text: '在聊装机' });
+  assert.equal(said.ok, true, JSON.stringify(said));
+  assert.equal(steered.length, 1, '外部会话要收到 steer（不是 followup）');
+  assert.equal(followed.length, 0);
+  const after = relay.read({ from: OUT, channel: open.channel });
+  assert.equal(after.entries.length, 2);
+  assert.deepEqual(after.entries.map((e) => e.from), ['mine', 'theirs']);
+  assert.match(after.entries[1].text, /在聊装机/);
+
+  // 外人读不了；不存在的通道说清楚。
+  assert.equal(relay.read({ from: 'group:999', channel: open.channel }).ok, false);
+  assert.match(relay.read({ from: OUT, channel: 'ch_nope' }).error, /没有你/);
+  assert.match(relay.read({ from: OUT }).error, /read 需要 channel/);
+
+  // 老宿主 / steer 被拒时退回 followup：至少下一轮能看见，不能直接报"递不到"。
+  const legacy = new CrossRelay({
+    hub: { config: { agentGroups: { 222: {} }, agentPrivates: {} }, profiles: { person: () => null } },
+    mind: { reawake: async () => ({ woke: true }) },
+    host: { getLive: () => ({ steer: async () => { throw new Error('no steer'); }, followup: async (msg) => followed.push(msg) }) },
+    config: { cross: { enabled: true, allowFrom: 'all' } },
+    now: () => now,
+  });
+  const fallbackOpen = await legacy.relay({ from: OUT, fromKind: 'external', to: 'group:222', note: 'x', text: '喂', as: 'message' });
+  assert.equal(fallbackOpen.ok, true, JSON.stringify(fallbackOpen));
+  const fallback = await legacy.say({ from: 'group:222', channel: fallbackOpen.channel, text: '喂一声' });
+  assert.equal(fallback.ok, true, JSON.stringify(fallback));
+  assert.ok(followed.length >= 1, 'steer 抛错要退到 followup');
+});
+
 t('跨会话转达的第三轮自查（m27100）：去重不占名额、失败不白吃名额、引用段不当噪声、包 id 猜不到', async () => {
   const now = 1_000_000;
   const relay = new CrossRelay({
