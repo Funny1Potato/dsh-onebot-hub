@@ -4156,6 +4156,47 @@ async function scenarioVision() {
     assert.equal(textOnlyParts, null);
   });
 
+  // 探不到模型能力时**不许当成"不能"**（issue #2）：很多 provider 根本不声明 inputModalities，
+  // 以前这种一律判 false，segment 模式于是永远不上图，而同一个模型在宿主会话里看图正常。
+  hub.vision.attach({ llm: { async *stream() { yield { type: 'text-delta', text: 'x' }; }, async resolveModelInfo() { return undefined; } } });
+  const undecided = await mind.segmentPartsFor([refsWithImage]);
+  check('看图·能力探测探不到时按"能"试（探不到≠不能）', () => {
+    assert.equal(Array.isArray(undecided), true, '探不到就该把图带上，让宿主在提交时报错');
+    assert.equal(undecided.length, 1);
+  });
+
+  hub.vision.attach({ llm: { async *stream() { yield { type: 'text-delta', text: 'x' }; }, async resolveModelInfo() { throw new Error('provider 没注册完'); } } });
+  const probeFailed = await mind.segmentPartsFor([refsWithImage]);
+  check('看图·能力探测抛错时也按"能"试，且不写进缓存', () => {
+    assert.equal(Array.isArray(probeFailed), true);
+    assert.equal(probeFailed.length, 1);
+  });
+
+  // 诊断：为什么这一轮没带图，要能一句话说清（以前只有 vision.parts 恒为 0）。
+  hub.vision.mode = 'segment';
+  await mind.segmentPartsFor([]);
+  const skipNoMedia = hub.vision.stats.lastSkip;
+  hub.vision.attach({ llm: { async *stream() { yield { type: 'text-delta', text: 'x' }; }, async resolveModelInfo() { return { inputModalities: ['text'] }; } } });
+  await mind.segmentPartsFor([refsWithImage]);
+  const skipCaps = hub.vision.stats.lastSkip;
+  check('看图·跳过原因写进状态（没有落地记录 / 模型不收图）', () => {
+    assert.equal(skipNoMedia?.reason, 'no-media');
+    assert.equal(skipCaps?.reason, 'capability');
+  });
+
+  // segment 模式等的是"图片落地"而不是"描述"（issue #2 的竞态）。
+  const mediaLanded = [];
+  const slow = new Promise((resolve) => setTimeout(() => { mediaLanded.push('mid-1'); resolve(true); }, 30));
+  hub.trackMedia('group:55555', 'mid-1', slow);
+  const waitedMedia = await hub.awaitMediaPending({ key: 'group:55555', messageIds: ['mid-1'], timeoutMs: 500 });
+  const staleWaited = await hub.awaitMediaPending({ key: 'group:55555', messageIds: ['mid-1'], timeoutMs: 50 });
+  check('看图·媒体落地可以等：等到就返回 settled，没登记就不装等待', () => {
+    assert.equal(waitedMedia.count, 1);
+    assert.equal(waitedMedia.settled, 1);
+    assert.equal(mediaLanded.length, 1);
+    assert.equal(staleWaited.count, 0, '落地完成后要从表里删掉，不能谎报 pending');
+  });
+
   // 关掉开关：新图只留占位，一个字都不改。
   hub.vision.mode = 'off';
   const before = streams;

@@ -971,4 +971,27 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 
 顺带改回执口径：`queued: true` 明确表示"已递进对方的队列"，不是"对方已经收到并处理"。模型据此少说一句"它已经知道了"。
 
-教训：凡是"递出去"的动作（cross 的 relay/say、tasks 的 fire），都不该 await 对方那一整轮。进程内的等待链一旦成环，就是两个会话一起冻死，而且日志上只会看到两个孤零零的 `tool/call`。
+教训：凡是"递出去"的动作（cross 的 relay/say、tasks 的 fire），都不该 await 对方那一整轮。进程内的等待链一旦成环，就是两个会话一起冻死，而且日志上只会看到两个孤零零的 `tool/call`。\n
+### 看图：`segment` 模式为什么从来没把图送进 prompt（issue #2，`m37401`）
+
+三条根因叠在一起，前两条各自都能让整条路停摆：
+
+1. **能力探测 fail-closed**。`imageCapable()` 以前是 `Array.isArray(inputModalities) && includes('image')`——
+   很多 provider 压根不声明这个字段（或在探测那一刻还没注册完），于是恒判 false，`segment` 直接
+   `return null`。现在只有**明确声明**了 `inputModalities` 且不含 image 才判不能（这种才缓存）；
+   探不到、抛错一律按"能"试且不缓存——真不能的话宿主会在提交图片时报 `does not support image input`，
+   那是一个看得见的错误，比静默跳过好。
+2. **只查 `entry.media` 这一个字段**。它没错（内存里的对象数组确实带 `kind:'image'`），问题是
+   **拍快照那一刻它还是空的**：图和文字走两条路，图片要下载→存 blob→回填，通常晚几百毫秒。
+   报告里列的 `refs.media`/`mediaRefs` 是**落盘**形状（L1 行只存 id），不是这里的数据源——
+   所以不做"三级回退 + 正文正则兜底"（那样等于把渲染文本当数据源）。
+3. **`segment` 模式没有可等的东西**。`waitBeforeTurnMs` 等的是"描述"，只开 segment 时根本没有描述
+   任务，`awaitVisionPending` 立刻返回"没有在跑的"，于是快照永远拍在"还没落地"那一刻。
+
+改法：`hub.trackMedia()` 把"媒体落地"登记成可等待的 promise（与 `trackVision` 同一套形状），
+`awaitMediaPending()` 三条语义照抄（只等点名的、有上限、失败也算结束），`mind.#awaitVision`
+在 segment/both 下先等它（`vision.segmentWaitMs`，默认 1500，与 `waitBeforeTurnMs` 取较大者）。
+不轮询、不重扫——等的是同一个 promise。
+
+诊断：`vision.stats.lastSkip` 记四种原因（`mode` / `no-media` / `capability` / `empty`），
+在 `onebot_hub_status` 里可见。以前 `vision.parts` 恒为 0 的时候，外部只能靠猜。
