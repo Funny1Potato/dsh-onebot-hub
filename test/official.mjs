@@ -22,6 +22,7 @@ import {
   toSegments,
   virtualId,
 } from '../lib/upstream/official.js';
+import { detectMention } from '../lib/agent/policy.js';
 
 let passed = 0;
 const cases = [];
@@ -262,10 +263,17 @@ t('群消息事件 → OneBot v11 形状（虚拟号 + 保留 openid 真身）',
   assert.equal(e.sender.role, 'unknown');
   assert.equal(e.source.openid, 'OPENID-A');
   assert.equal(e.source.groupOpenid, 'G-1');
-  // @ 里的 openid 也要变成虚拟号，否则 hub 认不出"在叫我"。
-  const at = e.message.find((s) => s.type === 'at');
-  assert.equal(at.data.qq, virtualId('102030', 'user', 'OPENID-A'));
-  assert.equal(at.data.openid, 'OPENID-A');
+  // 群里每一条都是"@ 了机器人"，所以**必须有一个指向 self_id 的 at 段**——
+  // 官方不会把那个 @ 放进 content，不补的话 hub 认不出"在叫我"（m37239）。
+  const ats = e.message.filter((s) => s.type === 'at');
+  assert.ok(
+    ats.some((s) => String(s.data.qq) === String(e.self_id)),
+    `群消息必须带一个指向 self_id 的 at：${JSON.stringify(ats)}`,
+  );
+  // 正文里显式写出来的 `<@!OPENID-A>` 仍按普通用户映射（它不是机器人自己）。
+  const other = ats.find((s) => s.data.openid === 'OPENID-A');
+  assert.equal(other.data.qq, virtualId('102030', 'user', 'OPENID-A'));
+  assert.equal(other.data.openid, 'OPENID-A');
   assert.equal(e.raw_message, '<@!OPENID-A> 在吗');
   up.stop();
 });
@@ -606,6 +614,30 @@ t('私聊：回复打的是 openid，不是虚拟号', async () => {
   assert.ok(call, '应该发出去了');
   assert.match(call.url, /\/v2\/users\/OPENID-A\/messages/, `打的必须是 openid：${call.url}`);
   assert.ok(!call.url.includes(String(vid)), '不能把虚拟号当 openid 打过去');
+  up.stop();
+});
+
+t('群里的 @ 官方不放进 content：枢纽要自己补一个指向 self_id 的 at（m37239）', async () => {
+  const { up, events, sockets } = makeUpstream();
+  up.start();
+  await settle();
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  // READY 带机器人自己的 openid；随后一条**只有空格**的群消息（真机上"@"一下什么也没打"就是这样）。
+  ws.emit('message', JSON.stringify({ op: 0, t: 'READY', d: { user: { id: 'BOT-OPENID', username: '大肥鱼' } } }));
+  ws.emit(
+    'message',
+    JSON.stringify({ op: 0, t: 'GROUP_AT_MESSAGE_CREATE', d: { id: 'raw-g0', content: ' ', group_openid: 'G-0', author: { user_openid: 'O-0' } } }),
+  );
+  const e = events.find((x) => x.message_type === 'group');
+  assert.ok(e, '群消息应该进事件');
+  const at = e.message.find((s) => s.type === 'at');
+  assert.ok(at, '必须补一个 at 段，否则 hub 认不出"在叫我"');
+  assert.equal(String(at.data.qq), String(e.self_id), '这个 at 必须指向 self_id');
+  // 真机症状的回归断言：detectMention 要能说出"在叫我"。
+  const reasons = detectMention(e, { selfId: e.self_id });
+  assert.deepEqual(reasons, ['at'], `detectMention 应该认出 at：${JSON.stringify(reasons)}`);
   up.stop();
 });
 
