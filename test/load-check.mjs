@@ -897,11 +897,24 @@ await checkAsync('枢纽工具只挂在会话装配的 agent 作用域，profile
   // m25983 的唯一例外：`onebot_session`（会话间转达）用户明确要求做成**全局**工具
   // ——"不一定是某个群的 agent，也可以是其它插件拉起的会话"。它默认关闭、调用即被拒，
   // 靠 `cross.enabled` 而不是靠"看不见"来保护。除它以外，全局层仍然一个都不许有。
-  const globals = recorded.globalTools.map((t) => t.name).filter((n) => n !== 'onebot_session');
-  assert.deepEqual(globals, [], 'apply 阶段不该往全局层注册 onebot_* 工具：那会让每个 DSH 会话都看见它们');
-  // 那个唯一的例外必须真的在、而且默认是关的（`m25948` 用户要求全局，`cross.enabled` 默认 false）。
-  const crossTool = recorded.globalTools.find((t) => t.name === 'onebot_session');
-  assert.ok(crossTool, 'onebot_session 应当注册在全局层（用户要求：别的插件拉起的会话也能用）');
+  // `m70992`：`cross` 关着的时候它**根本不注册**——模型连"有这个工具"都不该知道。
+  assert.deepEqual(
+    recorded.globalTools.map((t) => t.name),
+    [],
+    'apply 阶段不该往全局层注册任何工具（cross 关着时连 onebot_session 也不注册）',
+  );
+  // 开着的时候才注册，而且注册在全局层（`m25948` 用户要求：别的插件拉起的会话也能用）。
+  const crossCase = makeCtx();
+  apply(crossCase.ctx, {
+    upstreamUrl: '',
+    upstreamSelfId: '30001000',
+    downstreamTargets: '[]',
+    persist: false,
+    cross: { enabled: true },
+  });
+  await sleep(60);
+  const crossTool = crossCase.recorded.globalTools.find((t) => t.name === 'onebot_session');
+  assert.ok(crossTool, 'cross 开着时 onebot_session 应当注册在全局层');
   // `m27441`：这段描述会被**所有**会话的模型读到——不是枢纽自己的会话也读，所以不能留内部编号
   // （`m26268` 这种），也不能讲"枢纽"，那是只有枢纽会话才懂的词。
   const desc = String(crossTool.description ?? '');
@@ -914,13 +927,9 @@ await checkAsync('枢纽工具只挂在会话装配的 agent 作用域，profile
   assert.ok(crossTool.parameters?.op, '要有 op 参数');
   assert.deepEqual(crossTool.parameters?.as?.enum, ['message', 'forward'], 'as 必填且只有两种形态');
   assert.equal(crossTool.parameters?.as?.default, undefined, 'as 不许有默认值（m26026：每次都要 A 自己判断）');
+  // 关着的时候"调用被拒"这条路已经走不到了（工具根本没注册，m70992）——这里验的是开着时能用。
   const listed = JSON.parse(await crossTool.execute({ op: 'list' }, { agent: { id: 'group:55555' } }));
-  assert.equal(listed.ok, true);
-  const refused = JSON.parse(
-    await crossTool.execute({ op: 'relay', to: 'group:777', note: 'x', refs: ['1'], as: 'message' }, { agent: { id: 'group:55555' } }),
-  );
-  assert.equal(refused.ok, false, '默认关闭时调用要被拒');
-  assert.match(refused.error, /cross\.enabled/, '要说清是哪个开关');
+  assert.equal(listed.ok, true, JSON.stringify(listed));
   assert.equal(hubTools().length, 30, '会话装配（宿主 create/resume 走的就是同一条路）里应当收全 30 个');
   assert.deepEqual(hubSections().map((s) => s.name), ['plugin:dsh-onebot-hub'], '指导段同理：只跟着枢纽会话走，不再是全局段落');
   // m11162 真机事故：同名工具硬撞会让宿主抛错并**连坐**后面 22 个注册（真机会话里只剩 6 个 onebot_*）。

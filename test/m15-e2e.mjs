@@ -2337,7 +2337,9 @@ async function scenarioCapability() {
     assert.equal(deniedWrite.retcode, 1403);
     assert.equal(deniedWrite.source, 'policy');
     assert.equal(deniedWrite.tier, 'write');
-    assert.match(deniedWrite.note, /write 级/);
+    // 文案改了（m70912）：从『要放行必须改配置』改成给模型两条路——它改不了配置。
+    assert.match(deniedWrite.note, /当前没开放/);
+    assert.match(deniedWrite.note, /重试也不会通|交给用户/);
     // 指路只给"发消息类"：`send_like` 不是消息，多念一句反而误导。
     assert.doesNotMatch(deniedWrite.note, /onebot_session/);
     // 跨会话转达没开就不指（指过去也是死路，模型会再撞一次）。
@@ -2386,7 +2388,7 @@ async function scenarioCapability() {
     assert.equal(unsupported.hub.capabilities.get('_get_group_notice').supported, 'unsupported');
     assert.equal(unsupported.calls.length, 1);
     assert.equal(notice2.source, 'registry');
-    assert.match(notice2.note, /已实测记录/);
+    assert.match(notice2.note, /这个实现端没有/);
     assert.equal(unsupported.calls.length, 1, '已知不支持不该再打上游');
   });
   await unsupported.hub.callAction({ action: '_get_group_notice', params: { group_id: 1 }, refresh: true });
@@ -2570,7 +2572,7 @@ async function scenarioCapabilityDownstream() {
   check('下游能力面·敏感只读：默认拒绝且不回退（回退就等于闸门失效）', () => {
     assert.equal(cookies.status, 'failed');
     assert.equal(cookies.retcode, 1403);
-    assert.match(cookies.msg, /exposeSensitive/);
+    assert.match(cookies.msg, /凭证类只读接口/);
     assert.equal(calls.filter((a) => a === 'get_cookies').length, 0);
   });
 
@@ -2639,7 +2641,7 @@ async function scenarioAdminGate() {
     const preview = closed.previewAction(kickPlan.action);
     assert.equal(preview.allowed, false);
     assert.equal(preview.reason, 'danger');
-    assert.match(preview.note, /dangerAllow/);
+    assert.match(preview.note, /当前没开放/);
     assert.equal(sent.length, 0);
   });
   const refused = await closed.callAction({ action: kickPlan.action, params: kickPlan.params, source: 'agent:admin' });
