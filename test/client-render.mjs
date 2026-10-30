@@ -208,6 +208,7 @@ const BASE_VALUE = {
   vision: { mode: 'describe' },
   anime: { backend: 'off' },
   memory: { isolation: { level: 'scoped', crossGroupFacts: 'shareable', privateFacts: 'never' } },
+  capability: { writeAllow: '[]', dangerAllow: '[]' },
 };
 
 await check('枚举字段渲染成下拉，且默认选中当前值', () => {
@@ -951,6 +952,35 @@ await check('选了服务商就藏掉地址/形状，模型留着；别家的参
     assert.ok(shown.has(key), `切回 custom 后 ${key} 要给出来（手填的人得找得到地方）`);
   }
   assert.equal(String(shown.get('tts.url').props.value), 'https://old.example/v1/audio/speech', '旧值没被清掉，切回来还在');
+});
+
+await check('能力白名单：勾选即写入 JSON；danger 的项不会混进 write 表', async () => {
+  const app = boot(BASE_VALUE);
+  const control = controlsFor(app.render()).get('capability.writeAllow');
+  assert.ok(control, '找不到 capability.writeAllow 的控件');
+  const boxes = checkboxesIn(control);
+  assert.ok(boxes.length >= 16, `要渲染出勾选项，实际 ${boxes.length} 个`);
+  assert.equal(boxes[0].props.checked, false, '默认一个都不放行');
+  assert.equal(textOf(inList(control, (n) => n.type === 'strong')[0]), '全部放行（*）', '第一项是全放行开关');
+
+  const labelOf = (value) => inList(control, (n) => n.type === 'label' && n.props?.title === value)[0];
+  assert.ok(labelOf('delete_msg'), 'write 表里要有「撤回消息」');
+  assert.ok(labelOf('send_*'), 'write 表里要有「一切发送」通配');
+  assert.ok(!labelOf('set_group_ban'), '禁言是 danger 级，不该出现在 write 表里（勾了也没用）');
+  assert.ok(!labelOf('.handle_quick_operation'), '隐藏接口是 danger 级');
+
+  labelOf('delete_msg').children[0].props.onChange({ target: { checked: true } });
+  control.children && null;
+  const dangerCtl = controlsFor(app.render()).get('capability.dangerAllow');
+  assert.ok(inList(dangerCtl, (n) => n.type === 'label' && n.props?.title === 'set_group_ban')[0], 'danger 表里要有「禁言成员」');
+
+  buttonsOf(app.render()).find((button) => textOf(button).startsWith('保存')).props.onClick();
+  await new Promise((resolve) => setImmediate(resolve));
+  const ops = JSON.parse(JSON.stringify(app.mutations.at(-1)));
+  const writes = ops.filter((op) => op.path.join('.') === 'capability.writeAllow');
+  assert.equal(writes.length, 1, '勾一下只写这一个字段');
+  assert.equal(typeof writes[0].value, 'string', 'schema 是字符串，写回的也必须是字符串');
+  assert.deepEqual(JSON.parse(writes[0].value), ['delete_msg'], '勾上撤回 = 数组里只剩它');
 });
 
 const failed = results.filter((row) => !row.ok);

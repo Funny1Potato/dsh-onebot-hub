@@ -42,6 +42,7 @@ const [
   { PERSONA_PATH },
   { PROVIDER_IDS, SHAPE_IDS, PROVIDER_FIELDS },
   { UPSTREAM_TYPES },
+  { WRITE_ACTIONS, DANGER_ACTIONS },
 ] = await Promise.all([
   import('../lib/agent/policy.js'),
   import('../lib/vision.js'),
@@ -55,6 +56,7 @@ const [
   import('../lib/persona/route.js'),
   import('../lib/audio/providers.js'),
   import('../lib/upstream/official.js'),
+  import('../lib/capability.js'),
 ]);
 
 /** 把 `const <marker> = {…}` 抠出来（括号配对，跳过字符串）并 JSON.parse。 */
@@ -324,6 +326,26 @@ check('client.js：模型两行出下拉、思考强度两行只列配对模型�
 
 check('client.js：列表型字段（多下游）有行编辑器，且列名与宿主认的字段对齐', () => {
   // 用户的诉求：多条下游要能像 LLBot 的 connect[] 那样加/删/逐条停用，而不是手写长 JSON。
+  // 能力白名单的勾选表（`m38115`）：勾错了级等于"勾了也没用"，所以两边都要对。
+  check('能力白名单的勾选表与三分法一一对应', () => {
+    const table = objectLiteralOf('CHECK_GROUPS');
+    const values = (key) => (table[key] || []).flatMap((g) => g.items.map((i) => i.value));
+    const write = values('capability.writeAllow');
+    const danger = values('capability.dangerAllow');
+    assert.ok(write.length > 0 && danger.length > 0, '两张勾选表都不能为空');
+    for (const a of WRITE_ACTIONS) assert.ok(write.includes(a), `writeAllow 勾选表缺 ${a}`);
+    for (const a of DANGER_ACTIONS) assert.ok(danger.includes(a), `dangerAllow 勾选表缺 ${a}`);
+    // 反过来：写进 write 组的必须是 write 级（`send_*` 这类通配除外），勾错级会让人以为勾了能调。
+    for (const v of write) if (!v.endsWith('*')) assert.ok(WRITE_ACTIONS.has(v), `${v} 不在 write 级里`);
+    for (const v of danger) assert.ok(DANGER_ACTIONS.has(v), `${v} 不在 danger 级里`);
+    for (const key of Object.keys(table)) {
+      for (const g of table[key]) {
+        assert.ok(g.title && Array.isArray(g.items) && g.items.length > 0, `${key} 有空分组`);
+        for (const item of g.items) assert.ok(item.label && item.label.length > 1, `${key} 的 ${item.value} 缺标签`);
+      }
+    }
+  });
+
   assert.match(clientText, /const LIST_EDITORS = \{/, '要有列表编辑器规格表');
   assert.match(clientText, /renderListEditor/, 'renderRow 要接上列表编辑器');
   assert.match(clientText, /添加一个下游|addLabel/, '要能加一条');

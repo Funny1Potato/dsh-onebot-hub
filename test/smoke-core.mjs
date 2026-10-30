@@ -510,6 +510,13 @@ t('能力注册表：实测结论，1404 不下"不支持"结论', () => {
   // 英文/中文的实现端原文同样能下结论。
   reg.note('get_qq_avatar', { ok: false, retcode: 1, msg: '该接口不支持' });
   assert.equal(reg.get('get_qq_avatar').supported, 'unsupported');
+  // 1400/102 是"这次的参数不对"，同样不能把整条能力标成不支持——
+  // 2026-10-30 真机：send_private_msg 因一次参数错回了 1400，被标成 unsupported 之后
+  // 每次调用都被本地闸门直接拒，私聊发送就此瘫掉。
+  reg.note('send_private_msg', { ok: false, retcode: 1400, msg: '参数错误' });
+  assert.equal(reg.get('send_private_msg').supported, 'unknown');
+  reg.note('get_stranger_info', { ok: false, retcode: 102, msg: '格式错误' });
+  assert.equal(reg.get('get_stranger_info').supported, 'unknown');
   // 普通失败（超时）不下结论，只在记录里留一笔。
   reg.note('get_friend_list', { ok: false, retcode: 1200, msg: 'timeout' });
   assert.equal(reg.get('get_friend_list').supported, 'unknown');

@@ -48,6 +48,7 @@
 | `official.appId` | 字符串 | 空 | **应用 appId**：QQ 机器人开放平台的 AppID（纯数字）。开放平台只支持接一个机器人，所以这里只填一个。 |
 | `official.appSecret` | 字符串 | 空 | **appSecret（凭据）**：开放平台的 AppSecret，用来换 access token（有效期约 2 小时，自动续）。不回显明文。 |
 | `official.sandbox` | 布尔 | false | **沙箱环境**：开 = 连 sandbox.api.sgroup.qq.com（只能在开放平台配置的沙箱群里测试）；关 = 正式环境。 |
+| `official.intents` | 数字 | 0 | **订阅位（实验）**：0 = 用内置的「群与私聊」位（正常别动）。机器人后台开了新能力之后如果收不到群消息，可以填十进制订阅位试试；改完要重启宿主。 |
 | `official.crossShare` | 布尔 | false | **跨群共享活跃记忆**：官方模式下白名单不生效，所以默认只在同群共享「进行中的话题 / 我正在做的事」；打开才允许跨群可见。 |
 
 **不想手抄 appSecret？** 设置页「官方接口」那一组开头有「扫码连接」：用手机 QQ 扫码，枢纽自动拿回 `appId` / `appSecret` 并存进插件状态（`official/credentials.json`），扫完立刻用新凭据重连，不用重启。配置文件里显式写了 `appId` / `appSecret` 的话以配置为准——扫码存的那份只是兜底。

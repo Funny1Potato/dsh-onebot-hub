@@ -159,12 +159,107 @@ t('回复计划：窗口内、次数没用完 → 被动，并且序号递增', 
   assert.equal(replyPlan({ at: now, times: 3 }, now).passive, true);
 });
 
-t('回复计划：过 5 分钟或满 4 次 → 降级成主动（原因分开写）', () => {
+t('群主开了"接收全部消息"：全量群消息也进时间线，但**不**假装有人 @ 它', async () => {
+  const { up, events, sockets } = makeUpstream();
+  up.start();
+  await settle();
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'READY', d: { user: { id: 'BOT-9', username: 'x' } } }));
+  ws.emit(
+    'message',
+    JSON.stringify({
+      op: 0,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: { id: 'RAW-50', content: '今天谁去吃饭', group_openid: 'G-50', author: { member_openid: 'U-50' } },
+    }),
+  );
+  // 本测试里第二次 settle() 会等自己（pending 已含本测试）→ 死锁，只让位。
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(events.length, 1);
+  const ev = events[0];
+  assert.equal(ev.message_type, 'group');
+  // 关键：不补 at 段。补了的话 hub 会以为有人在叫它，全量群里每条消息都会唤醒 agent。
+  assert.equal(ev.message.some((seg) => seg.type === 'at' && String(seg.data?.qq) === ev.self_id), false);
+  assert.equal(String(ev.raw_message ?? '').includes('今天谁去吃饭'), true);
+});
+
+t('全量群消息里"@ 了它"的那种：认 mentions.is_you，不靠猜 openid（2026-10-29 真机）', async () => {
+  const { up, events, sockets } = makeUpstream();
+  up.start();
+  await settle();
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'READY', d: { user: { id: '6592229414871772896', username: 'x' } } }));
+  // 真机原样：开了全量之后，@ 它的消息也走 `GROUP_MESSAGE_CREATE`；正文里是 `<@9BDC…>`，
+  // 而 READY 给的 user.id 是另一串数字——只有 `mentions[].is_you` 能说明这是 @ 它自己。
+  ws.emit(
+    'message',
+    JSON.stringify({
+      op: 0,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'RAW-52',
+        content: '<@9BDCFB0D74E6161A7254BEF5C3FBE2FD> 在吗',
+        group_openid: 'G-52',
+        author: { member_openid: 'U-52', username: 'FunnyPotato', member_role: 'owner' },
+        mentions: [
+          {
+            bot: true,
+            id: '9BDCFB0D74E6161A7254BEF5C3FBE2FD',
+            is_you: true,
+            member_openid: '9BDCFB0D74E6161A7254BEF5C3FBE2FD',
+            username: '大肥鱼不是鱼',
+          },
+        ],
+      },
+    }),
+  );
+  // 本测试里第二次 settle() 会等自己（pending 已含本测试）→ 死锁，只让位。
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(events.length, 1);
+  const ev = events[0];
+  // 1) at 段指向 self_id（hub 靠这个判"在叫我"）
+  assert.equal(ev.message.some((seg) => seg.type === 'at' && String(seg.data?.qq) === ev.self_id), true);
+  assert.deepEqual(detectMention(ev, { selfId: ev.self_id }), ['at']);
+  // 2) 群友终于有名字、角色也有值了（之前一律空 / unknown）
+  assert.equal(ev.sender.nickname, 'FunnyPotato');
+  assert.equal(ev.sender.role, 'owner');
+});
+
+t('没见过的事件名留样本（status.unknownEvents），不当作消息', async () => {
+  const { up, events, sockets } = makeUpstream();
+  up.start();
+  await settle();
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'READY', d: { user: { id: 'BOT-9', username: 'x' } } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'GROUP_MSG_RECEIVE', d: { group_openid: 'G-51', op_member_openid: 'U-51' } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'GROUP_MSG_RECEIVE', d: { group_openid: 'G-51' } }));
+  // 本测试里第二次 settle() 会等自己（pending 已含本测试）→ 死锁，只让位。
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(events.length, 0, '开关通知不是消息，不能变成一条对话');
+  const seen = up.status.unknownEvents ?? [];
+  const hit = seen.find((x) => x.t === 'GROUP_MSG_RECEIVE');
+  assert.ok(hit, '未处理的事件要留下样本');
+  assert.equal(hit.n, 2);
+  assert.match(String(hit.sample), /G-51/);
+});
+
+t('回复计划：过 5 分钟或满 5 次 → 降级成主动（原因分开写）', () => {
   const now = Date.now();
   const old = replyPlan({ at: now - 6 * 60_000, times: 0 }, now);
   assert.equal(old.passive, false);
   assert.equal(old.reason, 'window');
-  const full = replyPlan({ at: now, times: 4 }, now);
+  // 官方文档：每个消息最多回复 5 次（以前按 4 次算，白丢一次额度）
+  assert.equal(replyPlan({ at: now, times: 4 }, now).passive, true);
+  const full = replyPlan({ at: now, times: 5 }, now);
   assert.equal(full.passive, false);
   assert.equal(full.reason, 'times');
 });
@@ -323,6 +418,54 @@ t('发送：带 reply 段且窗口内 → 被动回复，请求体带 msg_id 与
   up.stop();
 });
 
+t('发送：msg_id 越权（40034024）不降级重试——否则真错误被"主动消息无权限"顶掉', async () => {
+  let attempt = 0;
+  const fake = fakeFetch([
+    ['getAppAccessToken', () => json({ access_token: 'tk-1', expires_in: '7200' })],
+    ['/gateway', () => json({ url: 'wss://gw.example/ws' })],
+    [
+      '/v2/groups/',
+      () => {
+        attempt += 1;
+        return json({ code: 40034024, message: '请求参数msg_id无效或越权' }, 400);
+      },
+    ],
+  ]);
+  const events = [];
+  const sockets = [];
+  const up = new OfficialUpstream({
+    appId: '102030',
+    appSecret: 'sec',
+    fetchImpl: fake.fetchImpl,
+    wsFactory: (url) => {
+      const w = new FakeWs(url);
+      sockets.push(w);
+      return w;
+    },
+    log: () => {},
+    onEvent: (e) => events.push(e),
+  });
+  up.start();
+  while (!sockets.length) await new Promise((r) => setTimeout(r, 0));
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  ws.emit(
+    'message',
+    JSON.stringify({ op: 0, t: 'GROUP_AT_MESSAGE_CREATE', d: { id: 'raw-88', content: '在吗', group_openid: 'G-3', author: { user_openid: 'O-88' } } }),
+  );
+  await new Promise((r) => setTimeout(r, 10));
+  const res = await up.request('send_group_msg', {
+    group_id: events[0].group_id,
+    message: [{ type: 'reply', data: { id: 'raw-88' } }, { type: 'text', data: { text: '在' } }],
+  });
+  assert.equal(res.status, 'failed');
+  // 只发了一次：这是请求写错了，不是"被动过期"，不该换条路再撞一堵墙。
+  assert.equal(attempt, 1, '不该降级成主动消息重试');
+  assert.match(String(res.message), /无效或越权/);
+  assert.doesNotMatch(String(res.message), /主动消息/);
+});
+
 t('发送：被动被拒（400）→ 就地降级成主动，回执写明 degraded 与上游原话', async () => {
   let attempt = 0;
   const sent = [];
@@ -393,8 +536,65 @@ t('不支持的 action 明确回 1404，而不是超时或空回', async () => {
   const name = [...UNSUPPORTED_ACTIONS][0];
   const res = await up.request(name, {});
   assert.notEqual(res.status, 'ok');
-  assert.equal(res.retcode, 1404);
+  assert.equal(res.retcode, 100);
   assert.match(String(res.message ?? res.wording ?? ''), /不支持/);
+});
+
+t('能力盘点（m38120 之后）：合并转发/群公告/历史消息明确说"没有"，而不是含糊的 1404', async () => {
+  const { up } = makeUpstream();
+  const fwd = await up.request('send_group_forward_msg', { group_id: 1, messages: [] });
+  // 100 = "实现端不支持该 action"；1404（目标不存在）会让人以为是自己传错了号。
+  assert.equal(fwd.retcode, 100);
+  assert.match(fwd.message, /合并转发/);
+  const hist = await up.request('get_group_msg_history', { group_id: 1 });
+  assert.equal(hist.retcode, 100);
+  assert.match(hist.message, /历史消息/);
+  // 健康检查本地就能答，不该因为"没连上"或"不支持"报错
+  const st = await up.request('get_status', {});
+  assert.equal(st.status, 'ok');
+  const ver = await up.request('get_version_info', {});
+  assert.equal(ver.status, 'ok');
+});
+
+t('错误文案要走 `msg`：只放 `message` 的话，shapeResult 读不到，模型只看到"未知 retcode"', async () => {
+  const { up } = makeUpstream();
+  const res = await up.request('send_group_msg', { group_id: 1, message: [] });
+  assert.equal(res.status, 'failed');
+  assert.ok(res.msg && res.msg.length > 0, 'msg 必须带上，否则上游原话在枢纽那一层就丢了');
+  assert.equal(res.msg, res.message, '两个字段同时存在且一致');
+});
+
+t('@ 某人：虚拟号换不出 openid 就不发那个 at，并告诉模型它没 @ 上', async () => {
+  const { up, fake } = makeUpstream({
+    routes: [
+      ['getAppAccessToken', () => json({ access_token: 'tk-1', expires_in: '7200' })],
+      ['/gateway', () => json({ url: 'wss://gw.example/ws' })],
+      ['/v2/groups/', () => json({ id: 'msg-77' })],
+    ],
+  });
+  const tick = async () => { for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0)); };
+  up.start();
+  await tick();
+  const ws = FakeWs.last;
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 0, t: 'GROUP_MESSAGE_CREATE', d: {
+    id: 'raw-7', content: ' 在吗', group_openid: 'G-7', group_id: 'G-7',
+    author: { member_openid: 'O-7', username: '小明' },
+    mentions: [{ bot: true, is_you: true, member_openid: 'bot', username: 'bot' }],
+  } }));
+  await tick();
+  // 3820113110 这类虚拟号不在对端表里 → 这个 at 不能原样发出去
+  const res = await up.request('send_group_msg', {
+    group_id: 'G-7',
+    message: [
+      { type: 'at', data: { qq: '3820113110' } },
+      { type: 'text', data: { text: '你好' } },
+    ],
+  });
+  assert.equal(res.status, 'ok', JSON.stringify(res));
+  assert.equal(res.data.droppedAt, 1);
+  const call = fake.calls.at(-1);
+  assert.ok(!String(call.body?.content ?? '').includes('3820113110'), '不能把虚拟号当 openid 发出去');
 });
 
 t('get_login_info 回虚拟身份（下游按 OneBot 形状问也能答）', async () => {
@@ -617,6 +817,32 @@ t('私聊：回复打的是 openid，不是虚拟号', async () => {
   up.stop();
 });
 
+t('没写 quote 也要走被动回复：官方主动消息要单独开通权限（m37568）', async () => {
+  const { up, fake, sockets } = makeUpstream();
+  up.start();
+  await settle();
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'READY', d: { user: { id: 'BOT', username: 'x' } } }));
+  ws.emit(
+    'message',
+    JSON.stringify({ op: 0, t: 'GROUP_AT_MESSAGE_CREATE', d: { id: 'RAW-9', content: '在吗', group_openid: 'G-9', author: { user_openid: 'U-9' } } }),
+  );
+  // 注意：测试里的第二次 settle() 会等自己（pending 已含本测试）→ 死锁，这里只让位。
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+  const gid = virtualId('102030', 'group', 'G-9');
+  // 调用方**不带** reply 段：它不知道也没关系，枢纽替它引用最近进来那条。
+  const out = await up.request('send_group_msg', { group_id: gid, message: [{ type: 'text', data: { text: '在的' } }] });
+  assert.equal(out.retcode, 0, JSON.stringify(out));
+  assert.equal(out.data?.degraded, undefined, '自动引用之后不该降级成主动消息');
+  const sent = fake.calls.find((c) => c.url.includes('/v2/groups/'));
+  assert.equal(sent.body.msg_id, 'RAW-9', '没写 quote 时应自动引用最近一条进来的消息');
+  assert.equal(sent.body.msg_seq, 1);
+
+  up.stop();
+});
+
 t('群里的 @ 官方不放进 content：枢纽要自己补一个指向 self_id 的 at（m37239）', async () => {
   const { up, events, sockets } = makeUpstream();
   up.start();
@@ -711,6 +937,46 @@ t('对端表落盘：重建实例（同一份 storage）仍然认识刚说过话
 });
 
 // ---- 汇总 ---------------------------------------------------------------------
+
+await settle();
+t('撤回：打的是 DELETE /v2/groups/{openid}/…，且要知道发在谁身上（m38120）', async () => {
+  const { up, fake } = makeUpstream({
+    routes: [
+      ['getAppAccessToken', () => json({ access_token: 'tk-1', expires_in: '7200' })],
+      ['/gateway', () => json({ url: 'wss://gw.example/ws' })],
+      ['/v2/groups/', () => json({ id: 'msg-100' })],
+      ['/v2/messages/', () => json({}, 200), ],
+      ['/v2/users/', () => json({ id: 'msg-200' })],
+      ['messages/msg-100', () => json({}, 200)],
+    ],
+  });
+  const tick = async () => { for (let i = 0; i < 20; i += 1) await new Promise((r) => setTimeout(r, 0)); };
+  up.start();
+  await tick();
+  const ws = FakeWs.last;
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 0, t: 'GROUP_MESSAGE_CREATE', d: {
+    id: 'raw-1', content: '<@bot> 在吗', group_openid: 'G-9', group_id: 'G-9',
+    author: { member_openid: 'O-1', username: '小明' },
+    mentions: [{ bot: true, is_you: true, member_openid: 'bot', username: 'bot' }],
+  } }));
+  await tick();
+  // 先发一条（记下 id → 对象），再撤
+  const sent = await up.request('send_group_msg', { group_id: 'G-9', message: [{ type: 'text', data: { text: 'hi' } }] });
+  assert.equal(sent.status, 'ok', JSON.stringify(sent));
+  const del = await up.request('delete_msg', { message_id: sent.data.message_id });
+  assert.equal(del.status, 'ok', JSON.stringify(del));
+  const call = fake.calls.at(-1);
+  assert.equal(call.method, 'DELETE', '官方撤回是 DELETE，不是 POST');
+  assert.match(call.url, /\/v2\/groups\/G-9\/messages\/msg-100$/);
+  assert.equal(call.body, null, 'DELETE 不带请求体');
+
+  // 不认识的 id、又没给对象 → 明确说清为什么撤不了，而不是打一个 404 回来
+  const blind = await up.request('delete_msg', { message_id: 'msg-999' });
+  assert.equal(blind.status, 'failed', JSON.stringify(blind));
+  assert.match(blind.message, /光有消息 id 不够|哪个群/);
+  assert.match(blind.message, /group_id/);
+});
 
 await settle();
 const failed = cases.filter((c) => !c.ok);
