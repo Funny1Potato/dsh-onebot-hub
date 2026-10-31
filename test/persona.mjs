@@ -362,13 +362,13 @@ t('没有 storage（dir 为空）时退化为纯内存，不抛异常', () => {
 
 // --- 自带预设（`m24027`） ----------------------------------------------------
 
-t('自带两条：默认仍是「小助手」，「蓝色大肥鱼」带 8 条知识且拼出来像一句话', () => {
+t('自带两条：默认仍是「小助手」，「蓝色大肥鱼」带 10 条知识且拼出来像一句话', () => {
   const { store } = scratch();
   const names = store.list().map((p) => p.name);
   assert.deepEqual(names, [DEFAULT_PRESET_NAME, '蓝色大肥鱼'], '默认那条永远排最前');
   assert.equal(store.defaultName, DEFAULT_PRESET_NAME, '默认还是小助手，不是新加的那条');
   const whale = store.get('蓝色大肥鱼');
-  assert.equal(whale.knowledges.length, 8);
+  assert.equal(whale.knowledges.length, 10);
   // role 不能自带"我是"：`render()` 拼的是 `你是 {名字}，{role}`，留着会变成两个人在说话。
   assert.ok(!whale.role.startsWith('我是'), `role 不该以"我是"开头：${whale.role.slice(0, 20)}`);
   store.bind('group:1', '蓝色大肥鱼');
@@ -376,7 +376,7 @@ t('自带两条：默认仍是「小助手」，「蓝色大肥鱼」带 8 条�
   assert.ok(text.startsWith('你是 蓝色大肥鱼，'), text.slice(0, 40));
   assert.ok(!text.includes('你是 蓝色大肥鱼，我是'), '不许出现"你是 X，我是 Y"');
   assert.ok(text.includes('## 你的知识'));
-  assert.equal(text.split('\n- ').length - 1, 8, '八条知识都要进 prompt');
+  assert.equal(text.split('\n- ').length - 1, 10, '十条知识都要进 prompt');
 });
 
 t('自带预设只补缺的：用户改过的那条不会被下一次启动覆盖', async () => {

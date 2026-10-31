@@ -120,9 +120,11 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 
 ### 第 2 步：把你的 QQ 实现端接上来
 
+设置页里上游只有三格：**类型**（OneBot / QQ 官方机器人）、**连接方式**（反向 WS / 正向 WS）、**地址**。
+
 推荐**让实现端反连 hub**（不用在 hub 里填上游地址，实现端换 IP 也不影响）：
 
-1. 在设置页填 `upstreamListen`：
+1. 类型选 **OneBot**、连接方式选 **反向 WS**，地址填：
 
    ```
    127.0.0.1:8765/onebot/v11/ws
@@ -140,7 +142,9 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 
 **怎么确认接上了**：在 hub 自己的会话里问它一句，让它调 `onebot_hub_status`；或者看设置页顶部状态。日志在 `<storageDir>/startup.log`（默认 `~/.dsh/onebot-hub/startup.log`）。
 
-> 也可以反过来——hub 主动拨实现端：填 `upstreamUrl`（形如 `ws://127.0.0.1:3001`），`upstreamListen` 留空。两者**二选一**。
+> 也可以反过来——hub 主动拨实现端：连接方式选 **正向 WS**，地址填 `ws://127.0.0.1:3001`。两种方式**二选一**。
+>
+> 老配置不用改：`upstreamListen` / `upstreamUrl` 照旧读，hub 会从它们推出「连接方式 + 地址」并记一行日志。想让上游换成 QQ 官方机器人，类型选那个即可（[实验性](#-上游换成-qq-官方机器人实验性)）。
 
 ### 第 3 步：告诉它"哪些群可以说话"
 
@@ -166,7 +170,7 @@ pnpm add file:D:/path/to/dsh-onebot-hub         # 本地目录：改完重启即
 
 | 键 | 说明 |
 | --- | --- |
-| `upstreamListen` | 接哪台 QQ 实现端。推荐用它（让实现端反连）。与 `upstreamUrl` 二选一 |
+| `upstreamType` / `upstreamMode` / `upstreamAddress` | 接哪台 QQ 实现端：先选类型（`''` OneBot / `official` 官方），再选连接方式（反向 WS 让实现端反连，推荐；正向 WS 让 hub 拨过去），最后填地址。老键 `upstreamListen` / `upstreamUrl` 仍可用，hub 会自己推出这三格 |
 | `downstreamTargets` | 下游列表，JSON 数组，可多条。**不接下游就留空** |
 | `agent.groups` / `agent.privates` | 白名单：写了的群/QQ 才调模型。两张都空 = 全部静音 |
 | `chatCommands.superUsers` | 谁能用管理命令。留空 = 命令链整条沉默 |
@@ -293,7 +297,7 @@ agent 不是"每轮都把聊天记录读一遍"，它有**三层心智 + 五个�
 
 ### 上游：接哪台 QQ 实现端
 
-`upstreamListen`（推荐，实现端反连）或 `upstreamUrl`（hub 拨出去）二选一。上游账号一般留空，连上后自动认（握手头 / 事件 / `get_login_info`）。
+设置页里就三格：**类型**（OneBot / QQ 官方）、**连接方式**（反向 WS / 正向 WS）、**地址**。反向 WS 让实现端反连（推荐，实现端换 IP 也不影响），正向 WS 让 hub 拨过去。老键 `upstreamListen` / `upstreamUrl` 照旧读，hub 会自己推出「连接方式 + 地址」。上游账号一般留空，连上后自动认（握手头 / 事件 / `get_login_info`）。
 
 不想装协议端的话，也可以让 hub 直接连 QQ 官方机器人接口 —— 见下一节，**实验性**。
 
@@ -673,7 +677,7 @@ cross:
 | 症状 | 先看哪里 |
 | --- | --- |
 | 插件起不来 / 设置页一直转圈 | `<storageDir>/startup.log`，逐阶段标记 + 失败堆栈 |
-| 上游连不上 | 设置页状态；`upstreamListen` 的路径要和实现端填的**完全一致**（含 `/onebot/v11/ws`） |
+| 上游连不上 | 设置页状态；反向 WS 的**路径要和实现端填的完全一致**（含 `/onebot/v11/ws`）；`onebot_hub_status` 里的 `upstream.mode` 会告出 hub 认成了哪种连接方式 |
 | 它在群里不说话 | ① `agent.groups` 里有这个群吗 ② 是不是没被 @ / 没被引用 ③ 下游刚答过（命令静默）④ 额度用完了 ⑤ `agent.speakAssistantText` 没开时它写在正文里的话不算发言 |
 | 命令没反应 | `chatCommands.superUsers` 空着 = 整条命令链沉默 |
 | 下游收不到事件 | `preset` 是不是 `solo`；`downstreamTargets` 那一行是不是没勾"启用"；`broadcast` 关掉时只投第一条可用链路 |
@@ -686,7 +690,7 @@ cross:
 <details>
 <summary>装完之后普通 DSH 会话里怎么调不到 onebot_* 工具？</summary>
 
-这是设计如此：这 29 个工具注册在**枢纽自己的会话作用域**里，不是 profile 全局层。要在枢纽的会话里调，普通会话和子代理都看不见。
+这是设计如此：这 30 个工具注册在**枢纽自己的会话作用域**里，不是 profile 全局层。要在枢纽的会话里调，普通会话和子代理都看不见（唯一的全局工具是 `onebot_session`，而且默认关）。
 </details>
 
 <details>
@@ -736,6 +740,7 @@ node --import ./test/register-stubs.mjs test/load-check.mjs   # 装配与工具�
 
 | 版本 | 要点 |
 | --- | --- |
+| **`0.12.4`** | **上游只剩三格**：类型（OneBot / QQ 官方机器人）、连接方式（反向 / 正向 WS）、地址——老键 `upstreamListen` / `upstreamUrl` 照旧读，hub 自己推出这三格。**「让下游干活」也算这一轮动过手**：注入下游、执行管理动作、发媒体、建删任务都不再被当成沉默（只读查询、预测、预演仍然算），连续两轮没留痕才回休眠。**一次 `onebot_invoke` 里的两个身份分开讲**：说话人（`user_id`，下游按它判权限）与链路（默认探针、可 `link:"real"`），回执第一行直接答「哪条链路 / 谁说的 / 回复进不进群」。**可以遮蔽别的插件塞进提示词的段落**（`agent.hidePromptSections`，默认空）：用来去掉对 QQ 场景没用的全局注入（例如 `raw-html-v2:vcp` 那套 HTML 渲染协议）。自带人设「蓝色大肥鱼」换成网友后来写的第二人称版（10 条知识）。另加：官方通道喂下游三修、表情表换成 QQ 客户端那份（329 条）、群通知进群会话、长回复不再被砍。 |
 | `0.12.4-beta.2` | **「让下游干活」也算这一轮动过手**：注入下游、执行管理动作、发媒体、建删任务都不再被当成沉默（只读查询、预测、预演仍然算），连续两轮没留痕才回休眠——数字没动，只改了「留痕」的定义。**一次 `onebot_invoke` 里的两个身份分开讲**：说话人（`user_id`，下游按它判权限）与链路（默认探针、可 `link:"real"`）各自说清，回执第一行直接答「哪条链路 / 谁说的 / 回复进不进群」，措辞里不再出现「另一个账号」。 |
 | `0.12.4-beta.1` | **上游配置收成三格**：一个类型（OneBot / QQ 官方）、一个连接方式（反向 / 正向 WebSocket）、一个地址——老配置照旧读，不用改。**官方通道开始能喂下游**：官方那种 `ROBOT1.0_…` 长 id 投给下游前换数字、补上 OneBot 必填的 `font`（少这一个字段下游会把整条事件静默丢掉）、「这个人是谁」三条查询（成员信息 / 陌生人 / 群信息）改由枢纽用档案本地答——下游插件解析 @ 不再失败。**表情表换成 QQ 客户端那份**（329 条），表情回应的编号按真机校准分开记。**群里的通知终于进群会话**（撤回、戳一戳、被禁言、进群退群、表情回应以前全落在 `other:notice`，一个都看不见）。**长回复不再被砍**：文字超过条数上限时并进上一条，而不是丢掉尾巴。另外快照里写明哪个工具放行了哪些动作，`cross` 关着时模型看不到 `onebot_session`。 |
 | `0.12.3` | 官方接口这一轮全部是"真机撞出来的"：**全量群消息**能接了（群里别人聊的话也进时间线，但不会把 agent 叫醒——@ 的判定改用官方给的 `mentions`，不再靠正文里那个 `<@…>`），没见过的事件会留样本方便对名字；**回话不再被当成"主动消息"**（没写引用就自动引用最近那条进来消息，主动失败时把"为什么成了主动"写清）；**错误文案不再被吞**（官方只写 `message`，枢纽以前读 `msg`，模型只能看到"未知 retcode"）、HTTP 状态码不再直接当 retcode（404 会被读成"这能力不存在"）；**撤回**打对了端点并记住了消息发在谁身上；一次参数错（1400）不再把整条能力标成"不支持"，能力白名单在设置页改成了勾选项。 |
@@ -764,9 +769,9 @@ A DeepSeek Harness plugin that puts DSH on an OneBot v11 bus: LLOneBot / NapCat 
 
 - **Upstream** — dial or listen for the real implementation, so the agent sees every event and has every action available.
 - **Downstream** — serve or dial downstream links and **relay events verbatim**, so existing bot plugins keep working unchanged.
-- **Observer** — a full timeline of every message plus a ledger of what each downstream bot did, exposed to the agent as 29 `onebot_*` tools.
+- **Observer** — a full timeline of every message plus a ledger of what each downstream bot did, exposed to the agent as 31 `onebot_*` tools (30 in hub sessions + 1 global).
 - **Agent** — wake logic, layered memory (active / long-term index / person / group / topic), persona presets, per-group quotas.
-- **Cross-session relay** (off by default, from `0.12.0`; prerelease only for now) — one session's agent hands a picture, a mini-program card or a merged forward to *another* session, then both sides keep talking on the same short-lived channel; private-chat originals are never moved verbatim into a group, only paraphrased and filtered.
+- **Cross-session relay** (off by default, stable since `0.12.0`; marked experimental) — one session's agent hands a picture, a mini-program card or a merged forward to *another* session, then both sides keep talking on the same short-lived channel; private-chat originals are never moved verbatim into a group, only paraphrased and filtered.
 
 Install: `dsh plugin --profile <profile> add dsh-onebot-hub`. Configuration, commands and behavior notes are in Chinese above, and every config key is documented in [docs/config.md](docs/config.md).
 
