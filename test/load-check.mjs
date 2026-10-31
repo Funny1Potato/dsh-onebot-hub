@@ -414,6 +414,7 @@ check('Config schema 能填默认值', () => {
   const filled = Config({});
   assert.equal(plainConfig(filled.agent.mode), 'assist');
   assert.equal(plainConfig(filled.agent.batchSize), 10);
+  assert.equal(plainConfig(filled.agent.keepTools), '');
   assert.equal(plainConfig(filled.agent.batchMs), 20000);
   // issue #1：会话归属默认**什么都不改**——不进工作区、结束即归档。
   assert.equal(plainConfig(filled.agent.workspace), '');
@@ -475,6 +476,16 @@ check('Config schema 能填默认值', () => {
   // 分群额度（m14190）：**没有全局额度块**了 —— 口径/单价/限额/报数都挂在
   // `groups`/`privates` 白名单每一行的 `quota` 上，没勾"启用"的行＝不限。
   assert.equal(plainConfig(filled.agent.quota), undefined, '别把全局额度块加回来（额度按群逐行配）');
+});
+
+// 额外放行的全局工具（`m73105`）：逗号/空白分隔、去重、默认空。
+// 这里只验解析；真正"放不放得进工具面"取决于那个名字当下存不存在（见 defaultToolDeny）。
+check('keepTools 解析：逗号/空白分隔、去重、默认空', () => {
+  assert.deepEqual(resolveConfig({}).keepTools, []);
+  assert.deepEqual(
+    resolveConfig({ agent: { keepTools: ' bash , write,,  bash\ttool_x ' } }).keepTools,
+    ['bash', 'write', 'tool_x'],
+  );
 });
 
 check('设置页文字：每一个配置项在 client.js 里都有中文名与说明，且不多不少', () => {

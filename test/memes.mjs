@@ -174,6 +174,33 @@ t('renderForPrompt：列出所有 id 与中文描述，并逐字带上"只能使
   assert.equal(text.split('\n').length, 4, '一行表头 + 三行清单');
 });
 
+t('renderForPrompt：新入库的单独列出来（newShown=0 时回到旧行为）', async () => {
+  const { store } = makeStore();
+  // 10 张老图，每张都用过；再来 3 张新的（uses=0）。
+  for (let i = 0; i < 10; i += 1) {
+    await store.collect({ bytes: Buffer.from(`old-${i}`), keywords: ['日常'], description: `老图${i}` });
+    store.noteUse(`m${i + 1}`);
+  }
+  for (let i = 0; i < 3; i += 1) {
+    await store.collect({ bytes: Buffer.from(`new-${i}`), keywords: ['开心'], description: `新图${i}` });
+  }
+
+  const text = store.renderForPrompt({ limit: 2, newShown: 2 });
+  // 最近用过 5 张（recentShown 默认）+ 高频 2 张 = 常用的 7 个；新入库取最新 2 张。
+  assert.match(text, /下面列出常用的 7 个、新入库 2 个，全库共 13 个/, '标题三个数都要写');
+  assert.ok(text.includes('【新入库】（还没用过）'), '要有一个分块标记');
+  const idx = text.indexOf('【新入库】');
+  const freshBlock = text.slice(idx);
+  assert.ok(freshBlock.includes('新图2'), '最新的那张要在新入库里');
+  assert.ok(!freshBlock.includes('老图'), '常用的不该出现在新入库块里');
+  // 最后一行是表头，其后：2 常用 + 1 分块标记 + 2 新入库。
+  assert.equal(text.split('\n').length, 1 + 7 + 1 + 2);
+
+  const off = store.renderForPrompt({ limit: 2, newShown: 0 });
+  assert.ok(!off.includes('【新入库】'));
+  assert.match(off, /新入库 0 个/);
+});
+
 t('renderForPrompt：最近使用过的即使不在高频前 limit 个里也必须出现', async () => {
   const { store } = makeStore();
   for (let i = 0; i < 12; i += 1) {
@@ -194,11 +221,17 @@ t('renderForPrompt：最近使用过的即使不在高频前 limit 个里也必�
    * 标题却写"共 128 个"而清单只有 8 行——读起来像漏注入了一百多个。列出来的条数是
    * `limit + recentShown`（去重后），跟全库总数不是一回事，所以两个数都要写。
    */
-  assert.match(text, /^表情包库（用于发送；下面列出常用的 9 个，全库共 12 个；/, '标题要同时说清"列了几个"和"全库几个"');
+  // 三个数（`m73189`）：常用 + 新入库 + 全库。这条用例没传 newShown，所以新入库是 0。
+  assert.match(
+    text,
+    /^表情包库（用于发送；下面列出常用的 9 个、新入库 0 个，全库共 12 个；/,
+    '标题要同时说清"列了几个"和"全库几个"',
+  );
   const listed = lines.filter((l) => l.startsWith('- m')).length;
   assert.equal(listed, 9, '标题里的"列出的 N 个"要等于实际行数，不能拿 total 冒充');
   assert.ok(text.includes('全库共 12 个'), '全库总数照旧写出来');
 });
+
 
 // ---- 使用与持久化 -------------------------------------------------------------
 
@@ -543,6 +576,42 @@ t('importAigf：导入条目带 savedBy，重建 store 不经过"老条目清洗
   assert.equal(reborn.get('m1').savedBy, 'import:aigf-master');
   const next = await reborn.collect({ bytes: Buffer.from('new'), brief: '后续收藏' });
   assert.equal(next.id, 'm2', 'seq 续上，id 不撞');
+});
+
+// ---- 来源切换（`m73315`）：指导语按 engine 换说法 ----------------------------
+
+t('指导语：builtin 讲收藏判断，plugin 只列外部工具名', async () => {
+  const { buildHubGuidance } = await import('../lib/index.js');
+  const builtin = buildHubGuidance({ memes: { engine: 'builtin' } });
+  assert.match(builtin, /表情包收藏判断/);
+  assert.match(builtin, /onebot_memes\{action:"add"/);
+  assert.ok(!builtin.includes('表情包交给外部插件'), 'builtin 不该出现外部插件那段');
+
+  const plugin = buildHubGuidance({ memes: { engine: 'plugin', pluginTool: ['meme_search', 'meme_save'] } });
+  assert.match(plugin, /表情包交给外部插件/);
+  assert.match(plugin, /- meme_search/);
+  assert.match(plugin, /- meme_save/);
+  assert.ok(!plugin.includes('表情包收藏判断'), 'plugin 下自带库的收藏判断要整段消失');
+  assert.ok(!plugin.includes('onebot_memes{action'), 'plugin 下不该再点名自带库的工具');
+  // 只列名字，不替别人的工具承诺能力（`m73322`）
+  assert.ok(!/meme_save[^\n]*存起来/.test(plugin), '不该假设外部工具有保存能力');
+  assert.match(plugin, /也可以直接使用合适的表情包替代你的发言/);
+});
+
+t('指导语：plugin 但一个工具都没有时，明说没有可用工具且不降级', async () => {
+  const { buildHubGuidance } = await import('../lib/index.js');
+  const text = buildHubGuidance({ memes: { engine: 'plugin', pluginTool: [] } });
+  assert.match(text, /没有可用的表情工具/);
+  assert.match(text, /不要自己编表情包 id/);
+  assert.ok(!text.includes('表情包收藏判断'), '不降级回 builtin');
+});
+
+t('指导语：both 两套都在，且提醒各数各的', async () => {
+  const { buildHubGuidance } = await import('../lib/index.js');
+  const text = buildHubGuidance({ memes: { engine: 'both', pluginTool: ['meme_search'] } });
+  assert.match(text, /- meme_search/);
+  assert.match(text, /onebot_memes/);
+  assert.match(text, /两套库各数各的/);
 });
 
 // ---- 汇总 ---------------------------------------------------------------------

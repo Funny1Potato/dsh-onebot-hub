@@ -59,6 +59,8 @@ const [
   import('../lib/capability.js'),
 ]);
 
+const { MEME_ENGINES } = await import('../lib/index.js');
+
 /** 把 `const <marker> = {…}` 抠出来（括号配对，跳过字符串）并 JSON.parse。 */
 const objectLiteralOf = (marker) => {
   const at = clientText.indexOf(`const ${marker} = `);
@@ -235,6 +237,7 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
     upstreamMode: UPSTREAM_MODES,
     'tts.provider': PROVIDER_IDS,
     'tts.shape': SHAPE_IDS,
+    'memes.engine': MEME_ENGINES,
   };
   for (const [key, values] of Object.entries(expect)) {
     const row = table[key];
