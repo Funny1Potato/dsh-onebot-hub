@@ -1434,13 +1434,42 @@ check('onebot_invoke 能在工具层指定说话人 user_id，并明说换账号
   assert.ok(desc.includes('换 `user_id`') && desc.includes('换结果'), '工具说明没提醒"换账号就是换结果"');
   assert.ok(desc.includes('别拿默认账号的结果当成所有人的结果'), '工具说明没给出"要用目标账号再试一次"的用法');
   const uid = String(invokeTool.parameters.user_id.description ?? '');
-  assert.ok(uid.includes('不写') && uid.includes('换账号就是换说话人'), 'user_id 参数说明不清楚');
+  // `m72467`：说清“说话人是可换的、换了结果可能不同”，但不许和“链路”混为一谈。
+  assert.ok(uid.includes('不写'), 'user_id 参数说明没说默认是谁');
+  assert.ok(/以谁的身份|说话人/.test(uid), 'user_id 参数说明没讲清它是“说话人”');
+  assert.ok(/一个人能触发|换账号/.test(uid), 'user_id 参数说明没提醒换了人结果会变');
+  assert.ok(!uid.includes('链路') || uid.includes('和'), 'user_id 说明别把链路混进来');
+});
+
+check('onebot_invoke 的双身份（m72467）：说话人讲清、链路不点名、措辞里没有“另一个账号”', () => {
+  const t = hubTools().find((x) => x.name === 'onebot_invoke');
+  const desc = String(t.description ?? '');
+  // 首句就该说清“这是让下游替你做事”，而不是“这是探针”。
+  assert.ok(desc.startsWith('让下游 bot 替你做事'), `工具描述首句不对：${desc.slice(0, 40)}`);
+  const all = desc + String(t.parameters.user_id?.description ?? '');
+  assert.ok(!/另一个账号/.test(all), '不许再提“另一个账号”：链路只说“和真实链路不同”');
+  // 说话人必须讲清（它是 agent 唯一能控制的那一半）。
+  assert.ok(/说话人|以谁的身份/.test(all), '没说清 user_id 是“说话人”');
+  // 链路那半边也只能说“和真实链路不同”，不报任何号。
+  assert.ok(!/probeSelfId/.test(desc), '工具描述不该把探针链路的配置细节塞给模型');
+});
+
+check('痕迹口径（m72467）：noteExternal 存在——让下游干活不算沉默', () => {
+  assert.equal(typeof Mind.prototype.noteExternal, 'function', 'Mind 必须能记“这一轮动过手”');
 });
 
 check('onebot_invoke / onebot_relay_probe：注入只选**下游**，物理链路由枢纽决定（m02768）', () => {
   const invokeTool = hubTools().find((t) => t.name === 'onebot_invoke');
   assert.ok(invokeTool.parameters.downstream, 'onebot_invoke 缺 downstream（只有它才能真正"选下游"）');
-  assert.ok(invokeTool.parameters.allow_real_link, 'onebot_invoke 缺 allow_real_link 逃生口');
+  // `m72467`：逃生口只在链路隔离档下才有意义（别的档只有真实链路），所以按当前档断言。
+  const linkModeOn = hub.config?.probe?.isolation === "link";
+  if (linkModeOn) {
+    assert.ok(invokeTool.parameters.link, 'onebot_invoke 缺 link 参数（链路隔离档下要能选链路）');
+    assert.ok(invokeTool.parameters.allow_real_link, 'onebot_invoke 缺 allow_real_link 逃生口');
+  } else {
+    assert.ok(!invokeTool.parameters.link, '非链路隔离档下不该出现 link 参数（只有真实链路）');
+    assert.ok(!invokeTool.parameters.allow_real_link, '非链路隔离档下不该出现 allow_real_link');
+  }
   assert.ok(
     /mode=action/.test(String(invokeTool.parameters.linkId?.description ?? '')),
     'onebot_invoke 的 linkId 必须注明只对 mode=action 有意义（否则 agent 会拿它点物理链路）',
