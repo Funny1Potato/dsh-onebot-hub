@@ -201,6 +201,8 @@ const hintFor = (tree, key) => {
 const BASE_VALUE = {
   preset: 'relay',
   deliveryMode: 'transparent',
+  upstreamMode: 'reverse',
+  upstreamAddress: '127.0.0.1:14514',
   upstreamUrl: '',
   upstreamListen: '127.0.0.1:14514',
   downstreamTargets: '[{"type":"ws-dial","address":"127.0.0.1:8080/onebot/v11/ws","selfId":"30001"},{"type":"ws-listen","address":"127.0.0.1:8654/onebot/v11/ws","enabled":false}]',
@@ -217,6 +219,7 @@ await check('枚举字段渲染成下拉，且默认选中当前值', () => {
   const expected = {
     preset: ['relay', 'solo', 'shadow', 'bridge', 'fabric'],
     deliveryMode: ['transparent', 'replay', 'synthesize'],
+    upstreamMode: ['reverse', 'forward'],
     'agent.mode': ['assist', 'observer', 'active'],
     'vision.mode': ['describe', 'segment', 'both', 'off'],
     'anime.backend': ['off', 'anime-recognize', 'animetrace', 'both'],
@@ -235,7 +238,7 @@ await check('枚举字段渲染成下拉，且默认选中当前值', () => {
   assert.equal(controls.get('agent.mode').props.value, 'assist', '下拉要先显示当前值');
   assert.equal(controls.get('preset').props.value, 'relay');
   // 非枚举字段保持原样（文本框），别把什么都做成下拉
-  const url = controls.get('upstreamUrl');
+  const url = controls.get('upstreamAddress');
   assert.equal(url.type, 'input');
   assert.equal(url.props.type, 'text');
   const reports = app.reports().map((row) => row.kind);
@@ -297,7 +300,7 @@ await check('每个配置项都有人话：中文名 + 完整配置键 + 一句�
     assert.ok(zh.trim().length >= 4, `${key} 的说明太短：${text}`);
   }
   assert.ok(labels.get('agent.mode').includes('代理模式'), `agent.mode 的中文名不对：${labels.get('agent.mode')}`);
-  assert.ok(labels.get('upstreamListen').includes('反向监听'), 'upstreamListen 要讲清"是上游拨进来的"');
+  assert.ok(labels.get('upstreamMode').includes('连接方式'), 'upstreamMode 要讲清正向/反向');
 });
 
 await check('布局自适应：标签列按比例分、窄容器整栏堆叠（别再写死 260px）', () => {
@@ -588,23 +591,29 @@ await check('私聊白名单：额度面板同样在行内（和群一样，m141
   const text = (() => { let out = ''; walk(control, (node) => { out += textOf(node); }); return out; })();
   assert.ok(text.includes('按 token · 每日 1000'), `私聊那行也要写出按 token 与限额：${text}`);});
 
-await check('没默认值的两项仍然渲染成空行（"没配"不等于"这一行不存在"）', () => {
+await check('没默认值的项仍然渲染成空行（"没配"不等于"这一行不存在"）', () => {
   const withoutBoth = { ...BASE_VALUE };
-  delete withoutBoth.upstreamListen;
+  delete withoutBoth.upstreamMode;
+  delete withoutBoth.upstreamAddress;
   delete withoutBoth.downstreamTargets;
   const app = boot(withoutBoth);
   const controls = controlsFor(app.render());
-  assert.ok(controls.has('upstreamListen'), '上游监听地址要仍在（否则永远没机会配它）');
-  assert.equal(controls.get('upstreamListen').props.value, '', '没配 = 空，不是某个默认值');
+  // `m71864`：连接方式与地址取代了旧的两个地址框，它们才是"必须仍然在"的那两行。
+  assert.ok(controls.has('upstreamMode'), '连接方式要仍在（否则永远没机会选）');
+  assert.ok(controls.has('upstreamAddress'), '地址要仍在（否则永远没机会填）');
+  assert.equal(controls.get('upstreamAddress').props.value, '', '没配 = 空，不是某个默认值');
+  // 旧的两个地址框被取代了：不显示，但值还在（自动迁移要读）。
+  assert.ok(!controls.has('upstreamListen'), '旧的 upstreamListen 不该再渲染');
+  assert.ok(!controls.has('upstreamUrl'), '旧的 upstreamUrl 不该再渲染');
   const listCtl = controls.get('downstreamTargets');
   assert.ok(listCtl, '下游列表要仍在');
   assert.equal(urlInputsIn(listCtl).length, 0, '没配 = 0 条（不是默认的 []）');
 });
 
-await check('「恢复默认」按钮：上游监听地址与下游列表这两行不给，别的字段照旧', () => {
+await check('「恢复默认」按钮：上游地址与下游列表这两行不给，别的字段照旧', () => {
   const app = boot(BASE_VALUE, {
     user: {
-      upstreamListen: '127.0.0.1:14514/onebot/v11/ws',
+      upstreamAddress: '127.0.0.1:14514/onebot/v11/ws',
       downstreamTargets: '[{"type":"ws-dial","address":"127.0.0.1:8080/onebot/v11/ws","selfId":"30001"}]',
       vision: { mode: 'describe' },
     },
@@ -621,7 +630,7 @@ await check('「恢复默认」按钮：上游监听地址与下游列表这两�
     walk(actions, (inner) => { for (const child of inner.children || []) if (typeof child === 'string') texts.push(child); });
     if (texts.includes('恢复默认')) withReset.push(key);
   });
-  assert.ok(!withReset.includes('upstreamListen'), '上游监听地址不该有「恢复默认」');
+  assert.ok(!withReset.includes('upstreamAddress'), '上游地址不该有「恢复默认」');
   assert.ok(!withReset.includes('downstreamTargets'), '下游列表不该有「恢复默认」');
   assert.ok(withReset.includes('vision.mode'), '别的字段仍然要有「恢复默认」');
 });

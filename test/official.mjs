@@ -350,6 +350,7 @@ t('群消息事件 → OneBot v11 形状（虚拟号 + 保留 openid 真身）',
   assert.equal(events.length, 1);
   const e = events[0];
   assert.equal(e.post_type, 'message');
+  assert.equal(e.font, 0, 'OneBot v11 的 font 必填，少了下游整条事件会被丢掉（m72313）');
   assert.equal(e.message_type, 'group');
   assert.equal(e.message_id, 'raw-1');
   assert.equal(e.user_id, virtualId('102030', 'user', 'OPENID-A'));

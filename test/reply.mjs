@@ -143,8 +143,11 @@ t('上限只限文字条数，图片不占额度', () => {
   const plan = composeReply({ text: '一\n\n二\n\n三\n\n四', images: ['a.png', 'b.png', 'c.png', 'd.png'], maxText: 2, maxImages: 9 });
   assert.equal(plan.messages.filter((m) => m.kind === 'text').length, 2, '文字被砍到 2 条');
   assert.equal(plan.messages.filter((m) => m.kind === 'image').length, 4, '4 张图一张都没少');
-  assert.deepEqual(plan.dropped, { text: 2, images: 0 });
-  assert.deepEqual(plan.messages.slice(0, 2).map((m) => m.text), ['一', '二'], '丢的是尾部，顺序不变');
+  // `m72025`：文字超条数上限不再丢弃，而是并进最后一条文字消息。
+  assert.deepEqual(plan.dropped, { text: 0, images: 0 }, '文字不该再被丢');
+  assert.equal(plan.mergedText, 2, '超出的两条要报出来');
+  assert.match(plan.messages[0].text, /^一\n三\n\n四$|^一/, '标题行仍是第一条');
+  assert.match(plan.messages[1].text, /^二[\s\S]*三[\s\S]*四/, '超出的文字并到最后一条文字里');
 });
 
 t('图片条数另有上限，超出记在 images 上', () => {
@@ -164,7 +167,7 @@ t('describePlanIssues：少发了什么必须说出来（§26 的老规矩）', 
   const plan = composeReply({ text: '一\n\n二\n\n三\n\n四', maxText: 2 });
   const notes = describePlanIssues(plan);
   assert.equal(notes.length, 1);
-  assert.match(notes[0], /2 条文字超出上限/);
+  assert.match(notes[0], /多出的 2 段文字并进了最后一条/);
   assert.equal(describePlanIssues(composeReply({ text: '一句' })).length, 0);
 });
 
@@ -252,7 +255,8 @@ t('capture 的上限来自构造参数（配置钉在这里），候选带上实
   const buf = new ReplyBuffer({ maxText: 1, maxImages: 9 });
   const c = buf.capture({ parts: [{ type: 'text', content: '一' }, { type: 'break' }, { type: 'text', content: '二' }, { type: 'at', data: { qq: '昵称' } }] });
   assert.equal(c.messages.length, 1);
-  assert.deepEqual(c.dropped, { text: 1, images: 0 });
+  assert.deepEqual(c.dropped, { text: 0, images: 0 }, '合并后不再算“少了”');
+  assert.equal(c.mergedText, 1);
   assert.deepEqual(c.limits, { maxText: 1, maxImages: 9 }, '回执要报实际上限，不能是 undefined（m05944）');
   assert.equal(c.skipped.length, 1, '解不出来的 @ 段要说出来');
 });

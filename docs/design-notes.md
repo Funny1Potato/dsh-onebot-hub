@@ -995,3 +995,24 @@ node D:\DSH-workspace\DSH-QQ\dsh-onebot-hub\test\fake-upstream.mjs 14515
 
 诊断：`vision.stats.lastSkip` 记四种原因（`mode` / `no-media` / `capability` / `empty`），
 在 `onebot_hub_status` 里可见。以前 `vision.parts` 恒为 0 的时候，外部只能靠猜。
+
+### 三家协议端的事件能力差异靠表，不靠猜（2026-10-31，`m71696`）
+
+动作能力有实测表（调一次就知道支不支持），**事件能力试不出来**——收不到就是收不到。
+所以按 `get_version_info` 的 `app_name` 查一张静态表（`lib/vendor.js`），结论进
+`onebot_caps` 的 `vendor` 段：
+
+- LLOneBot v8.3.2：不推 `group_msg_emoji_like`、不推 `message_sent`，face 段没有
+  `raw.faceText`（表情名只能靠内置的 329 条表翻）。**换掉它不会丢消息，只会丢这两类通知。**
+- NapCat v4.18.42：三样全有（真机里同时见过 emoji_like 与 faceText）。
+- SnowLuma v2.2.1：源码里有 emoji_like 与 message_sent；faceText 未确证。
+
+两条纪律：① `null` 一律表示**不知道**，不写成 `false`——写成 false 会让模型放弃一个
+其实能用的能力；② 这条信息只影响"说不说"，不影响"能不能"，所以在 status 里，不在 prompt 里。
+
+顺带一处：成员名单条数与档案里的群人数对不上时，带 `no_cache` 重要一次（实现端的缓存会让
+"人不在群"这个判断长期错误地返回"不知道"）。
+
+**语音不按实现端下结论**（`m71812` 真机纠正）：一度写了"LLOneBot 只吃 silk/amr"，实测它
+能发 mp3。所以那类提示只给排查顺序（先确认支不支持发语音、再换格式、最后改发文件），
+不替实现端断言口味——**一条错的排查方向比没有方向更费时间**。

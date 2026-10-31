@@ -3280,7 +3280,8 @@ async function scenarioMedia() {
     assert.match(entry.text, /@小红/);
     assert.match(entry.text, /\[图片\]（已存为 hub-media:[0-9a-f]{12}）/);
     assert.match(entry.text, /\[语音 3s\]“我到了，别等我吃饭”/);
-    assert.match(entry.text, /\[表情：惊讶\]/);
+    // id 14 是「微笑」（2026-10-31 真机校准；老表把 0/14 抄反了）
+    assert.match(entry.text, /\[表情：微笑\]/);
     assert.match(entry.text, /↩回复「小明：我发了个图」/);
   });
 

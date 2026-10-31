@@ -598,6 +598,36 @@ check('下游目标不写"对方账号" = 与上游相同（defaultSelfId = upst
   assert.equal(noUpstream.downstreamTargets[0].pendingAccount, true, '标记成"等上游账号"');
 });
 
+check('上游连接方式：一个新下拉 + 一个地址，旧的两个地址框自动迁移（`m71864`）', () => {
+  // 新配置：模式 + 地址，翻译成 hub 认的两个老形状。
+  const rev = resolveConfig({ upstreamMode: 'reverse', upstreamAddress: '127.0.0.1:8765/onebot/v11/ws' });
+  assert.deepEqual(rev.upstreamListen, { host: '127.0.0.1', port: 8765, path: '/onebot/v11/ws' });
+  assert.equal(rev.upstreamUrl, '', '反向时不该同时有正向地址');
+  const fwd = resolveConfig({ upstreamMode: 'forward', upstreamAddress: 'ws://127.0.0.1:3001' });
+  assert.equal(fwd.upstreamUrl, 'ws://127.0.0.1:3001');
+  assert.equal(fwd.upstreamListen, null);
+
+  // 老配置：只有 listen，推导成 reverse + 地址（路径原样拼回去）。
+  const old = resolveConfig({ upstreamListen: '127.0.0.1:8765/onebot/v11/ws' });
+  assert.equal(old.upstreamMode, 'reverse');
+  assert.equal(old.upstreamAddress, '127.0.0.1:8765/onebot/v11/ws');
+  assert.equal(old.upstreamModeInferred, true, '要提示去设置页确认一次');
+  // 老配置：只有 url，推导成 forward。
+  const old2 = resolveConfig({ upstreamUrl: 'ws://10.0.0.5:3001' });
+  assert.equal(old2.upstreamMode, 'forward');
+  assert.equal(old2.upstreamAddress, 'ws://10.0.0.5:3001');
+  // 都没配：不连上游，且不误报推断。
+  const none = resolveConfig({});
+  assert.equal(none.upstreamMode, '');
+  assert.equal(none.upstreamListen, null);
+  assert.equal(none.upstreamModeInferred, undefined);
+
+  // 地址填错要说人话（以前是"什么都不发生"）。
+  assert.match(resolveConfig({ upstreamMode: 'forward', upstreamAddress: '127.0.0.1:3001' }).upstreamModeError, /ws:\/\//);
+  assert.match(resolveConfig({ upstreamMode: 'reverse', upstreamAddress: 'nohost' }).upstreamModeError, /端口/);
+  assert.equal(resolveConfig({ upstreamMode: 'reverse', upstreamAddress: '127.0.0.1:6700' }).upstreamModeError, undefined);
+});
+
 check('人设配置项已删：只剩 persona.enabled，旧键只记一句提示不报错（`m24027`）', () => {
   assert.equal(Config.dict.persona.dict.defaultName, undefined, 'persona.defaultName 不该还在 schema 里');
   assert.equal(Config.dict.persona.dict.presets, undefined, 'persona.presets 不该还在 schema 里');

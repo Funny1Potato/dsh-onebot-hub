@@ -41,7 +41,7 @@ const [
   { DIRECTORY_MODES },
   { PERSONA_PATH },
   { PROVIDER_IDS, SHAPE_IDS, PROVIDER_FIELDS },
-  { UPSTREAM_TYPES },
+  { UPSTREAM_TYPES, UPSTREAM_MODES },
   { WRITE_ACTIONS, DANGER_ACTIONS },
 ] = await Promise.all([
   import('../lib/agent/policy.js'),
@@ -232,6 +232,7 @@ check('client.js：枚举下拉的取值与宿主的单一出处一致（两边�
     'memory.isolation.crossGroupFacts': CROSS_GROUP_FACTS,
     'memory.isolation.privateFacts': PRIVATE_FACTS,
     upstreamType: UPSTREAM_TYPES,
+    upstreamMode: UPSTREAM_MODES,
     'tts.provider': PROVIDER_IDS,
     'tts.shape': SHAPE_IDS,
   };

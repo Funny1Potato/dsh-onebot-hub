@@ -26,14 +26,16 @@
 
 ## 上游：接哪台 QQ 实现端
 
-上游就是真正登录着 QQ 的那台实现端（LLOneBot / NapCat / go-cqhttp…）。**二选一**：让实现端反连我们（`upstreamListen`）或我们去拨它（`upstreamUrl`）。上游账号一般留空让它自动认。
+上游就是真正登录着 QQ 的那台实现端（LLOneBot / NapCat / go-cqhttp…）。**先选连接方式，再填一个地址**：`reverse` 是我们开着端口等它连进来（LLOneBot / NapCat 默认就是这个），`forward` 是我们连到它给的地址。上游账号一般留空让它自动认。
 
 | 键 | 类型 | 默认 | 作用 |
 | --- | --- | --- | --- |
-| `upstreamUrl` | 字符串 | 空 | **上游地址（我们拨出去）**：正向 WebSocket 地址，形如 ws://127.0.0.1:3001。与 upstreamListen 二选一。 |
+| `upstreamMode` | `reverse` / `forward` | 自动 | **连接方式**：`reverse` = 我们监听、实现端拨进来；`forward` = 我们拨出去。留空时按旧配置（下面两个旧键）自动推断，启动日志会提示去确认一次。 |
+| `upstreamAddress` | 字符串 | 空 | **地址**。反向写 `host:port`（可带路径），如 `127.0.0.1:8765/onebot/v11/ws`；正向写完整地址，如 `ws://127.0.0.1:3001`。**不偷偷补默认路径**：反向写什么就只接受什么。 |
+| `upstreamUrl` | 字符串 | 空 | 旧键，**已由 `upstreamMode` + `upstreamAddress` 取代**；只在自动迁移时被读取，改它不再生效。 |
+| `upstreamListen` | 字符串 | — | 旧键，同上；反向的 `host:port/path` 会被迁移成地址。 |
 | `upstreamSelfId` | 字符串 | 空 | **上游账号**：上游实现端登录的 QQ 号；用来认出"哪条消息是我们自己发的"。留空 = 连上后自动认（握手头 / 事件 / get_login_info），下游"不写对方账号"的目标也会自动跟着它。 |
 | `upstreamNickname` | 字符串 | 空 | **上游昵称**：上游账号的昵称（备用，昵称识别时用）。 |
-| `upstreamListen` | 字符串 | — | **反向监听地址（含路径）**：上游（LLBot 等）主动拨进来的完整地址：host:port + 路径，如 127.0.0.1:8765/onebot/v11/ws（也能直接粘 ws:// 完整 URL）。**不写路径 = 只接受根路径 /**（写什么就是什么，不偷偷补默认）；留空 = 不监听。 |
 | `upstreamAccessToken` | 字符串 | 空 | **上游 access token（凭据）**：留空 = 不校验；设了就要求 Bearer 或 ?access_token=。不回显明文。 |
 
 ## 上游换成 QQ 官方接口

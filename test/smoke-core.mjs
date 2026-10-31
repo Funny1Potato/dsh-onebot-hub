@@ -22,6 +22,7 @@ import {
   stripInlineMedia,
 } from '../lib/protocol.js';
 import { LoopGuard } from '../lib/trace.js';
+import { MessageIdMap } from '../lib/message-id.js';
 import { Hub } from '../lib/hub.js';
 import { DownstreamSession } from '../lib/link.js';
 import { Timeline, canonicalEvents, isForwardMirror } from '../lib/capture.js';
@@ -66,7 +67,7 @@ import { tokenize, RecallStore } from '../lib/memory/recall.js';
 import { decayStrength, isWeak, weakMessageIds } from '../lib/memory/decay.js';
 import { collectCues, cueKey, Reminders } from '../lib/memory/cues.js';
 import { renderCues, renderCapabilities } from '../lib/memory/assembler.js';
-import { describeEvent, describeNotice, describeSegments } from '../lib/segments.js';
+import { describeEvent, describeNotice, describeSegments, faceName, faceTextOf } from '../lib/segments.js';
 import { resolvePartsMedia, resolveReplyImages } from '../lib/reply.js';
 import { Vision, normalizeVisionMode, parseDescribeReply } from '../lib/vision.js';
 import { MediaStore, extOf, sniffType } from '../lib/media.js';
@@ -556,6 +557,38 @@ t('统一返回形状：缓存来源与失败原因都讲清楚', () => {
   const bare = shapeResult({ action: 'x', envelope: {} });
   assert.equal(bare.ok, false);
   assert.equal(bare.data, null);
+});
+
+t('官方长 id 投下游要换成数字，下游回过来再换回原串（m72180）', () => {
+  const ids = new MessageIdMap();
+  // 协议端的数字 id：原样给，不造新号。
+  assert.equal(ids.toDownstream(122), 122);
+  assert.equal(ids.toDownstream('122'), 122);
+
+  // 官方那种长串：换成数字，同一串每次都同一个号。
+  const num = ids.toDownstream('ROBOT1.0_abc');
+  assert.equal(typeof num, 'number', 'NoneBot 的 message_id 是 int，字符串会被整条丢掉');
+  assert.equal(ids.toDownstream('ROBOT1.0_abc'), num);
+  assert.notEqual(ids.toDownstream('ROBOT1.0_def'), num, '两条不同消息不能撞号');
+
+  // 下游引用 / 撤回 / 贴表情拿回来的是数字，要换回原串。
+  assert.equal(ids.toUpstream(num), 'ROBOT1.0_abc');
+  assert.equal(ids.toUpstream(742), 742, '不认识的数字原样交回去，让上游自己报错');
+  const params = { message_id: num, message: [{ type: 'reply', data: { id: num } }, { type: 'text', data: { text: 'x' } }] };
+  ids.unmapParams(params);
+  assert.equal(params.message_id, 'ROBOT1.0_abc');
+  assert.equal(params.message[0].data.id, 'ROBOT1.0_abc');
+
+  // fresh（virtualizeMessageId）：连"同一串用同一个号"都不透露。
+  const a = ids.toDownstream('ROBOT1.0_ghi', { fresh: true });
+  const b = ids.toDownstream('ROBOT1.0_ghi', { fresh: true });
+  assert.notEqual(a, b, 'fresh 每次都要新号');
+  assert.equal(ids.toUpstream(a), 'ROBOT1.0_ghi', '但换回去还是要认得');
+
+  // 上限：淘汰最旧的，别把内存撑爆。
+  const small = new MessageIdMap({ limit: 3 });
+  for (let i = 0; i < 10; i += 1) small.toDownstream(`ROBOT1.0_${i}`);
+  assert.equal(small.size, 3);
 });
 
 t('下游响应形状：只回协议字段，status/retcode 原样透传', () => {
@@ -1544,6 +1577,57 @@ t('段 → 人话：@换称呼、引用带原文、媒体带 durable ref', () =>
 
   // notice 也要人话
   assert.match(describeNotice({ notice_type: 'group_decrease', user_id: 1, operator_id: 2, sub_type: 'kick' }), /被 用户2 移出群/);
+  // 表情回应（`m71214` 真机 payload）：只报编号不翻译名字——经典/超级/商城是三套编号空间。
+  const like = { post_type: 'notice', notice_type: 'group_msg_emoji_like', message_id: 2094150870, likes: [{ emoji_id: '76', count: 1 }], group_id: 617770183, user_id: 945126014, is_add: true };
+  // 2026-10-31 真机校准：回应里的 76 是「赞」，而经典表情表里的 76 是「太阳」——两套号。
+  assert.match(describeNotice(like), /给消息 2094150870 贴了表情 赞/);
+  // 不认识的编号照原样报，不许猜。
+  const oddLike = { ...like, likes: [{ emoji_id: '88888', count: 2 }] };
+  assert.match(describeNotice(oddLike), /贴了表情 88888×2/);
+  // Unicode 码位形态（客户端会直接发 128077）→ 真字符。
+  const uniLike = { ...like, likes: [{ emoji_id: '128077', count: 1 }] };
+  assert.match(describeNotice(uniLike), /贴了表情 👍/);
+  // 有些 id 本身就是 Unicode 码位（真机校准确认过两个）：10068 = ❔、12951 = ㊗️。
+  const qLike = { ...like, likes: [{ emoji_id: '10068', count: 1 }] };
+  assert.match(describeNotice(qLike), /贴了表情 ❔/);
+  const cjkLike = { ...like, likes: [{ emoji_id: '12951', count: 1 }] };
+  assert.match(describeNotice(cjkLike), /贴了表情 ㊗/);
+  // 但 QQ 自己的编号不能当码位翻：424 = 续标识（0x1A8 会变「ƨ」）、277 = 汪汪。
+  assert.match(describeNotice({ ...like, likes: [{ emoji_id: '424', count: 1 }] }), /贴了表情 续标识/);
+  assert.match(describeNotice({ ...like, likes: [{ emoji_id: '277', count: 1 }] }), /贴了表情 汪汪/);
+  // 汉字笔画区里的号不是表情，照报数字（12345 = 0x3039 = 「〹」）。
+  assert.match(describeNotice({ ...like, likes: [{ emoji_id: '12345', count: 1 }] }), /贴了表情 12345/);
+  // 经典表情的 0 / 14 是实测值，别再照老表抄反。
+  // 权威表（`face_config.json`，329 条）替换后，老表里那三个能对上的点必须还在。
+  assert.equal(faceName(14), '微笑');
+  // 老表错得最厉害的几格，按权威数据钉住：76 是「赞」不是「太阳」、59 是「便便」不是「乒乓」。
+  assert.equal(faceName(76), '赞');
+  assert.equal(faceName(59), '便便');
+  assert.equal(faceName(74), '太阳');
+  assert.equal(faceName(79), '胜利');
+  // 新表情（超级表情）也在表里：311 = 打call、484 = 比爱心。
+  assert.equal(faceName(311), '打call');
+  assert.equal(faceName(484), '比爱心');
+  // 客户端给的名字优先于表（NapCat 的 `raw.faceText`），并且要剥掉 `/` 与 `[]`。
+  assert.equal(faceTextOf({ raw: { faceText: '[打call]' } }), '打call');
+  assert.equal(faceTextOf({ raw: { faceText: '/微笑' } }), '微笑');
+  assert.equal(faceTextOf({}), null);
+  assert.match(
+    describeSegments([{ type: 'face', data: { id: '311', raw: { faceText: '[打call]' } } }]),
+    /\[表情：打call\]/,
+  );
+  // 没有 raw 的时候回落到表（LLOneBot 不给这个字段）。
+  assert.match(describeSegments([{ type: 'face', data: { id: '311' } }]), /\[表情：打call\]/);
+  // 表里没有的号，照报数字——QQ 以后还会加新表情。
+  assert.match(describeSegments([{ type: 'face', data: { id: '9999' } }]), /\[表情 9999\]/);
+  assert.equal(faceName(0), '惊讶');
+  assert.equal(faceName(66), '爱心');
+  assert.match(describeNotice({ ...like, is_add: false, likes: [{ emoji_id: '88888', count: 2 }] }), /取消了消息 2094150870 上的表情 88888×2/);
+  // 以前所有通知都落到 `other:notice`，群会话永远看不到它们（这就是"看不到表情回应"的真因）。
+  assert.equal(sessionKey(like), 'group:617770183', '群里的通知要归到那条群会话');
+  assert.equal(sessionKey({ post_type: 'notice', notice_type: 'friend_recall', user_id: 10001 }), 'private:10001');
+  assert.equal(sessionKey({ post_type: 'meta_event', meta_event_type: 'heartbeat' }), 'other:meta_event', '元事件没有发生地，保持原样');
+
   assert.match(describeEvent({ post_type: 'meta_event', meta_event_type: 'heartbeat' }), /\[元事件 heartbeat\]/);
 
   // 识图没回来时的占位（`m24484`）：光写 `[图片]` 时模型只会答"我看不到图"，
@@ -1572,6 +1656,30 @@ t('图消息在批里带短标识（`m24656`）：同一分钟两张图不再长
   assert.equal(mediaTag({ ts: 1, text: '纯文字', refs: { message_id: '9' } }), '');
   // 批条目带 `live`（真身）时照样读得到（批行正文优先取 live，标识也一样）。
   assert.equal(mediaTag({ ts: 1, text: '[图片]', live: { refs: { message_id: '-1589196849', media: ['m112'] } } }), ' #196849');
+});
+
+t('官方通道：问"这个人是谁"在本地答，不下发（m72338）', async () => {
+  const hub = new Hub({ upstreamType: 'official' }, { log: () => {} });
+  hub.profiles = {
+    person: (id) => (id === '3397280944' ? { name: '阿黄', groups: { 'group:3692491371': { card: '小黄', role: 'admin' } } } : null),
+    group: (world) => (world === 'group:3692491371' ? { name: '测试群', memberCount: 42 } : null),
+  };
+  // `callAction` 的链路太长，这里只验"本地能答"这一层：私有方法走 # 不可测，
+  // 所以用 callAction 的同一入口——它会在闸门之后立刻返回，不会碰上游。
+  hub.upstream = { isConnected: true, request: async () => { throw new Error('不该打上游'); }, stop: () => {} };
+  const info = await hub.callAction({ action: 'get_group_member_info', params: { group_id: 3692491371, user_id: 3397280944 } });
+  assert.equal(info.ok, true);
+  assert.equal(info.source, 'local');
+  assert.equal(info.data.card, '小黄');
+  assert.equal(info.data.role, 'admin');
+  // 没见过的人也要给个能用的人话名字，而不是让下游插件炸在 undefined 上。
+  const stranger = await hub.callAction({ action: 'get_stranger_info', params: { user_id: 111 } });
+  assert.equal(stranger.ok, true);
+  assert.equal(stranger.data.nickname, '111');
+  const g = await hub.callAction({ action: 'get_group_info', params: { group_id: 3692491371 } });
+  assert.equal(g.data.group_name, '测试群');
+  assert.equal(g.data.member_count, 42);
+  hub.stop?.();
 });
 
 t('补描去重（`m24656`）：工具已经把描述交给模型，就别再排一句【图片补描】', () => {
@@ -3818,6 +3926,31 @@ t('官方通道上的 list / 递送（m36698）：本地名单是旧号，不能
 
   // wakeStates 是数组这件事：以前按对象取键，会列出 to:"0"/"1" 这种假地址。
   assert.ok(!official.list().some((x) => /^\d+$/.test(x.to)), 'list 里不该出现纯数字的假地址');
+});
+
+t('三家协议端的事件能力差异（m71696）：按 app_name 查表，null 不当成"不支持"', async () => {
+  const { vendorInfo, vendorKeyOf } = await import('../lib/vendor.js');
+  assert.equal(vendorKeyOf('LLOneBot'), 'llonebot');
+  assert.equal(vendorKeyOf('LuckyLilliaBot'), 'llonebot');
+  assert.equal(vendorKeyOf('NapCatQQ'), 'napcat');
+  assert.equal(vendorKeyOf('SnowLuma'), 'snowluma');
+  assert.equal(vendorKeyOf('nothing'), null);
+
+  // LLOneBot：三样都没有（这是查源码得出的，不是测出来的）。
+  const lo = vendorInfo('LLOneBot');
+  assert.equal(lo.events.emojiLike, false, 'LLOneBot 不推表情回应');
+  assert.equal(lo.events.messageSent, false, 'LLOneBot 不推自己消息回显');
+  assert.ok(lo.notes.length > 0, '要说清它差在哪儿');
+
+  // SnowLuma：emojiLike/messageSent 有，faceText 没确证 → null（不能写成 false）。
+  const sl = vendorInfo('SnowLuma');
+  assert.equal(sl.events.faceText, null, '没确证就是 null，不是不支持');
+
+  // 认不出的实现端：全 null，别瞎猜。
+  const un = vendorInfo('SomeOtherImpl');
+  assert.equal(un.known, false);
+  assert.equal(un.events.emojiLike, null);
+
 });
 
 t('通道要读得到、投递要走 next-step（m36610：对面回话全卡在 next-turn，模型只能从句数猜）', async () => {
