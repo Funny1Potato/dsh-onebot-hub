@@ -222,7 +222,7 @@ dsh plugin --profile <你的 profile> add dsh-onebot-hub
 
 | 预设 | 事件 | 动作 | 具体是什么行为 |
 | --- | --- | --- | --- |
-| `relay`（默认） | 透传 + 广播 | `send_*` → `relay`，`get_*` → `local`，其余 `capture` | **管理者+透传**：下游说"发这条消息"→ 真发给 QQ 并把真 `message_id` 回填；只读类请求先走能力面（真实现端），答不了退虚拟世界；其它动作只记账 |
+| `relay`（默认） | 透传 + 广播 | `send_*` → `relay`，`get_*` / `fetch_*` → `local`，其余 `capture` | **管理者+透传**：下游说"发这条消息"→ 真发给 QQ 并把真 `message_id` 回填；只读类请求先走能力面（真实现端），答不了退虚拟世界；其它动作只记账 |
 | `bridge` | 透传 + 广播 | `*` → `both` | **双向桥**：下游 `send_msg` **既**真发上游（回真 `message_id`）**又**并发广播给除来源外的其它下游，应答里附 `mirrored`/`mirroredTotal` 两个计数 |
 | `fabric` | 透传 + 广播 | `send_*` → `mirror`，`*` → `capture` | **多下游织网**：下游 `send_msg` **不惊动 QQ**，只在其它下游之间互播（同样附镜像计数） |
 | `shadow` | 透传 + 广播 + **只读** | `*` → `capture` | **影子观察**：下游照旧看得见全部事件，但 hub 自己绝不动手——不叫模型、不代答命令、不发消息（命中命令只记时间线） |

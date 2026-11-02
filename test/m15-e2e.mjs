@@ -2462,6 +2462,12 @@ async function scenarioCapabilityDownstream() {
     get_group_member_list: () => ({ status: 'ok', retcode: 0, data: [{ user_id: 1 }] }),
     get_msg: () => ({ status: 'failed', retcode: 1404, msg: '消息不存在' }), // 逼出"回退虚拟世界"
     get_cookies: () => ({ status: 'ok', retcode: 0, data: { cookies: 'uin=o40004000' } }),
+    // `m02669` 真机：`fetch_emoji_like` 名字不带 get_，曾经掉进 capture 回空壳
+    fetch_emoji_like: () => ({
+      status: 'ok',
+      retcode: 0,
+      data: { result: 0, isLastPage: true, emojiLikesList: [{ tinyId: 'u1' }, { tinyId: 'u2' }] },
+    }),
   };
 
   const wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
@@ -2547,6 +2553,16 @@ async function scenarioCapabilityDownstream() {
     assert.equal(byAgent.source, 'cache');
     assert.equal(calls.filter((a) => a === 'get_group_info').length, 1);
     assert.equal(hub.cache.stats.hits >= 2, true);
+  });
+
+  // ---- 2.5 `fetch_*` 也算只读：不加任何配置也要拿到真数据（`m02669`） ----
+  const f1 = await ask('fetch_emoji_like', { message_id: 999, emojiId: '76', emojiType: '1', count: 20 });
+  check('下游能力面·`fetch_*` 按只读路由：relay 预设不加配置也回真数据，不是空壳', () => {
+    assert.equal(f1.status, 'ok');
+    assert.equal(f1.retcode, 0);
+    assert.deepEqual(f1.data.emojiLikesList.map((x) => x.tinyId), ['u1', 'u2']);
+    assert.equal(f1.data.captured, undefined, '不许再走 capture 的空壳回包');
+    assert.equal(calls.filter((a) => a === 'fetch_emoji_like').length, 1);
   });
 
   // ---- 3. 不缓存的（get_msg）每次都问，答不了才回退虚拟世界 ----
