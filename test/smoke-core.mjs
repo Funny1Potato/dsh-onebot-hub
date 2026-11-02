@@ -38,7 +38,7 @@ import {
   toWireResponse,
   ttlOf,
 } from '../lib/capability.js';
-import { renderPerson, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, renderSessionDirectory, assembleContext } from '../lib/memory/assembler.js';
+import { renderPerson, renderPersonCards, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, renderSessionDirectory, assembleContext } from '../lib/memory/assembler.js';
 import { composeReply, buildSendParams } from '../lib/reply.js';
 import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel, scopeOfAgentId, callerOf, callerScopeOf } from '../lib/cross/relay.js';
 import { ChannelStore } from '../lib/cross/channels.js';
@@ -1295,6 +1295,62 @@ t('曾用名与话题关联：改名之后还认得出人，引用关系才接�
   profiles.upsertPerson('10001', { interests: [{ text: '显卡' }, { text: '机械键盘' }, { text: '显卡' }] }, at + 10);
   const cardWithInterests = renderPerson(profiles.person('10001'), { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'balanced' }) });
   assert.match(cardWithInterests, /爱聊：显卡、机械键盘/, '兴趣要进人物卡，且同一条不重复');
+
+  // 【这次说话的人】（`m03031`）：一个人给完整卡，多人给每人一张精简卡。
+  profiles.upsertPerson('10002', { facts: [{ text: '做后端' }, { text: '爱问细节' }], impression: '话不多但靠谱' }, at + 20);
+  profiles.upsertPerson('10003', { facts: [{ text: '在校学生' }] }, at + 30);
+  // 事实必须带 scope，否则 `filterForScope` 会按"归属不明"过滤掉——这正是被测的行为边界。
+  for (let i = 0; i < 5; i += 1) {
+    profiles.upsertPerson(
+      '10001',
+      { facts: [{ text: `第 ${i} 件旧事`, at: at - 1000 * (5 - i), scope: 'group:55555' }] },
+      at + 40 + i,
+    );
+  }
+  const iso = resolveIsolation({ level: 'balanced' });
+  const personOf = (id) => profiles.person(id);
+  const single = renderPersonCards(['10002'], { personOf, sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso });
+  assert.match(single, /【人物卡】/, '只有一个人说话时仍是完整卡');
+  const multi = renderPersonCards(['10001', '10002', '10003'], {
+    personOf,
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    isolation: iso,
+    cardLimit: 5,
+    factsShown: 3,
+  });
+  assert.match(multi, /【这次说话的人】/, '多人时要换标题');
+  assert.equal((multi.match(/^\- /gm) ?? []).length, 3, '三个人各一张卡');
+  // 顺序：传入的顺序就是"最近发言在前"，别重排。
+  assert.ok(multi.indexOf('10001') < multi.indexOf('10002') && multi.indexOf('10002') < multi.indexOf('10003'));
+  // 事实只给 3 条，其余在行尾标出来（不丢信息，模型知道还能问）。
+  assert.match(multi, /（还有 \d+ 条没列出）/, '超过 3 条要标剩余条数');
+  const capped = renderPersonCards(['10001', '10002', '10003'], {
+    personOf,
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    isolation: iso,
+    cardLimit: 2,
+  });
+  assert.match(capped, /还有 1 人也说话了/, '超出上限的人不丢，写一句还有几个');
+  // 花名册不再重复已经在卡里的人。
+  // 花名册的判据是「档案里有这个群的记录」（`m09409`），所以先给他一条群名片。
+  profiles.noteGroupCard('10002', 'group:55555', { card: '老张' }, at + 50);
+  const rosterAll = renderPeopleRoster(profiles.persons(), {
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    actorId: '99999',
+    limit: 20,
+  });
+  const rosterEx = renderPeopleRoster(profiles.persons(), {
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    actorId: '99999',
+    limit: 20,
+    exclude: ['10001', '10002', '10003'],
+  });
+  assert.ok(rosterAll.includes('10002'), '不排除时花名册里有他');
+  assert.ok(!rosterEx.includes('10002'), '给过卡的人不在花名册里再列一遍');
 
   // 话题关联：只认明写的引用（events 里的时间线 id / refs 里的消息 id），不做关键词猜测。
   const topic = profiles.upsertTopic('t1', { title: '那个 bug', refs: [{ messageId: '9001' }], members: ['10002'] }, at);

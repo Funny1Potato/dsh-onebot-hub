@@ -4544,12 +4544,25 @@ async function scenarioChatFeatures() {
     },
   });
   hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+  // `m02919`：给说话人留一条档案，好验"人物卡到底有没有进快照"（以前它永远为空）。
+  hub.profiles.noteGroupCard('10001', 'group:55555', { card: '小明' }, Date.now());
+  const snapshotTexts = [];
+  const origSnapshot = mind.snapshot.bind(mind);
+  const snapshotOpts = [];
+  mind.snapshot = (key, opts) => {
+    snapshotOpts.push(opts ?? {});
+    const got = origSnapshot(key, opts);
+    snapshotTexts.push(got.text);
+    return got;
+  };
   hub.handleUpstreamEvent(
     say('@hub 在吗', 10001, [
       { type: 'at', data: { qq: String(SELF_ID) } },
       { type: 'text', data: { text: ' 在吗' } },
     ]),
   );
+  // 同一个人再说一句：`m03031` 的多人名单要能收去重（同一人只算一个）。
+  hub.handleUpstreamEvent(say('再说一句', 10001, [{ type: 'text', data: { text: '再说一句' } }]));
   // 被 @ 是"立刻唤醒"路径：observe 会自己 fire-and-forget 一次 flush，这里等它跑完。
   const turned = await waitFor(() => mind.stats.lastTurn !== null, 3000);
   check('一轮完整回合：被 @ 唤醒 → 调 onebot_reply → 真的发出去，诊断如实记', () => {
@@ -4558,6 +4571,16 @@ async function scenarioChatFeatures() {
     assert.equal(mind.stats.lastTurn.hadReply, true);
     assert.equal(mind.stats.lastTurn.spokeFrom, 'tool');
     assert.match(sentText(), /好呀/);
+    // `m02919` 真机纠正：唤醒路径从不传 actorId，人物卡曾经永远是空的（只有【本群认识的人】）。
+    assert.equal(mind.activeActorId, '10001', 'flush 没拿到 actorId 时要从批次里认出说话人');
+    assert.ok(
+      snapshotTexts.some((t) => /【人物卡】小明（QQ 10001）/.test(t)),
+      '当前说话人的档案要真的进快照（不是只在测试里直接调 snapshot）',
+    );
+    // `m03031`：`flush` 要把"这一批说过话的人"按最近发言排好交给快照，且去重。
+    const withSpeakers = snapshotOpts.filter((o) => Array.isArray(o.speakers) && o.speakers.length);
+    assert.ok(withSpeakers.length > 0, 'snapshot 没收到 speakers');
+    assert.deepEqual(withSpeakers[withSpeakers.length - 1].speakers, ['10001'], '同一个人说两句只算一个说话人');
   });
 
   try {

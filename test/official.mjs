@@ -231,6 +231,55 @@ t('全量群消息里"@ 了它"的那种：认 mentions.is_you，不靠猜 openi
   assert.equal(ev.sender.role, 'owner');
 });
 
+t('@ 的是**别的机器人**不算叫我：`bot:true` 不是 `is_you`（2026-11-02 真机）', async () => {
+  const { up, events, sockets } = makeUpstream();
+  up.start();
+  await settle();
+  const ws = sockets.at(-1);
+  ws.open();
+  ws.emit('message', JSON.stringify({ op: 10, d: { heartbeat_interval: 30000 } }));
+  ws.emit('message', JSON.stringify({ op: 0, t: 'READY', d: { user: { id: '6592229414871772896', username: 'x' } } }));
+  // 真机原样（群 3692491371 11:11:16）：用户 @ 的是群里的另一个 bot「戦乙女yuyuko」，
+  // `bot:true` 只说明"被 @ 的这位是机器人"，`is_you` 才是"是我"。
+  ws.emit(
+    'message',
+    JSON.stringify({
+      op: 0,
+      t: 'GROUP_MESSAGE_CREATE',
+      d: {
+        id: 'RAW-53',
+        content: '<@E63335280B09E9E3FCEEEE30DE778BF6> /wws单船 共和国',
+        group_openid: 'G-53',
+        author: { member_openid: 'U-53', username: 'FunnyPotato', member_role: 'owner' },
+        mentions: [
+          {
+            bot: true,
+            id: 'E63335280B09E9E3FCEEEE30DE778BF6',
+            is_you: false,
+            member_openid: 'E63335280B09E9E3FCEEEE30DE778BF6',
+            username: '戦乙女yuyuko',
+          },
+        ],
+      },
+    }),
+  );
+  for (let i = 0; i < 5; i += 1) await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(events.length, 1, '消息本身要进时间线（全量群消息）');
+  const ev = events[0];
+  // 关键：不许把"@ 别人"改写成"@ 我"——否则时间线里显示成 @dsh-hub，人一看就懵
+  assert.equal(
+    ev.message.some((seg) => seg.type === 'at' && String(seg.data?.qq) === ev.self_id),
+    false,
+    '不许多出一个指向自己的 at 段',
+  );
+  assert.deepEqual(detectMention(ev, { selfId: ev.self_id }), [], '没有 @ 它就一条都不该命中');
+  // 那个被 @ 的机器人仍然要有可读的名字（映射成虚拟号，不是整条丢掉）
+  const at = ev.message.find((seg) => seg.type === 'at');
+  assert.ok(at, '别人的 at 段要留着');
+  assert.notEqual(String(at.data?.qq), ev.self_id);
+});
+
 t('没见过的事件名留样本（status.unknownEvents），不当作消息', async () => {
   const { up, events, sockets } = makeUpstream();
   up.start();
