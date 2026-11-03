@@ -829,6 +829,48 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
 
   // 模型把同一句话同时写进短期与长期（同一批、`blocks` 快照还没更新）：库里只该有一条，
   // 而且报告要如实说"去重了 1 条"，不能报成 add 2。
+
+  // 批内关联（`m03601`）：同一批里 agent 同时写了话题与人物事实，事实要自动挂上那个话题。
+  // 只连不建——话题仍然由 agent 自己起。
+  const p3 = new Profiles({ storage: null });
+  const base3 = {
+    store: new MemoryStore({}),
+    profiles: p3,
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    actorId: '10001',
+    isolation: resolveIsolation({ level: 'scoped' }),
+  };
+  applyMemoryOps(
+    {
+      topics: { '显卡选购': { title: '显卡选购', conclusion: '定了 850W 的电源' } },
+      persons: { '10001': { facts: [{ text: '他在攒机，显卡预算三千' }] } },
+    },
+    base3,
+  );
+  const linked = (p3.person('10001')?.facts ?? []).find((f) => f.text.includes('攒机'));
+  assert.ok(linked, '同一批的 persons 要真的写进档案');
+  assert.deepEqual(linked.topics, ['显卡选购'], `facts 要挂上同批写的话题，实际 ${JSON.stringify(linked.topics)}`);
+
+  // 排序（`m03601`）：命中当前活跃话题的事实排在最前，哪怕它更旧。
+  const older = { text: '很久以前说过的一句无关的话', at: 1000, actor: { user_id: '10001' } };
+  const hitFact = { text: '正在聊的这件事', at: 1000, topics: ['显卡选购'], actor: { user_id: '10001' } };
+  const newer = { text: '昨天说的另一句', at: 9000, actor: { user_id: '10001' } };
+  // 两个说话人才走精简卡（单人走完整卡、事实全列）——这里要验的是"排在前面的两条是哪些"。
+  const card = renderPersonCards(['10001', '10002'], {
+    personOf: (id) => (id === '10001'
+      ? { userId: '10001', name: '小明', facts: [newer, older, hitFact] }
+      : { userId: '10002', name: '老张', facts: [] }),
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    isolation: resolveIsolation({ level: 'scoped' }),
+    cardLimit: 5,
+    factsShown: 2,
+    topics: [{ id: '显卡选购', text: '显卡选哪张' }],
+    haystack: '显卡 电源',
+  });
+  assert.ok(card.indexOf('正在聊的这件事') < card.indexOf('昨天说的另一句'), `命中话题的要排在只靠时间的前面：${card}`);
+  assert.ok(!card.includes('很久以前说过的一句无关的话'), '既没命中话题、又更旧的那条要被挤出去');
   const w = new MemoryStore({});
   const wbase = {
     store: w,
@@ -883,6 +925,61 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   // 标了敏感就锁在本会话：别的群一律不可见，跟档位无关。
   const asOther = memoryBlocks(ws.all(), { sessionKey: 'group:99999', worldKey: 'group:99999', isolation: resolveIsolation({ level: 'open' }) });
   assert.equal(asOther.longTerm.length, 0, '标了敏感就锁在本会话，open 档也不跨群');
+  // 点名失败按隐私算（`m03888` 用户定）：给了名单却解析不出号码，以前是静默丢掉——于是它变成
+  // "没点名"，会在别的群被原样念出来。现在锁进本会话，并把丢掉的条数与原因带回回执。
+  const wf = new MemoryStore({});
+  const fbase = { ...wbase, store: wf, sessionKey: 'group:55555', worldKey: 'group:55555' };
+  const failed = applyMemoryOps(
+    { long_term: { add: [{ text: '小张说他下周要换显卡', related_users: ['小张'] }] } },
+    fbase,
+  );
+  assert.equal(failed.blocks.long_term.add, 1);
+  const locked = wf.all()[0];
+  assert.equal(locked.sensitive, true, '点名失败要按敏感处理');
+  assert.equal(locked.relatedUsers ?? null, null, '解析不出号码就不留名单');
+  const asElsewhere = memoryBlocks(wf.all(), { sessionKey: 'group:99999', worldKey: 'group:99999', isolation: resolveIsolation({ level: 'open' }) });
+  assert.equal(asElsewhere.longTerm.length, 0, '点名失败的条目不许在别的群被念出来');
+  // 回执的措辞也要跟着改：以前那句说"跨群仍可见"，跟现在的行为正好相反。
+  const said = (failed.rejected ?? []).map((row) => String(row.reason ?? '')).join(' | ');
+  assert.ok(!said.includes('跨群仍可见'), `回执不许再说“跨群仍可见”：${said}`);
+  assert.ok(said.includes('只留在当前会话'), `回执要说清现在被锁了：${said}`);
+  // modify 那条路同样会静默丢：点不出号的 related_users 什么也不会改，必须说出来。
+  const wm = new MemoryStore({});
+  const first = applyMemoryOps({ long_term: { add: [{ text: '他最近在换显卡' }] } }, { ...fbase, store: wm });
+  assert.equal(first.blocks.long_term.add, 1);
+  const mod = applyMemoryOps(
+    // 序号是 **0 起**的（快照渲染成 `0. … 1. …`，`long_term_list` 也给 0 起，三处一致）。
+    { long_term: { modify: [{ index: 0, content: '他最近在挑显卡的电源', related_users: ['小王'] }] } },
+    { ...fbase, store: wm },
+  );
+  assert.equal(mod.blocks.long_term.modify, 1, '正文照改');
+  assert.ok(
+    (mod.rejected ?? []).some((row) => String(row.path ?? '').includes('modify.related_users')),
+    `modify 点名失败要说出来，实际 ${JSON.stringify(mod.rejected ?? [])}`,
+  );
+  // 半对半错也算失败：能解析出来的照留名单，但整条仍锁本会话。
+  const wf2 = new MemoryStore({});
+  const half = applyMemoryOps(
+    { long_term: { add: [{ text: '他俩约了周末见面', related_users: ['10001', '老张'] }] } },
+    { ...fbase, store: wf2 },
+  );
+  assert.equal(half.blocks.long_term.add, 1);
+  assert.deepEqual(wf2.all()[0].relatedUsers, ['10001'], '能解析的照留');
+  assert.equal(wf2.all()[0].sensitive, true, '有一个解析不出就整条按隐私算');
+  // 回执要说清"为什么被锁"：不然模型只知道它没生效，不知道为什么。
+  assert.ok(
+    (half.warnings ?? []).some((line) => String(line).includes('点不出 QQ 号')),
+    `回执里要有警告，实际 ${JSON.stringify(half.warnings ?? [])}`,
+  );
+  // 重复项与超上限不算失败：点同一个人两次是正常写法，不该把这条锁进单会话。
+  const wf3 = new MemoryStore({});
+  applyMemoryOps(
+    { long_term: { add: [{ text: '他又提了一次换显卡', related_users: ['10001', '10001'] }] } },
+    { ...fbase, store: wf3 },
+  );
+  assert.deepEqual(wf3.all()[0].relatedUsers, ['10001']);
+  assert.equal(wf3.all()[0].sensitive ?? false, false, '重复的点名不算失败');
+
   // 反向声明不生效，且要明确说为什么不生效。
   const unlock = applyMemoryOps({ long_term: { add: [{ text: '他欠了外面一笔钱', sensitive: false }] } }, sbase);
   assert.ok(unlock.rejected.some((x) => /只能标成 true/.test(x.reason)), JSON.stringify(unlock.rejected));
@@ -4289,6 +4386,52 @@ t('白名单解析：裸号 / private: 前缀 / JSON 数组 / 逗号串都认，
   assert.deepEqual([...parseTrustedPrivates('10001, 20002')].sort(), ['10001', '20002']);
   assert.deepEqual([...parseTrustedPrivates('["abc", -1, ""]')], []);
   assert.deepEqual([...parseTrustedPrivates('')], []);
+});
+
+t('记忆召回：话题档也是一路来源，能按标题/结论/事件命中（m03568）', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-topic-'));
+  const recall = new RecallStore({ dir, linkId: 'up:test', log: () => {} });
+  const topics = [
+    {
+      id: '显卡选购',
+      title: '显卡选购',
+      conclusion: '最后买了 4090，电源没换所以降压跑',
+      status: 'closed',
+      worldKeys: ['group:55555'],
+      events: [{ text: '问了一圈价格' }, { text: '电源瓦数不够' }],
+      lastAt: 1700000000000,
+    },
+    {
+      id: '猫粮团购',
+      title: '猫粮团购',
+      conclusion: '三个人的猫都吃同一个牌子',
+      status: 'closed',
+      worldKeys: ['group:55555'],
+      events: [],
+      lastAt: 1700000001000,
+    },
+  ];
+  const hit = await recall.search({ query: '电源', sources: ['topic'], topics, limit: 10 });
+  assert.ok(hit.items.length >= 1, '结论里那句提到电源，应该命中');
+  const row = hit.items[0];
+  assert.equal(row.source, 'topic', '来源要标成话题');
+  assert.equal(row.id, '显卡选购');
+  assert.match(String(row.text), /4090/, '正文要给标题与结论，模型才知道是什么事');
+
+  const byEvent = await recall.search({ query: '价格', sources: ['topic'], topics, limit: 10 });
+  assert.ok(byEvent.items.length >= 1, 'events 里的话也要能搜到');
+
+  // 话题档要跟着 since/until/person/kinds 走（`m03930` 自查）：不然明明按人搜，也会混进话题。
+  const forPerson = await recall.search({ query: '电源', sources: ['topic'], topics, person: '10001', limit: 10 });
+  assert.equal(forPerson.items.length, 0, '按人搜时不该出现话题');
+  const forMessage = await recall.search({ query: '电源', sources: ['topic'], topics, kinds: ['message'], limit: 10 });
+  assert.equal(forMessage.items.length, 0, 'kinds 里没有 topic 就不该出现话题');
+  const windowed = await recall.search({ query: '电源', sources: ['topic'], topics, since: 1800000000000, limit: 10 });
+  assert.equal(windowed.items.length, 0, '时间窗之外的话题不该被翻出来');
+  const inWindow = await recall.search({ query: '电源', sources: ['topic'], topics, since: 1600000000000, limit: 10 });
+  assert.ok(inWindow.items.length >= 1, '窗口内的照常命中');
+  const miss = await recall.search({ query: '显卡', sources: ['timeline'], topics, limit: 10 });
+  assert.equal(miss.items.length, 0, '只要 timeline 时不许把话题塞进来');
 });
 
 await Promise.all(pending);

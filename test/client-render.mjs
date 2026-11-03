@@ -103,7 +103,12 @@ const boot = (value, { withForms = true, value2Throw = false, user = {}, secrets
     throw new Error(`意外 require：${name}`);
   });
   mod.apply(ctx);
-  assert.deepEqual(injections.map((row) => row.seat), ['settings.section'], '只该往 settings.section 注入一次');
+  // 两个座位：设置页那一块，以及侧栏的「OneBot 日志」（`m03252` 起）。
+  assert.deepEqual(
+    injections.map((row) => row.seat),
+    ['settings.section', 'sidebar.panellist'],
+    '只该往这两个座位各注入一次',
+  );
   injections[0].callback();
   assert.equal(registrations.length, 1, 'settings.section 应该正好注册一次');
   assert.equal(registrations[0].spec.name, 'settings.section');

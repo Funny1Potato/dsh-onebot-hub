@@ -22,6 +22,7 @@ import { DEFAULT_GUIDANCE, Mind } from '../lib/mind.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { PERSONA_PATH, installPersonaRoute } from '../lib/persona/route.js';
+import { LOG_RECENT_PATH, LOG_STREAM_PATH } from '../lib/log/route.js';
 import { OFFICIAL_QR_PATH, installOfficialQrRoute } from '../lib/official/route.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
 import { COMMAND_SPECS } from '../lib/chat-commands.js';
@@ -1115,9 +1116,9 @@ check('下游接入端不再挂宿主 webServer：改由目标自己的地址监
 
 check('浏览器自诊断通道：上报路由 + head 注入', () => {
   // 路由：精确路径、每条各一份（重复 (kind,path) 在真宿主会抛错，这里防回归）。
-  // 四条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）；
-  // ④ 设置页的官方通道扫码（m34313）。
-  assert.equal(recorded.routes.length, 4);
+  // 六条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）；
+  // ④ 设置页的官方通道扫码（m34313）；⑤⑥ 「OneBot 日志」面板的 recent + SSE 两条。
+  assert.equal(recorded.routes.length, 6);
   assert.equal(recorded.routes[0].kind, 'exact');
   assert.equal(recorded.routes[0].path, CLIENT_PROBE_PATH);
   assert.equal(typeof recorded.routes[0].handler, 'function');
@@ -1126,6 +1127,11 @@ check('浏览器自诊断通道：上报路由 + head 注入', () => {
   assert.equal(catalogRoute.kind, 'exact');
   assert.equal(typeof catalogRoute.handler, 'function');
   // 人设库那条在 `apply` 里是**真的装上**的（不是只在单测里能用）：下拉与 JSON 窗口全靠它。
+  const logRecent = recorded.routes.find((route) => route.path === LOG_RECENT_PATH);
+  const logStream = recorded.routes.find((route) => route.path === LOG_STREAM_PATH);
+  assert.ok(logRecent && logStream, '日志面板两条路由没注册');
+  assert.equal(logStream.kind, 'exact');
+  assert.equal(typeof logStream.handler, 'function');
   const personaRoute = recorded.routes.find((route) => route.path === PERSONA_PATH);
   assert.ok(personaRoute, `人设库路由没注册：${PERSONA_PATH}`);
   assert.equal(personaRoute.kind, 'exact');
@@ -1997,7 +2003,18 @@ async function runAsyncChecks() {
     }
   });
 
-  await checkAsync('onebot_memory_audit 能执行', async () => {
+  check('onebot_memory 的说明要把「点名」讲成默认动作（m03865）', () => {
+  const desc = String(toolOf('onebot_memory').description ?? '');
+  // 用户反馈：模型不愿意点名。原因是旧文案把它写成"只是标记 + 带了会变窄"，
+  // 读起来像代价。这里锁住三件事：默认要写、只点主角、写名字等于没点。
+  assert.ok(desc.includes('默认就要写'), '要点明“点名是默认动作”，不是可选项');
+  assert.ok(desc.includes('主角'), '要给“只点主角、别点围观的人”这条规则');
+  assert.ok(desc.includes('写名字等于没点'), '要说清写名字等于没点；而且它的后果是“按隐私处理”');
+  assert.ok(desc.includes('只留在当前会话'), '点名失败的后果必须写清（m03888），否则模型按旧后果推理');
+  assert.ok(!desc.includes('那只是'), '别再说它“只是标记”——那正是模型不点的原因');
+});
+
+await checkAsync('onebot_memory_audit 能执行', async () => {
     const value = JSON.parse(await toolOf('onebot_memory_audit').execute({ limit: 5 }));
     assert.equal(typeof value, 'object');
   });
