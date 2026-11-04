@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url';
 
 import { Config, apply, auditClientModules, buildHubGuidance, claimImageQuota, describeCodeScopes, inject, makeReplyTool, name, normalizeTargets, parseCodeRoots, parseCodeScopes, parseListenTarget, parseModelRef, resolveConfig } from '../lib/index.js';
 import { ReplyBuffer } from '../lib/reply.js';
+import { addNotes, withNotes } from '../lib/tools/shared.js';
+import { contextBudget, estimateTokens } from '../lib/context-budget.js';
 import { DEFAULT_GUIDANCE, Mind } from '../lib/mind.js';
 import { CLIENT_PROBE_PATH, clientReportStatus, installClientProbe, noteClientReport } from '../lib/client-probe.js';
 import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
@@ -981,6 +983,114 @@ await checkAsync('枢纽工具只挂在会话装配的 agent 作用域，profile
     undefined,
     '占住 onebot_reply 的应当是会话缓冲版（绑这一轮 reply 句柄），直发版让位',
   );
+});
+
+// `m77950` 阶段 3：上下文预算。要守住的是"这账别算错方向"——报大报小都会误导人：
+// 报大了会让人去砍本来不花钱的段，报小了会让人以为没事。
+await checkAsync('上下文预算：只算这个插件塞进去的部分，段与工具分开摊开', async () => {
+  // ① 估 token：中文按 1 字 1 个、ASCII 按 4 字符 1 个，混合时不能一刀切去 /4。
+  assert.equal(estimateTokens('这是一段中文'), 6, '中文按字算');
+  assert.equal(estimateTokens('hello world!'), 3, 'ASCII 12 字符约 3 个 token');
+  assert.ok(estimateTokens('QQ 群 55555') < estimateTokens('QQ群有人说话'), '全角字符更贵');
+
+  const account = contextBudget({
+    sessionKey: 'group:1',
+    sections: [
+      { name: 'guidance', chars: 3000 },
+      { name: 'memory', chars: 1200, note: '3 条跨会话' },
+      { name: 'person', chars: 600 },
+      { name: 'persona', chars: 0 },
+    ],
+    snapshotText: 'x'.repeat(4800),
+    tools: [
+      { name: 'onebot_reply', description: 'y'.repeat(800) },
+      { name: 'onebot_hub_status', description: 'z'.repeat(400) },
+    ],
+    pluginGuidance: 'g'.repeat(2000),
+  });
+  assert.equal(account.snapshot.chars, 4800, '空段不占账');
+  assert.deepEqual(account.snapshot.sections.map((x) => x.name), ['guidance', 'memory', 'person'], '按字数从多到少排');
+  assert.equal(account.guidance.snapshot.chars, 3000, '快照里的指导段');
+  assert.equal(account.guidance.pluginSection.chars, 2000, '独立那一段（buildHubGuidance）也要报');
+  assert.equal(account.guidance.total, 5000, '两块相加才是指导语花了多少');
+  assert.equal(
+    account.guidance.totalTokens,
+    account.guidance.snapshot.tokens + account.guidance.pluginSection.tokens,
+    'token 也要有合计（只给一个字，读的人拿到的就是和 plugin 对不上的数）',
+  );
+  assert.equal(estimateTokens('👨‍👩‍👧'), 1, 'ZWJ 连起来的 emoji 算一个');
+  assert.equal(estimateTokens('👨'), 1, '单个 emoji 也算一个');
+  assert.equal(account.tools.count, 2, '被 deny 掉的工具不在 count 里');
+  assert.equal(account.tools.chars, 1200);
+  assert.equal(account.plugin.chars, 4800 + 1200 + 2000, 'plugin = 快照 + 工具描述 + 指导段');
+  assert.equal(account.snapshot.tokens, 4800, '快照 token 取逐段与全文中较大的那个');
+  assert.match(account.note, /宿主的系统提示词与对话历史不在内/, '口径要写清，别让人拿去和每次请求的输入 token 对账');
+
+  // ② mind 侧：装配时才记账，某个会话切档后工具那半跟着变。
+  const budgetMind = new Mind({ log: () => {} });
+  budgetMind.timeline = { bySession: () => [] };
+  budgetMind.noteTools('group:1', [{ name: 'onebot_reply', description: 'r'.repeat(900) }]);
+  assert.equal(budgetMind.contextAccount('group:1'), null, '没装配过就没有账');
+  budgetMind.noteBudgetForTest('group:1', budgetMind.snapshot('group:1'));
+  const got = budgetMind.contextAccount('group:1');
+  assert.ok(got, '装配一次就该有账');
+  assert.ok(got.snapshot.chars > 0, '快照那一半要有数');
+  assert.equal(got.tools.count, 1, '工具那一半按 agentKey 取');
+  assert.match(got.tools.top[0].name, /onebot_reply/, '最贵的工具排第一');
+  budgetMind.noteTools('group:1', []);
+  budgetMind.noteBudgetForTest('group:1', budgetMind.snapshot('group:1'));
+  assert.equal(budgetMind.contextAccount('group:1').tools.count, 0, '工具清单换了之后描述不再算进去');
+  assert.ok(budgetMind.contextAccounts.length >= 1, '有全量视图');
+});
+// `m77611` 阶段 2：回执里的「有什么被丢掉了」统一成 `notes` 字段。
+// 守门测两件事：①这个约定本身不许退化（withNotes/addNotes 的返回形状）；
+// ②凡是"会藏东西"的工具，回执里必须带 notes 这个键（少写就是模型以为全做完了）。
+await checkAsync('回执纪律：丢弃/忽略/降级统一写进 notes，工具回执不许少这个键', async () => {
+  // ① 共用件的形状：withNotes 返回**同一个 body**（不是那个数组——这里踩过一次，
+  // 返回数组会让人手写成 JSON.stringify(notes) 得到 []，而测试还以为自己拿到的是回执）。
+  const body = withNotes({ ok: true, notes: [] });
+  assert.equal(Array.isArray(body), false, 'withNotes 要返回 body 本身');
+  assert.deepEqual(body.notes, [], '原本就有 notes 数组时原样用');
+  assert.equal(withNotes({}).notes.length, 0, '没有 notes 时补一个空数组');
+  const added = addNotes({ ok: true }, '第一条', null, '  ', ['第二条', undefined]);
+  assert.deepEqual(added.notes, ['第一条', '第二条'], '空值与空白被丢掉，数组会被摊平');
+
+  // ② 会藏东西的这几个工具，回执里必须带 notes（键在，哪怕空数组）。
+  const toolOf = (n) => hubTools().find((t) => t.name === n);
+  const personTool = toolOf('onebot_person');
+  assert.ok(personTool, '要跑在 hub agent 作用域里');
+  const unknown = JSON.parse(await personTool.execute({ userId: '42424242', sessionKey: 'group:55555' }));
+  assert.ok(Array.isArray(unknown.notes), 'onebot_person 的空档案也必须带 notes 键');
+  const noName = JSON.parse(await personTool.execute({ name: '查无此人', sessionKey: 'group:55555' }));
+  assert.ok(noName.notes.length > 0, '名字查不到要进 notes，而不是只写在 note 里');
+
+  const timeline = JSON.parse(await toolOf('onebot_timeline').execute({ limit: 5 }));
+  assert.ok(Array.isArray(timeline.notes), 'onebot_timeline 要带 notes 键');
+  const capture = JSON.parse(await toolOf('onebot_capture').execute({ limit: 5 }));
+  assert.ok(Array.isArray(capture.notes), 'onebot_capture 要带 notes 键');
+
+  // ③ 共享件的注释里那条纪律：note 是"办事的人在回答"，notes 是"没照办的"。
+  const shared = fs.readFileSync(new URL('../lib/tools/shared.js', import.meta.url), 'utf8');
+  assert.match(shared, /export function withNotes/, '共用件要留着');
+  assert.match(shared, /export function addNotes/, '共用件要留着');
+  assert.match(shared, /没能照办/, '注释要写清 note 与 notes 的分工');
+
+  // ④ 守门测：工具描述与预算账不许漏出内部编号（`m78129`）——它们每一轮都进 prompt，
+  // 漏一个编号就是让模型看见一个它看不懂、也用不上的东西。
+  const leaked = [];
+  for (const t of hubTools()) {
+    const blob = `${t.name}\n${String(t.description ?? '')}\n${JSON.stringify(t.parameters ?? {})}`;
+    const hit = blob.match(/\bm\d{5}\b/);
+    if (hit) leaked.push(`${t.name}:${hit[0]}`);
+  }
+  assert.deepEqual(leaked, [], `工具名/描述/参数说明里不许出现内部编号：${leaked.join('、')}`);
+  const budget = contextBudget({
+    sessionKey: 'group:1',
+    sections: [{ name: 'guidance', chars: 10 }],
+    tools: [{ name: 'onebot_x', description: '说明' }],
+    pluginGuidance: '指导',
+  });
+  assert.equal(/\bm\d{5}\b/.test(JSON.stringify(budget)), false, '预算账也不许出现内部编号');
 });
 
 check('会话版回复工具挂不上时，直发版 onebot_reply 顶位（m11162 让位规则不能把能力让没）', () => {

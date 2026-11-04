@@ -150,6 +150,22 @@ t('上限只限文字条数，图片不占额度', () => {
   assert.match(plan.messages[1].text, /^二[\s\S]*三[\s\S]*四/, '超出的文字并到最后一条文字里');
 });
 
+t('包带出来的文字也占文字水位（一个借道转发的坏整理，不该把整轮挤成一条，m78216 自查）', () => {
+  // 包的内容是原样的段（卡/合并转发），可能夹着文字——数水位时必须按"这一组里有没有文字"归位，
+  // 一律当图片会让它在文字水位上白占一格，把真正的文字条挤掉。
+  const plan = composeReply({
+    parts: [
+      { type: 'package', id: 'pkg_t' },
+      { type: 'text', text: '一' },
+      { type: 'text', text: '二' },
+    ],
+    resolvePackage: () => [{ type: 'text', data: { text: '借道' } }],
+    maxText: 2,
+  });
+  assert.equal(plan.messages.length, 2, '包那一组占一格，后面的"二"被并进上一条');
+  assert.equal(plan.dropped.text, 0, '超出的文字并进去，不丢');
+});
+
 t('图片条数另有上限，超出记在 images 上', () => {
   const plan = composeReply({ images: ['a.png', 'b.png', 'c.png'], maxText: 3, maxImages: 2 });
   assert.equal(plan.messages.length, 2);
@@ -276,6 +292,35 @@ t('describeReply：多条时标出条数，长度仍然有上限', () => {
   const multi = describeReply({ text: '短', messages: [{ kind: 'text' }, { kind: 'image' }], images: [{ file: 'a' }] });
   assert.match(multi, /共 2 条/);
   assert.ok(describeReply({ text: 'x'.repeat(100) }).length <= 60);
+});
+
+t('上限 0 = 不限，负数退回默认（m78215 顺手守住边界）', () => {
+  const zero = composeReply({ parts: [{ type: 'image', source: 'a.png' }], maxImages: 0 });
+  assert.equal(zero.messages.length, 1, '0 = 不限（配置面板上的数字框读的就是它）');
+  const neg = composeReply({ parts: [{ type: 'image', source: 'a.png' }], maxImages: -1 });
+  assert.equal(neg.messages.length, 1, '负数按默认走，不能因为配错了就发不出去');
+  const inf = composeReply({ parts: [{ type: 'image', source: 'a.png' }], maxImages: Infinity });
+  assert.equal(inf.maxImages, 0, '回检里不限写成 0（与配置面板口径一致）');
+});
+
+t('包展开的那一条不占图片水位、也不会被挤掉（单次使用 ≠ 一次失败就没了，m78215）', () => {
+  // 图水位只有 1，包排在那张图后面：包的内容本身就是"别人让你转的东西"，
+  // 它被当成"图太多"挤掉的话，整次转达就白做了，而模型只会看到"包不存在或已过期"。
+  const plan = composeReply({
+    parts: [{ type: 'image', source: 'a.png' }, { type: 'package', id: 'pkg_1' }],
+    resolvePackage: () => [{ type: 'json', data: { data: '{}' } }],
+    maxImages: 1,
+  });
+  assert.equal(plan.messages.length, 2, '图一条、包一条');
+  assert.equal(plan.dropped.images, 0, '包不该算成"多出来的图"');
+
+  // 反面：真超出的图片照旧丢并说明（这条护栏不能因为上面那条例外被冲掉）。
+  const over = composeReply({
+    parts: [{ type: 'image', source: 'a.png' }, { type: 'image', source: 'b.png' }],
+    maxImages: 1,
+  });
+  assert.equal(over.messages.length, 1);
+  assert.equal(over.dropped.images, 1);
 });
 
 // ---- 汇总 ---------------------------------------------------------------------

@@ -3164,7 +3164,8 @@ async function scenarioRecall() {
   const weakAll = await hub.recall.search({ query: '换工作', ...in55555, sources: ['timeline', 'memory'], includeWeak: true });
   check('M17 遗忘是降权不是删除：默认不出现，includeWeak 还取得到原文', () => {
     assert.deepEqual(weakDefault.items, []);
-    assert.match(String(weakDefault.note), /淡忘/);
+    // `m77611`：「被我藏起来了多少」搬进了 `notes`，`note` 只留这次检索本身的状态。
+    assert.match(JSON.stringify(weakDefault.notes ?? []), /淡忘/);
     assert.equal(weakAll.items.length, 1);
     assert.equal(weakAll.items[0].source, 'memory');
     assert.equal(weakAll.items[0].strength < 0.2, true);

@@ -38,7 +38,7 @@ import {
   toWireResponse,
   ttlOf,
 } from '../lib/capability.js';
-import { renderPerson, renderPersonCards, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, renderSessionDirectory, assembleContext } from '../lib/memory/assembler.js';
+import { renderPerson, renderPersonCards, renderMemoryBlocks, renderSelf, renderWindow, renderPeopleRoster, renderSessionDirectory, rosterIds, assembleContext } from '../lib/memory/assembler.js';
 import { composeReply, buildSendParams } from '../lib/reply.js';
 import { letterFor, transcode, labelOfScope, CrossRelay, letterForSay, describeParcel, scopeOfAgentId, callerOf, callerScopeOf } from '../lib/cross/relay.js';
 import { ChannelStore } from '../lib/cross/channels.js';
@@ -4432,6 +4432,120 @@ t('记忆召回：话题档也是一路来源，能按标题/结论/事件命中
   assert.ok(inWindow.items.length >= 1, '窗口内的照常命中');
   const miss = await recall.search({ query: '显卡', sources: ['timeline'], topics, limit: 10 });
   assert.equal(miss.items.length, 0, '只要 timeline 时不许把话题塞进来');
+});
+
+t('当前说话人排第一：卡片上限截掉别人也不能截掉他（m78216 自查）', () => {
+  const profiles = new Profiles({ storage: null, now: () => 1_700_000_000_000 });
+  const at = 1_700_000_000_000;
+  for (const id of ['10001', '10002', '10003']) {
+    profiles.upsertPerson(id, { facts: [{ text: `${id} 的事`, at, scope: 'group:55555' }] }, at);
+  }
+  const opts = {
+    personOf: (id) => profiles.person(id),
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    isolation: resolveIsolation({ level: 'balanced' }),
+    cardLimit: 2,
+  };
+  // 传入顺序里当前说话人排在最后，而卡片上限只有 2 张。
+  const out = renderPersonCards(['10001', '10002', '10003'], { ...opts, actorId: '10003' });
+  assert.ok(out.indexOf('10003') >= 0, '正在说话的人不能被截掉');
+  assert.ok(out.indexOf('10003') < out.indexOf('10001'), '而且要排在最前');
+  assert.match(out, /还有 1 人也说话了/, '被截掉的人仍然有一句交代');
+  // 反面：没给 actorId 时保持调用方的顺序（不该去猜谁在说话）。
+  const plain = renderPersonCards(['10001', '10002', '10003'], opts);
+  assert.ok(plain.indexOf('10001') < plain.indexOf('10002'), '没告诉我谁在说就不动顺序');
+});
+
+t('私聊里的自送闸：自己发出去的那条回流也要认出来（m78216 自查）', () => {
+  const g = new LoopGuard();
+  const linkId = 'up:test';
+  // hub 自己发出去的私聊：账本里只有自己的 user_id，对方在 group_id 上。
+  const sent = {
+    post_type: 'message',
+    message_type: 'private',
+    self_id: 30001,
+    user_id: 30001,
+    group_id: 10001,
+    raw_message: '晚上好',
+    message: [{ type: 'text', data: { text: '晚上好' } }],
+  };
+  g.noteSent({ linkId, event: sent });
+  // 对方端把它送回来时，对方在 user_id、自己在 target_id。
+  const back = { ...sent, message_id: 77, user_id: 10001, target_id: 30001 };
+  assert.equal(g.check({ linkId, direction: 'upstream', event: back }).reason, 'echo:sent');
+  // 对方真的发了一句一模一样的话：不该被当回声。
+  const g2 = new LoopGuard();
+  g2.noteSent({ linkId, event: { ...sent, message_id: 41 } });
+  // 对方配上自己的句子（群里上下文不一样）。
+  const theirs = { ...sent, message_id: 78, user_id: 10001, target_id: 30001, raw_message: '你好呀', message: [{ type: 'text', data: { text: '你好呀' } }] };
+  delete theirs.group_id;
+  const verdict = g2.check({ linkId, direction: 'upstream', event: theirs });
+  assert.equal(verdict.action, 'allow', '对方说一句一样的话也是真实发言');
+});
+
+
+t('卡片上限外的人也给一句话，但不和已认识的人重复（m79049）', () => {
+  const at = 1_700_000_000_000;
+  const people = {};
+  for (const id of ['10001', '10002', '10003', '10004']) {
+    people[id] = {
+      userId: id,
+      names: [{ name: `小张${id.slice(-1)}`, at, scope: 'group:55555' }],
+      groups: { 'group:55555': { card: null, role: 'member', lastSentAt: at } },
+      facts: [{ text: `${id} 最近说的事`, at, scope: 'group:55555' }],
+    };
+  }
+  people['10004'].impression = '一个爱说话的人';
+  const personOf = (id) => people[id] ?? null;
+  const opts = {
+    personOf,
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    isolation: resolveIsolation({ level: 'balanced' }),
+    cardLimit: 2,
+    actorId: '10001',
+    // 10001 正在说话，10003 在【本群认识的人】里已经列过。
+    roster: new Set(['10003']),
+  };
+  const out = renderPersonCards(['10001', '10002', '10003', '10004'], opts);
+  assert.match(out, /还有 2 人也说话了/, '卡片外的人要有交代');
+  assert.ok(!out.includes('小张' + '3｜'), '已经在“认识的人”里列过的不再说一遍');
+  assert.ok(!/-\s\S*10003/.test(out.split('还有')[1] ?? ''), '10003 不应出现在摘要那段');
+  assert.match(out, /က4゜印象：一个爱说话的人|10004.*一个爱说话的人/, '10004 没有卡但要有一句印象');
+});
+
+t('卡片外那句摘要要取最近的事，而不是入库顺序最后那条（m79112 自查）', () => {
+  const p = {
+    userId: '10009',
+    names: [],
+    groups: { 'group:55555': { card: null, role: 'member' } },
+    // 库里是按入库顺序存的：新的在后。这里故意把一条旧事写在最后（“最近重写”）。
+    facts: [
+      { text: '最近发生的事', at: 1_700_000_000_000, scope: 'group:55555' },
+      { text: '早年的事（库里最后一条）', at: 1_600_000_000_000, scope: 'group:55555' },
+    ],
+  };
+  const out = renderPersonCards(['10009', '10010'], {
+    personOf: (id) => (id === '10009' ? p : { userId: '10010', groups: { 'group:55555': {} } }),
+    sessionKey: 'group:55555',
+    worldKey: 'group:55555',
+    isolation: resolveIsolation({ level: 'balanced' }),
+    cardLimit: 1,
+    actorId: '10010',
+  });
+  assert.match(out, /最近发生的事/, '摘要里要是最近那条');
+  assert.ok(!out.includes('早年的事'), '不要拿库里最后一条当“最近”');
+});
+
+t('档案里记着的群，和朌里的群对得上就要认得（m79112 自查）', () => {
+  // 写入侧给人物档案盖的 scope 就是档案自己的键；读的这一边不能换一套口径，
+  // 否则“档案里明明有这个群、这里却认不出”。
+  const people = [{ userId: '10011', groups: { 'group:55555': { card: null } } }];
+  const ids = rosterIds(people, { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10012', selfId: '999' });
+  assert.ok(ids.has('10011'), '档案里记着这个群，就应该认得');
+  const roster = renderPeopleRoster(people, { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10012', selfId: '999', restrict: ids });
+  assert.match(roster, /10011/, '两段要用同一份名单，否则摘要段会把他当成“不认识”再念一遍');
 });
 
 await Promise.all(pending);

@@ -167,6 +167,17 @@ t('SSE：先补缓冲再推新条目，关连接时退订并停心跳', () => {
   }
 });
 
+t('清屏之后序号不回退，面板按 after 追增量追得上（m78216 自查）', () => {
+  const bus = new LogBus();
+  bus.push({ kind: 'a' });
+  const seen = bus.recent(10).at(-1).seq;
+  bus.clear();
+  const fresh = bus.push({ kind: 'b' });
+  assert.ok(fresh > seen, '清屏不重置序号：新条目仍比旧的序号大');
+  assert.equal(bus.recent(10, { after: 1e9 }).length, 0, '追一个不存在的未来序号时给空（面板据此从头拉）');
+  assert.equal(bus.recent(10, { after: seen }).length, 1, '按真序号追，拿到刚进来的那条');
+});
+
 const failed = [];
 for (const c of cases) {
   try {

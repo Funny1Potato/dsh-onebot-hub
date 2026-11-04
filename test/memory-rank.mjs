@@ -64,6 +64,17 @@ t('bigrams：中文按两字切，标点与空白不进集合', () => {
   assert.ok(![...set].some((g) => g.includes('，')), '标点不该进 2-gram');
 });
 
+t('话题 id 是数字时不报错（模型常把 onebot_topic 的号写成数字，m78216 自查）', () => {
+  // `scoreFact` 里 `fact.topics` 走 `String()`，但 `topics`（活跃话题列表）那侧以前直接拿原值比，
+  // 于是 topic id 是数字时永远对不上——所有人的事实都退化回"按时间排"。
+  const facts = [
+    { text: '老事', at: 100, topics: ['12'] },
+    { text: '新事', at: 200, topics: ['13'] },
+  ];
+  const ordered = rankFacts(facts, { topics: [{ id: 12 }] });
+  assert.equal(ordered[0].text, '老事', '数字 id 也要能命中话题');
+});
+
 const failed = [];
 for (const c of cases) {
   try {
