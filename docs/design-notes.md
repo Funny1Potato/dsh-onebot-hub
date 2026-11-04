@@ -1240,3 +1240,24 @@ README 的 token 参考那节写着「每次请求 ≈ 33K」，但没人知道�
 3. **摘要段的 scope 是复制的。** 一行 `scope: worldKey ?? sessionKey` 单独写在 `briefLines` 的调用处，
    和上面两处又不一样；改成和卡片里第一个人同口径（`inferScope({ sessionKey, worldKey, actorId: ids[0] })`）。
    **同一个值在三处各算一遍，迟早有一处走偏。**
+
+## 契约快照不能记「这台机器」（`m79220`）
+
+`0.13.0-beta.2` 第一次推上去，CI 四个 job 全红，红的还都是**刚加上去的**契约测试：
+
+```
+✗ 配置格默认值没变
+    storageDir: C:\Users\94512\.dsh\onebot-hub -> C:\Users\runneradmin\.dsh\onebot-hub
+```
+
+`resolveConfig({})` 的默认数据目录是 `~/.dsh/onebot-hub`。我在本机生成快照，它就把
+`C:\Users\94512\...` 一起冻进去了——**契约冻结的是"形状"，不是"这台机器"**。ubuntu runner 上
+更是变成 `/home/runner/...`，同一个快照永远对不上。
+
+修法：进快照之前把家目录与它的根（`C:\Users\xxx` / `/home/xxx` / `/Users/xxx`）换成 `<home>`；
+其余绝对路径（用户自己填的 `D:\data\hub` 之类）照旧进快照，故意的改动仍然看得见。
+用 `USERPROFILE=C:\Users\runneradmin` 跑一遍复现过 → 修完 6/6。
+
+**教训（比这一处更重要）**：凡是"把本机跑出来的东西固化成期望值"的测试，都要先问一句
+**这台机器的哪个部分会漏进去**——路径、用户名、时区、行尾符、locale。契约测试尤其危险：
+它平时最安静，一出事就是"新加的守门比它守的东西还脆"。

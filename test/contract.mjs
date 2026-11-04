@@ -98,6 +98,32 @@ function mixedLeaves(obj, prefix = '', out = {}) {
   return out;
 }
 
+/**
+ * 机器相关的默认值先抹平再进快照。
+ *
+ * 契约冻结的是"形状"，不是"这台机器"。`storageDir` 的默认值是 `~/.dsh/onebot-hub`：
+ * 本地是 `C:\\Users\\94512\\...`、CI 的 windows runner 是 `C:\\Users\\runneradmin\\...`、
+ * ubuntu 是 `/home/runner/...`。原样进快照，**换一台机器就报"契约变了"**——
+ * `0.13.0-beta.2` 第一次推上去 CI 四个 job 全红，就是这个原因。
+ *
+ * 抹法：把 `<用户目录>` 与它的根（`C:\\Users\\xxx` / `/home/xxx` / `/Users/xxx`）都换成 `<home>`。
+ * 只动这两类前缀，其余路径（用户自己填的 `D:\\data\\hub` 之类）照旧进快照，故意的改动仍然看得见。
+ */
+function portabilize(value) {
+  if (typeof value !== 'string') return value;
+  let out = value;
+  const home = String(process.env.USERPROFILE || process.env.HOME || '').trim();
+  if (home) {
+    // 两种写法都认：`C:\\Users\\x`（反斜杠）与 `/home/x`（斜杠）。
+    out = out.split(home).join('<home>');
+    const slashed = home.replace(/\\/g, '/');
+    if (slashed !== home) out = out.split(slashed).join('<home>');
+  }
+  return out
+    .replace(/^[A-Za-z]:\\Users\\[^\\/]+/i, '<home>')
+    .replace(/^\/(?:home|Users)\/[^/]+/i, '<home>');
+}
+
 const guidance = String(mod.buildHubGuidance({}) ?? '');
 const resolved = mod.resolveConfig({});
 
@@ -115,7 +141,7 @@ const current = {
     sha256: createHash('sha256').update(guidance).digest('hex'),
   },
   toolNames: scanToolNames(),
-  defaults: mixedLeaves(resolved),
+  defaults: Object.fromEntries(Object.entries(mixedLeaves(resolved)).map(([k, v]) => [k, portabilize(v)])),
 };
 
 const describe = (snap) => ({

@@ -211,7 +211,7 @@
     "echoWindowMs": "number:3000",
     "maxHop": "number:3",
     "logFrames": "boolean:false",
-    "storageDir": "C:\\Users\\94512\\.dsh\\onebot-hub",
+    "storageDir": "<home>\\.dsh\\onebot-hub",
     "agentGuidance": "",
     "agentPolicy.mode": "assist",
     "agentPolicy.batchSize": "number:10",
