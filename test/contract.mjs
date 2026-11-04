@@ -99,33 +99,48 @@ function mixedLeaves(obj, prefix = '', out = {}) {
 }
 
 /**
- * 机器相关的默认值先抹平再进快照。
+ * 默认值进快照之前，先把"这台机器 / 这个平台 / 这个安装方式"抹掉。
  *
- * 契约冻结的是"形状"，不是"这台机器"。`storageDir` 的默认值是 `~/.dsh/onebot-hub`：
- * 本地是 `C:\\Users\\94512\\...`、CI 的 windows runner 是 `C:\\Users\\runneradmin\\...`、
- * ubuntu 是 `/home/runner/...`。原样进快照，**换一台机器就报"契约变了"**——
- * `0.13.0-beta.2` 第一次推上去 CI 四个 job 全红，就是这个原因。
+ * 契约冻结的是**形状**，不是别的东西。`0.13.0-beta.2` 第一次推上去连红三次，每次都是同一个病：
+ *   1. `storageDir` 记成了 `C:\Users\94512\...`——换台机器就报"契约变了"；
+ *   2. 只抹家目录还不够：ubuntu 上默认值是 `~/.dsh/onebot-hub`，`path.join` 出来是**斜杠**，
+ *      windows 上是反斜杠，字符串照样不等；
+ *   3. `exports.Config` 记的是 `function`——可 `@deepseek-ai/schemastery` 是 devDependency，
+ *      CI 用 `npm install --omit=peer` 装不上它，`Config` 就成了 `undefined`。
  *
- * 抹法：把 `<用户目录>` 与它的根（`C:\\Users\\xxx` / `/home/xxx` / `/Users/xxx`）都换成 `<home>`。
- * 只动这两类前缀，其余路径（用户自己填的 `D:\\data\\hub` 之类）照旧进快照，故意的改动仍然看得见。
+ * 于是规矩改成：**路径只比形状（段名与段数），不比分隔符与家目录**。
  */
-function portabilize(value) {
+function portableValue(value) {
   if (typeof value !== 'string') return value;
-  let out = value;
+  if (!/[\\/]/.test(value)) return value;
+  const segs = value.split(/[\\/]+/).filter((x) => x !== '');
   const home = String(process.env.USERPROFILE || process.env.HOME || '').trim();
-  if (home) {
-    // 两种写法都认：`C:\\Users\\x`（反斜杠）与 `/home/x`（斜杠）。
-    out = out.split(home).join('<home>');
-    const slashed = home.replace(/\\/g, '/');
-    if (slashed !== home) out = out.split(slashed).join('<home>');
+  const homeSegs = home ? home.split(/[\\/]+/).filter(Boolean) : [];
+  const out = [];
+  for (let i = 0; i < segs.length; i += 1) {
+    // 用户目录整段换成 `<home>`（`C:\Users\x`、`/home/x`、`/Users/x` 都认）。
+    if (homeSegs.length && segs.slice(i, i + homeSegs.length).join('/') === homeSegs.join('/')) {
+      out.push('<home>');
+      i += homeSegs.length - 1;
+      continue;
+    }
+    if (/^[A-Za-z]:$/.test(segs[i])) continue;
+    if (i === 0 && /^(Users|home|root)$/.test(segs[i])) {
+      out.push('<home>');
+      continue;
+    }
+    out.push(segs[i]);
   }
-  return out
-    .replace(/^[A-Za-z]:\\Users\\[^\\/]+/i, '<home>')
-    .replace(/^\/(?:home|Users)\/[^/]+/i, '<home>');
+  return out.join('/');
 }
 
 const guidance = String(mod.buildHubGuidance({}) ?? '');
 const resolved = mod.resolveConfig({});
+
+/** 这次跑的是不是"真宿主"：`Config` 只在装得到 schemastery 时才存在。 */
+const runtime = {
+  configSchema: typeof mod.Config === 'function',
+};
 
 const current = {
   exports: Object.fromEntries(
@@ -141,7 +156,7 @@ const current = {
     sha256: createHash('sha256').update(guidance).digest('hex'),
   },
   toolNames: scanToolNames(),
-  defaults: Object.fromEntries(Object.entries(mixedLeaves(resolved)).map(([k, v]) => [k, portabilize(v)])),
+  defaults: Object.fromEntries(Object.entries(mixedLeaves(resolved)).map(([k, v]) => [k, portableValue(v)])),
 };
 
 const describe = (snap) => ({
@@ -192,14 +207,27 @@ const check = (name, fn) => {
   }
 };
 
+/**
+ * 快照里记的 `Config` 是"真宿主里长什么样"：`function`。
+ * 环境装不到 schemastery 时（CI 用 `--omit=peer`，它是 devDependency），`Config` 本来就会是
+ * `undefined`——那不是契约变了，是**这次没能力验**。所以按快照里的 `runtime.configSchema`
+ * 决定这一格是"必须对"还是"跳过"，而不是把它冻成 `undefined` 让本地永远红。
+ * 依据是**这次跑出来的** `runtime`（不是快照里那份）：快照记的是"真宿主应当有"，环境说了不算。
+ */
+const needConfigSchema = runtime.configSchema === true;
+
 check('导出面没变', () => {
-  sameSet('导出名', Object.keys(saved.exports), Object.keys(current.exports));
-  for (const [name, type] of Object.entries(saved.exports)) {
+  const names = Object.keys(saved.exports);
+  sameSet('导出名', names, Object.keys(current.exports));
+  for (const name of names) {
+    if (name === 'Config' && !needConfigSchema) continue;
+    const type = saved.exports[name];
     assert.equal(current.exports[name], type, `导出 ${name} 的类型从 ${type} 变成了 ${current.exports[name]}`);
   }
 });
 
-check('Config 顶层键没变', () => sameSet('Config 顶层键', saved.configKeys, current.configKeys));
+// 同上：`Config` 建不出来时这一格无从比，跳过而不是判红。
+check('Config 顶层键没变', () => (needConfigSchema ? sameSet('Config 顶层键', saved.configKeys, current.configKeys) : true));
 check('resolveConfig 键集没变', () => sameSet('resolveConfig 键', saved.resolveKeys, current.resolveKeys));
 check('工具名单没变', () => sameSet('工具名', saved.toolNames, current.toolNames));
 

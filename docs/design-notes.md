@@ -1258,6 +1258,16 @@ README 的 token 参考那节写着「每次请求 ≈ 33K」，但没人知道�
 其余绝对路径（用户自己填的 `D:\data\hub` 之类）照旧进快照，故意的改动仍然看得见。
 用 `USERPROFILE=C:\Users\runneradmin` 跑一遍复现过 → 修完 6/6。
 
+**第二次红（同一天，同一个病）**：只抹家目录还不够。ubuntu 上 `path.join` 出来是
+`~/.dsh/onebot-hub`（**斜杠**），windows 上是反斜杠——字符串照样不等。所以最终改成
+**路径只比形状**（段名与段数，分隔符与家目录都不算）。
+
+**第三次红（同一天）**：`exports.Config` 记的是 `function`，可 `@deepseek-ai/schemastery` 是
+devDependency，CI 用 `npm install --omit=peer` 装不上它 → `Config` 是 `undefined`。
+这不是契约变了，是**这次环境没能力验**。修法是"按能力跳过"：`runtime.configSchema` 为依据，
+CI 上跳过 `Config` 那一格、本地照常真验；同时 `test/stub-hooks.mjs` 把 schemastery 也接上桩，
+让 CI 尽量跑到同一份。
+
 **教训（比这一处更重要）**：凡是"把本机跑出来的东西固化成期望值"的测试，都要先问一句
-**这台机器的哪个部分会漏进去**——路径、用户名、时区、行尾符、locale。契约测试尤其危险：
-它平时最安静，一出事就是"新加的守门比它守的东西还脆"。
+**这台机器的哪个部分会漏进去**——路径、用户名、分隔符、时区、行尾符、locale，还有
+**哪些依赖在 CI 上装不到**。契约测试尤其危险：它平时最安静，一出事就是"新加的守门比它守的东西还脆"。

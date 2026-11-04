@@ -1,4 +1,7 @@
 {
+  "runtime": {
+    "configSchema": true
+  },
   "exports": {
     "Config": "function",
     "DOWNSTREAM_TYPES": "object",
@@ -211,7 +214,7 @@
     "echoWindowMs": "number:3000",
     "maxHop": "number:3",
     "logFrames": "boolean:false",
-    "storageDir": "<home>\\.dsh\\onebot-hub",
+    "storageDir": "<home>/.dsh/onebot-hub",
     "agentGuidance": "",
     "agentPolicy.mode": "assist",
     "agentPolicy.batchSize": "number:10",
@@ -294,7 +297,7 @@
     "vision.segmentWaitMs": "number:1500",
     "persona.enabled": "boolean:true",
     "chatCommands.enabled": "boolean:true",
-    "chatCommands.prefix": "/",
+    "chatCommands.prefix": "",
     "chatCommands.bypassPrefix": "!!",
     "chatCommands.maxReplyChars": "number:1500",
     "memes.enabled": "boolean:true",
@@ -307,7 +310,7 @@
     "anime.backend": "off",
     "anime.recognizeUrl": "",
     "anime.recognizeToken": "",
-    "anime.animetraceUrl": "https://api.animetrace.com",
+    "anime.animetraceUrl": "https:/api.animetrace.com",
     "anime.minConfidence": "number:0.85",
     "anime.maxCharacters": "number:1",
     "anime.nsfwThreshold": "number:0.5",

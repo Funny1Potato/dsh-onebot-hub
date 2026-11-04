@@ -16,6 +16,10 @@ const STUBS = new Map([
   ['@deepseek-ai/dsh-llm', './stubs/dsh-llm.mjs'],
   ['@deepseek-ai/dsh-session', './stubs/dsh-session.mjs'],
   ['@deepseek-ai/dsh-agent', './stubs/dsh-agent.mjs'],
+  // `schemastery` 是 devDependency，本地装得到；CI 用 `--omit=peer` 装的是运行时依赖的闭包，
+  // 它不在里面 —— 于是 `lib/index.js` 的 `export const Config` 变成 `undefined`，契约快照对不上。
+  // 两类环境必须都跑同一份契约，所以这里也打桩（桩里是真包，本地与 CI 行为一致）。
+  ['@deepseek-ai/schemastery', './stubs/schemastery.mjs'],
 ]);
 
 export async function resolve(specifier, context, next) {
