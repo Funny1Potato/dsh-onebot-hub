@@ -29,10 +29,10 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # 一律用 `npm install`，不用 `npm ci`：仓库自带的 lockfile 是开发机上生成的，
-      # 里面记着宿主侧 `link:` 依赖的绝对路径（`ws` / `schemastery` 在本机是从 DSH 的
-      # node_modules 链过去的），`npm ci` 在干净机上会照着那份 lockfile 装，一个包都装不上；
-      # `npm install` 会按 package.json 重新解析。
+      # 一律用 `npm install`，不用 `npm ci`：这个仓库在本机是**链进** DSH 的 node_modules 里跑的，
+      # 开发机上生成的 lockfile 会把宿主侧依赖记成 `link:` 加绝对路径。`npm ci` 严格照 lockfile 装，
+      # 一遇到这种条目就装不出来；`npm install` 会按 package.json 重新解析。（lockfile 现在由干净目录生成，
+      # 已经不含本机路径，但这一层保险留着。）
       #
       # `--legacy-peer-deps` 是必需的：`@deepseek-ai/*` 这些宿主包在 registry 上的 peer 区间
       # 互相冲突（首跑 ERESOLVE 就是这么炸的）。`--omit=optional` 只是省时间。
