@@ -29,12 +29,17 @@ jobs:
         with:
           node-version: ${{ matrix.node }}
 
-      # `@deepseek-ai/*` 是宿主提供的 peer 依赖，测试用 test/register-stubs.mjs 打桩，
-      # 所以只装真正的运行时依赖 `ws`。`--omit=peer` 不够用：npm 仍会解析 peer 依赖树，
-      # 而 registry 上那几个宿主包自己的 peer 区间互相冲突（首跑 ERESOLVE 就是这么炸的），
-      # `--legacy-peer-deps` 才是让 npm 彻底不管 peerDependencies 的开关。
+      # 一律用 `npm install`，不用 `npm ci`：仓库自带的 lockfile 是开发机上生成的，
+      # 里面记着宿主侧 `link:` 依赖的绝对路径（`ws` / `schemastery` 在本机是从 DSH 的
+      # node_modules 链过去的），`npm ci` 在干净机上会照着那份 lockfile 装，一个包都装不上；
+      # `npm install` 会按 package.json 重新解析。
+      #
+      # `--legacy-peer-deps` 是必需的：`@deepseek-ai/*` 这些宿主包在 registry 上的 peer 区间
+      # 互相冲突（首跑 ERESOLVE 就是这么炸的）。`--omit=optional` 只是省时间。
+      # **不要加 `--omit=peer`**：那会让 npm 连普通依赖的安装计划也一起变小，
+      # 结果 `ws` 没装上，测试跑起来一片 `Cannot find package 'ws'`（2026-11-04 踩过）。
       - name: Install
-        run: npm install --omit=peer --legacy-peer-deps --no-audit --no-fund
+        run: npm install --legacy-peer-deps --omit=optional --no-audit --no-fund
 
       - name: Tests
         run: npm test
