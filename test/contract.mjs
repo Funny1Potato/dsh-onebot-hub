@@ -143,6 +143,12 @@ const runtime = {
 };
 
 const current = {
+  /**
+   * 快照要记下"这次是在真宿主里量的"——不带它的话，在**装不到 schemastery 的环境**里
+   * `--update` 会把 `Config` 冻成 `undefined`，提交上去之后真宿主那边反而判红。
+   * 这一格是给读快照的人看的，不是契约本身。
+   */
+  runtime,
   exports: Object.fromEntries(
     Object.keys(mod)
       .filter((k) => k !== 'default')

@@ -228,6 +228,7 @@
     "agentPolicy.awakeMs": "number:300000",
     "agentPolicy.activeTickMs": "number:300000",
     "agentPolicy.model": "",
+    "agentPolicy.unattended": "deny",
     "agentTickMs": "number:1000",
     "agentDefaultModel": "null:null",
     "agentDefaultVisionModel": "null:null",

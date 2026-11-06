@@ -1505,6 +1505,42 @@ check('订阅 session/event：只把 hub 自己的会话记进账本', () => {
   assert.equal(hub.mind.feedOf('session-7'), null, '非 hub 会话不该进账本');
 });
 
+check('没人看着时的确认门：枢纽会话被自动答掉，别人的会话照旧等人（m84407）', async () => {
+  const sub = recorded.onEvents.find((e) => e.name === 'approval/request');
+  assert.ok(sub, '没有订阅 approval/request —— 云端会挂在一张没人点的审批卡上');
+  const mind = hub.mind;
+  const saved = mind.activeSessionKey;
+  try {
+    // 群会话 + 默认策略（agent.unattended=deny）→ 直接 rejected，且不再往下传。
+    mind.activeSessionKey = 'group:55555';
+    let passed = false;
+    const verdict = await sub.handler({ toolName: 'bash', reason: 'escalate sandbox to danger-full-access: 装依赖' }, () => {
+      passed = true;
+      return 'allowed-once';
+    });
+    assert.equal(verdict, 'rejected', `枢纽会话的审批应该是 rejected，实际 ${verdict}`);
+    assert.equal(passed, false, '拒绝之后不该再把请求交出去（交出去就挂在那里等人）');
+    // 策略改成 auto：自动同意，但仍然只答一次。
+    mind.policy = { ...mind.policy, unattended: 'auto' };
+    assert.equal(await sub.handler({ toolName: 'bash' }, () => 'unavailable'), 'allowed-once');
+    // ask = 老行为：交回给链上的下一个应答者。
+    mind.policy = { ...mind.policy, unattended: 'ask' };
+    assert.equal(await sub.handler({ toolName: 'bash' }, () => 'allowed-once'), 'allowed-once');
+    // 用户自己开的会话不归枢纽管（那里屏幕前真的有人）。
+    mind.policy = { ...mind.policy, unattended: 'deny' };
+    mind.activeSessionKey = 'session-7';
+    let reached = false;
+    await sub.handler({ toolName: 'bash' }, () => {
+      reached = true;
+      return 'allowed-once';
+    });
+    assert.equal(reached, true, '非枢纽会话的审批不该被插件代答');
+  } finally {
+    mind.activeSessionKey = saved;
+    mind.policy = { ...mind.policy, unattended: 'deny' };
+  }
+});
+
 check('agent 通道把宿主 API 接进了 pool.host', () => {
   assert.equal(typeof hub.pool.host.create, 'function');
   assert.equal(typeof hub.pool.host.resume, 'function');
