@@ -1301,3 +1301,48 @@ CI 上跳过 `Config` 那一格、本地照常真验；同时 `test/stub-hooks.m
 
 **没做的两件事**（有意）：不给群友一个"审批"命令（群里谁能代表机器授权说不清）；
 不把待批审批存盘（宿主明说"待处理审批只在进程内有效"，存了也恢复不回来）。
+
+### 拆掉入口，而不是守着门口（`m84994` / 事故 `m84763`）
+
+上一节那套"没人看着就自动拒绝"，真机上被出轨了：**一轮卡了 104.7 分钟**。
+
+时间线（`session.v4.jsonl`，群 `group:451403506`）：17:17 建会话时是
+`permission/preset workspace-write` + `approval/policy ask`；17:21:52 模型发了一次
+`sandbox_permissions: "danger-full-access"` 的 `pwsh`（要重启带子进程的 HikariBot，
+Windows 的 workspace-write 下 `_winapi.CreateFile` 建管道直接被拒）；`approval/asked` 从此挂着，
+**17:43 / 18:05 / 18:24 / 18:28 到达的群友消息全排在队列里**，直到 19:06:35 有人看见那张卡片
+点了拒绝才继续。它自己写进了工具结果："the user rejected escalating this command …"——但它当时
+以为"拒绝"是秒回的（我们的指导语说"不会弹给谁"），所以它**跑了那一步，也真的卡死了**。
+
+三件事叠起来才卡住：
+
+1. **提示语在，但门还在。** 我们只在 `ctx.on('approval/request')` 上回答——那是**兜底**，
+   得等审批分发走到我们这一环；而宿主的 Web 应答器就在前面，它把请求挂成待批卡片然后等人。
+   用户原话：「云端的，就是弹了，并没有拒绝。」
+2. **宿主的沙箱提示本身在推销提权。** 被拒时它写死的第二句是
+   `[sandbox: escalation available — retry this exact command once with sandbox_permissions …;
+   the approval prompt asks the user]`，而且 `edit` / `write` / `pwsh` 三个工具都带着
+   `sandbox_permissions` 参数（描述是"the retry asks the user for approval"）。
+   模型读到的就是"有条正规通道，试一次"。
+3. **我们这句话反而给了它理由。** 它的 reasoning 写着："guidance says those approvals won't pop
+   to anyone; treat as refusal… A single attempt is the documented escalation path… So one attempt
+   is legitimate." ——"说了不会被看见"在它那里被翻译成"点了就是被拒，不会挂"。
+
+定案（用户 `m84994`）：**方案 C，真需要权限时由超管调成 `danger-full-access`。**
+
+做法就是把入口拆掉，而不是在门口拦：`setup(agentCtx, agent)` 里，`agent.session` 还没发布时
+就 `session.append('approval/policy', { policy: 'never' })`（宿主 `@deepseek-ai/dsh-agent-loop`
+契约原文：`setup(agentCtx, agent)`，"the explicit unpublished Agent provides its Session"）。
+`never` 的语义是 `ApprovalService.decide()` **在任何分发之前**确定性返回 `rejected`；
+更关键的是 `sandboxNotes()` 只在 `escalationModes.length > 0` 时才追加那句推销——
+策略是 `never` 时 `escalationModes` 为空，**那句提示连同参数一起消失**。
+模型看到的只有 `[sandbox: file access denied under workspace-write mode]`，没有出路可试。
+
+- **只动枢纽自己拉起的会话**：`setup` 只服务 `group:` / `private:`；用户自己的 DSH 会话不动。
+- **沙箱档不在这里放宽**。`never` 管的是"别问"，`agent.permissionPreset` 管的是"沙箱有多宽"，
+  两件事分开配：沙箱太窄干不了活（起不了子进程、写不了工作区外面）就由超管在设置里把这项
+  填成 `danger-full-access`，每次建会话时 `permissionPresets.set(session, 名)` 落下去。
+  这必须发生在 setup 里——枢纽每次唤醒都是新会话，出了这个时机再设就只对当前激活有效。
+- 宿主没传 `agent.session` 或写失败时**退回旧兜底监听**并在 `onebot_hub_status.lastSetup.permission`
+  留一行字：诊断面不能因为一条策略没写上去就跟着失灵。
+- `agent.unattended: ask` 什么都不改（有人看着的部署里，审批该照常弹出来）。

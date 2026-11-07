@@ -385,10 +385,18 @@ await sleep(60); // 等 agent 通道那次动态 import 落地
  * `mind.stats.lastSetup`，不污染真实会话的统计。
  */
 function probeHub(who, opts = {}) {
-  const rec = { agentTools: [], agentSections: [], contexts: [], effects: [], agentEvents: [] };
+  const rec = { agentTools: [], agentSections: [], contexts: [], effects: [], agentEvents: [], appends: [] };
+  // `m84994`：setup 现在会往会话上 append 一条 `approval/policy`（拆掉提权入口）。
+  // 探针给一个假 Session 收下这些事件，用例才能断言"确实写进去了"而不只是"代码里写了"。
+  const session = {
+    append(type, data) {
+      rec.appends.push({ type, data });
+      return null;
+    },
+  };
   const before = who?.mind?.stats?.lastSetup;
   try {
-    who.mind.setup?.(fakeAgentCtx(rec, opts), { reply: () => null, sessionKey: 'group:10000', agentKey: 'agent:group:10000' });
+    who.mind.setup?.(fakeAgentCtx(rec, opts), { reply: () => null, sessionKey: 'group:10000', agentKey: 'agent:group:10000', agent: { session } });
   } catch (err) {
     console.error(`[probe] 枢纽 setup 探针失败：${String(err?.message ?? err)}`);
   }
@@ -1503,6 +1511,38 @@ check('订阅 session/event：只把 hub 自己的会话记进账本', () => {
     data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '别人的会话' }] }, stream: [] },
   });
   assert.equal(hub.mind.feedOf('session-7'), null, '非 hub 会话不该进账本');
+});
+
+check('建会话时就把审批策略写成 never：提权入口从工具面上拆掉（m84994）', () => {
+  // 旧做法是"等宿主问到我们、再答一声拒绝"——真机 105 分钟的事故证明它兜不住：
+  // 审批挂在宿主的链路上，答话只能等轮到。现在改成在建会话那一刻写 `approval/policy: never`，
+  // 宿主的 `ApprovalService.decide()` 在分发之前就确定性拒绝，沙箱那句"可以重试提权"的提示也不再出现。
+  const appends = hubProbe.appends.filter((e) => e.type === 'approval/policy');
+  assert.equal(appends.length, 1, `应该恰好写一次 approval/policy，实际 ${appends.length} 次`);
+  assert.equal(appends[0].data?.policy, 'never', `策略应为 never，实际 ${JSON.stringify(appends[0].data)}`);
+  // 沙箱档不在这里放宽：要用 danger-full-access 是超管改预设的事，不是插件自作主张。
+  assert.equal(
+    hubProbe.appends.filter((e) => e.type === 'sandbox/mode' || e.type === 'permission/preset').length,
+    0,
+    'setup 不该动沙箱档/权限预设（那是 agent.permissionPreset 与部署默认的事）',
+  );
+});
+
+check('ask 档不偷偷改审批策略：有人看着时那一下是真的弹给人点（m84994）', () => {
+  // setup 读的是 `config.agentPolicy`（枢纽 config 里的那一份），不是 `mind.policy`——改后者没用。
+  const cfg = hub.config;
+  const saved = cfg.agentPolicy;
+  try {
+    cfg.agentPolicy = { ...saved, unattended: 'ask' };
+    const rec = probeHub(hub);
+    assert.equal(
+      rec.appends.filter((e) => e.type === 'approval/policy').length,
+      0,
+      'ask 档下 setup 不该写 approval/policy —— 有人看着的部署里，审批该照常弹出来',
+    );
+  } finally {
+    cfg.agentPolicy = saved;
+  }
 });
 
 check('没人看着时的确认门：枢纽会话被自动答掉，别人的会话照旧等人（m84407）', async () => {
