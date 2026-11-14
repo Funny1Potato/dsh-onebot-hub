@@ -419,6 +419,171 @@ asyncCheck('落盘：重启用 load() 读回任务与计数器（否则每次重
   assert.equal(restored.lastResult, '静默');
 });
 
+asyncCheck('归属：别人的任务看不到、删不掉、跑不了（m85249 P1-4）', async () => {
+  const { hub, calls, storage } = makeHub({
+    groups: { '833194406': {}, '617770183': {} },
+  });
+  const store = new TaskStore({ storage, hub });
+  const mine = await store.create({
+    title: '我这边的',
+    prompt: 'p',
+    when: 'after:60',
+    target: 'group:833194406',
+    createdBy: 'group:833194406',
+  });
+  assert.equal(mine.ok, true);
+
+  // 另一个群：看不见、删不掉（且不能真的去动宿主排期）、跑不了（不能白花一次模型调用）
+  assert.equal(store.list({ owner: 'group:617770183' }).length, 0, '别人的任务不该出现在 list 里');
+  const gone = await store.remove(mine.id, { caller: 'group:617770183' });
+  assert.equal(gone.ok, false);
+  assert.match(gone.error, /不是你排的/);
+  assert.equal(calls.deleted.length, 0, '被拒的删除不能真去动宿主');
+  const ran = await store.run(mine.id, { caller: 'group:617770183' });
+  assert.equal(ran.ok, false);
+  assert.match(ran.error, /跑不了/);
+  assert.equal(calls.woke.length, 0, '被拒的 run 不该叫醒任何人');
+
+  // 自己：看得到、删得掉
+  assert.equal(store.list({ owner: 'group:833194406' }).length, 1);
+  assert.equal((await store.remove(mine.id, { caller: 'group:833194406' })).ok, true);
+});
+
+asyncCheck('归属：到点要叫醒的那个会话也算主人（老数据 createdBy 会退回 target）', async () => {
+  const { hub, storage } = makeHub();
+  const store = new TaskStore({ storage, hub });
+  await store.create({ title: 't', prompt: 'p', when: 'after:60', target: 'group:833194406', createdBy: 'private:945126014' });
+  // 建它的是私聊，叫醒的是群——两边都该管得着
+  assert.equal(store.list({ owner: 'group:833194406' }).length, 1);
+  assert.equal(store.list({ owner: 'private:945126014' }).length, 1);
+  assert.equal(store.list({ owner: 'group:617770183' }).length, 0);
+});
+
+asyncCheck('一次性任务响过就退场，不再占名额、轮换也不复活（m85249 P2-7）', async () => {
+  const { hub, calls, storage } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 99 });
+  const once = await store.create({ title: '一次', prompt: 'p', when: 'after:60', target: 'group:833194406', createdBy: 'group:833194406' });
+  const out = await store.fire(once.id, {});
+  assert.equal(out.ok, true);
+  assert.equal(out.finished, true, '一次性任务响完要标结束');
+  assert.equal(store.list().length, 0, '默认 list 不该再列出它');
+  assert.equal(store.list({ all: true }).length, 1, 'all:true 还看得见历史');
+  const again = await store.fire(once.id, {});
+  assert.equal(again.ok, false, '结束了就不该再响');
+
+  // 每轮都有的任务不为所动
+  const every = await store.create({ title: '每个', prompt: 'p', when: 'every:600', target: 'group:833194406', createdBy: 'group:833194406' });
+  const r2 = await store.fire(every.id, {});
+  assert.equal(r2.ok, true);
+  assert.equal(r2.finished, undefined, '循环任务不标 finished');
+  assert.equal(store.list().length, 1);
+});
+
+asyncCheck('暂停：删宿主排期、记录留着，恢复时重新排一次（m85685）', async () => {
+  const { hub, calls, storage } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 99 });
+  const made = await store.create({ title: '每十分钟', prompt: 'p', when: 'every:600', target: 'group:833194406', createdBy: 'group:833194406' });
+  assert.equal(made.ok, true, JSON.stringify(made));
+  assert.equal(store.list()[0].paused, undefined, '新建的不该带 paused');
+
+  const paused = await store.pause(made.id, { caller: 'group:833194406' });
+  assert.equal(paused.ok, true, JSON.stringify(paused));
+  assert.equal(calls.deleted.length, 1, '宿主的排期要删掉（不然暂停了照样会响）');
+  const rec = store.list()[0];
+  assert.equal(rec.paused, true);
+  assert.equal(rec.scheduleId, '', '暂停后不该还留着一个排期 id');
+  assert.equal(rec.prompt, 'p', '暂停不动 prompt——恢复就是为了不用重写它');
+  assert.equal(store.list().length, 1, '记录还在，只是不响');
+
+  // 再暂停一次是幂等的
+  const twice = await store.pause(made.id, { caller: 'group:833194406' });
+  assert.equal(twice.already, true);
+  assert.equal(calls.deleted.length, 1);
+
+  const resumed = await store.resume(made.id, { caller: 'group:833194406' });
+  assert.equal(resumed.ok, true, JSON.stringify(resumed));
+  assert.equal(calls.created.length, 2, '恢复要真的重新向宿主排一次');
+  assert.equal(store.list()[0].paused, false);
+  assert.ok(store.list()[0].scheduleId, '恢复后要有新的排期 id');
+});
+
+asyncCheck('暂停：不是主人就停不了，一次性任务恢复要看时间还成不成立', async () => {
+  const { hub, storage } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 99 });
+  const made = await store.create({ title: '私聊排的', prompt: 'p', when: 'every:600', target: 'group:833194406', createdBy: 'private:945126014' });
+  const no = await store.pause(made.id, { caller: 'group:617770183' });
+  assert.equal(no.ok, false);
+  assert.match(String(no.error), /不是你排的/);
+
+  const once = await store.create({ title: '一次', prompt: 'p', when: 'after:120', target: 'group:833194406', createdBy: 'group:833194406' });
+  assert.equal((await store.pause(once.id, { caller: 'group:833194406' })).ok, true);
+  const back = await store.resume(once.id, { caller: 'group:833194406' });
+  assert.equal(back.ok, true, JSON.stringify(back));
+  assert.match(String(back.every), /分钟|小时|秒/, `恢复后要有节拍说明：${back.every}`);
+});
+
+asyncCheck('暂停的任务不会被叫醒，轮换也不会把它搬过去（复审 F11）', async () => {
+  const { hub, storage, calls } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 99 });
+  const made = await store.create({ title: '先别响', prompt: 'p', when: 'every:600', target: 'group:833194406', createdBy: 'group:833194406' });
+  await store.pause(made.id, { caller: 'group:833194406' });
+  const wokeBefore = calls.woke.length;
+  const out = await store.fire(made.id, {});
+  assert.equal(out.ok, false, '暂停的任务不该被 fire 叫醒');
+  assert.match(String(out.error), /暂停/);
+  assert.equal(calls.woke.length, wokeBefore, '一次模型调用都不该花');
+  // 轮换只搬"活着且没暂停"的：把 resetEvery 压到 1 也不会重建暂停那条。
+  const small = new TaskStore({ storage, hub, resetEvery: 1 });
+  small.load();
+  await small.fireBySchedule(made.scheduleId ?? '', {});
+  assert.equal(small.list({ all: true }).find((t) => t.id === made.id)?.paused, true, '暂停状态得留着');
+});
+
+asyncCheck('手动试跑不退场，也不触发轮换（复审 F12）', async () => {
+  const { hub, storage, calls } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 1 });
+  const once = await store.create({ title: '一次性', prompt: 'p', when: 'after:600', target: 'group:833194406', createdBy: 'group:833194406' });
+  const createdBefore = calls.created.length;
+  const out = await store.run(once.id, { caller: 'group:833194406' });
+  assert.equal(out.ok, true, JSON.stringify(out));
+  assert.equal(out.finished, undefined, '试跑不该把一次性任务标成结束');
+  assert.equal(store.list().some((t) => t.id === once.id), true, '它还该在列表里');
+  assert.equal(calls.created.length, createdBefore, '试跑不该重建任何排期');
+  // 到点真响一次才退场。换一个 store 读同一份盘：`#fired` 的 60 秒去重只活在内存里。
+  const fresh = new TaskStore({ storage, hub, resetEvery: 1 });
+  fresh.load();
+  const real = await fresh.fireBySchedule(fresh.list().find((t) => t.id === once.id).scheduleId ?? '', {});
+  assert.equal(real.ok, true, JSON.stringify(real));
+  assert.equal(real.finished, true, '这次是真响，一次性任务该退场');
+  assert.equal(fresh.list().some((t) => t.id === once.id), false, '真响过就该退场');
+});
+
+asyncCheck('试跑不占正式那本去重账：试完紧接着到点，还得真响（第三轮 T11）', async () => {
+  const { hub, storage } = makeHub();
+  const store = new TaskStore({ storage, hub });
+  const once = await store.create({ title: '一次性', prompt: 'p', when: 'after:600', target: 'group:833194406', createdBy: 'group:833194406' });
+  const trial = await store.run(once.id, { caller: 'group:833194406' });
+  assert.equal(trial.ok, true, JSON.stringify(trial));
+  // 同一个 store、60 秒之内：正式那次不能被试跑"占位"。
+  const key = store.list().find((t) => t.id === once.id)?.scheduleId ?? '';
+  const real = await store.fireBySchedule(key, {});
+  assert.equal(real.already, undefined, '试跑不许把到点那次当成"已经投过了"');
+  assert.equal(real.ok, true, JSON.stringify(real));
+});
+
+asyncCheck('排队中的一次性任务不被轮换重建（第三轮 T11）', async () => {
+  const { hub, storage, calls } = makeHub();
+  // 叫醒一直不落地：这样 fire 会走"已投递，等那边空下来"的排队分支。
+  hub.mind.reawake = () => new Promise(() => {});
+  const store = new TaskStore({ storage, hub, resetEvery: 1 });
+  const once = await store.create({ title: '排队那条', prompt: 'p', when: 'after:600', target: 'group:833194406', createdBy: 'group:833194406' });
+  const createdBefore = calls.created.length;
+  const out = await store.fire(once.id, {});
+  assert.equal(out.queued, true, JSON.stringify(out));
+  assert.equal(calls.created.length, createdBefore, '在飞的一次性任务不该被轮换再排一遍');
+  assert.equal(store.list().some((t) => t.id === once.id), true, '它还该在列表里');
+});
+
 await Promise.all(pending);
 
 console.log(JSON.stringify({ passed, failed, cases }, null, 2));

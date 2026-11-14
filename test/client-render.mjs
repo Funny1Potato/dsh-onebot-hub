@@ -20,6 +20,8 @@ const root = path.resolve(here, '..');
 const clientText = fs.readFileSync(path.join(root, 'lib', 'client.js'), 'utf8');
 
 const results = [];
+// 注意：调用处必须 `await check(...)`。`check` 是 async，漏掉 await 时 `results.push` 会
+// 落到汇总之后——总数少一条，看起来像"这个用例没写"。
 const check = async (name, fn) => {
   try {
     await fn();
@@ -995,6 +997,16 @@ await check('能力白名单：勾选即写入 JSON；danger 的项不会混进 
   assert.equal(writes.length, 1, '勾一下只写这一个字段');
   assert.equal(typeof writes[0].value, 'string', 'schema 是字符串，写回的也必须是字符串');
   assert.deepEqual(JSON.parse(writes[0].value), ['delete_msg'], '勾上撤回 = 数组里只剩它');
+});
+
+await check('运维面板：会话键、权限预览、失败队列三块都在，路径与路由同源', () => {
+  assert.ok(/HUB_OPS_PATH\s*=\s*'\/onebot-hub\/ops'/.test(clientText), '前端路径要写死这一个');
+  const routeText = fs.readFileSync(path.join(root, 'lib', 'ops', 'route.js'), 'utf8');
+  assert.ok(routeText.includes("export const OPS_PATH = '/onebot-hub/ops'"), '路由与前端必须同一个路径');
+  assert.ok(/failures:\s*Array\.isArray\(body && body\.failures\)/.test(clientText), '快照里要带上失败队列');
+  assert.ok(/op: 'replay'/.test(clientText) && /op: 'forget_failure'/.test(clientText), '两个按钮的动作名要对得上路由');
+  assert.ok(/head === 'capability'/.test(clientText), '面板挂在「能力」那一组');
+  assert.ok(/'暂停'/.test(clientText) && /'恢复'/.test(clientText), '任务台账要有暂停/恢复');
 });
 
 const failed = results.filter((row) => !row.ok);

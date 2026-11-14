@@ -2144,6 +2144,66 @@ async function scenarioReplyBufferSurvivesSecondWake() {
   });
 }
 
+async function scenarioPurgeKeepsTalking() {
+  const { hub, sent } = makeHub();
+  const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 99, batchMs: 600000 });
+  let scripted = null;
+  const { host } = makeFakeHost({
+    script: async (agent) => {
+      if (scripted) await scripted(agent);
+    },
+  });
+  const pool = new AgentPool({ policy, host, log: () => {} });
+  const mind = new Mind({
+    hub,
+    timeline: hub.timeline,
+    store: new MemoryStore({}),
+    policy,
+    pool,
+    log: () => {},
+    setup: (agentCtx, { reply }) => {
+      agentCtx.tools.register({
+        name: 'onebot_reply',
+        async execute(args = {}) {
+          const c = reply.capture({ text: args.text });
+          return c ? `queued:${c.text}` : 'empty';
+        },
+      });
+    },
+  });
+  hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+
+  const talk = async (chatText, toolText) => {
+    scripted = async (agent) => {
+      await agent.tools.get('onebot_reply').execute({ text: toolText });
+    };
+    hub.handleUpstreamEvent(groupMessage({ groupId: 88888, messageId: 52000 + sent.length, text: chatText }));
+    return mind.flush('group:88888', { reason: 'test:purge' });
+  };
+
+  await talk('清理前的一句', '清理前的那句');
+  check('按会话清理之前：话能正常发出去', () => {
+    assert.equal(sent.length, 1);
+  });
+
+  mind.forgetSession('group:88888');
+  // 清理前那一轮的产物（模型还在跑、后一步才投递）不该补进刚清空的会话。
+  const late = await mind.deliver('group:88888', {
+    segments: [{ type: 'text', data: { text: '清理前那一轮的迟到回复' } }],
+    text: '清理前那一轮的迟到回复',
+  });
+  check('清理前那一轮的迟到产物被丢掉（不会往清空的会话里补话）', () => {
+    assert.equal(late, null, '代数对不上就该返回 null');
+    assert.equal(sent.length, 1);
+  });
+
+  await talk('清理后的一句', '清理后还能说话');
+  check('清理之后：同一个会话仍然能说话（缓冲对象没被换掉）', () => {
+    assert.equal(sent.length, 2, '第二轮没发出去说明工具握着的是被扔掉的那个缓冲');
+    assert.equal(sent[1].params.message[0].data.text, '清理后还能说话');
+  });
+}
+
 async function scenarioTurnErrorRecorded() {
   // 真宿主里 `whenIdle()` 会把回合内的错误吞掉：账本必须把 `turn/end` 的原因留下来。
   const { hub, sent } = makeHub();
@@ -4790,6 +4850,7 @@ const main = async () => {
   await scenarioSteerInterject();
   await scenarioMultiSteerInterject();
   await scenarioReplyBufferSurvivesSecondWake();
+  await scenarioPurgeKeepsTalking();
   await scenarioTurnErrorRecorded();
   await scenarioArchivedSessionGate();
   await scenarioCapability();

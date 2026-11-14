@@ -22,6 +22,7 @@ import {
   stripInlineMedia,
 } from '../lib/protocol.js';
 import { LoopGuard } from '../lib/trace.js';
+import { makeSessionKeyResolver } from '../lib/tools/shared.js';
 import { MessageIdMap } from '../lib/message-id.js';
 import { Hub } from '../lib/hub.js';
 import { DownstreamSession } from '../lib/link.js';
@@ -61,6 +62,7 @@ import {
 } from '../lib/turns.js';
 import { MemoryStore, memoryDedupeKey, normalizeMemoryText } from '../lib/memory/store.js';
 import { resolveIsolation } from '../lib/memory/isolation.js';
+import { isHubOwnedAgent } from '../lib/agent/policy.js';
 import { applyMemoryOps, memoryBlocks } from '../lib/memory/writer.js';
 import { ActiveStore, activeWhitelist, buildShareContext, filterActive, renderActive, isActiveVisible } from '../lib/memory/active.js';
 import { tokenize, RecallStore } from '../lib/memory/recall.js';
@@ -87,7 +89,15 @@ import {
 } from '../lib/learn.js';
 import { Mind, mediaTag } from '../lib/mind.js';
 import { mergePolicyMode, resolveAgentPolicy, sessionAllowlistOff, sessionOverrideOf } from '../lib/agent/policy.js';
-import { canRead, describeReadScope, parseTrustedPrivates } from '../lib/read-scope.js';
+import {
+  canRead,
+  describeReadScope,
+  hasFullRead,
+  parseTrustedPrivates,
+  readTargetOfCall,
+  resolveReadTarget,
+  resolveSendTarget,
+} from '../lib/read-scope.js';
 
 let passed = 0;
 const cases = [];
@@ -436,6 +446,196 @@ t('分级三分法：read 默认、write 显式、danger 一律拦', () => {
   assert.equal(baseAction('send_group_msg_async'), 'send_group_msg');
   // 承诺里写死的边界：绝不能让写操作掉进 read。
   for (const action of ['send_msg', 'delete_msg', 'set_group_ban']) assert.notEqual(tierOf(action), 'read');
+  // `m85249` P1-5：白名单没覆盖的第三方扩展不能再一律算只读——
+  // 只要名字说自己要写东西，就必须进 write 档（写白名单为空时就是拒绝）。
+  for (const action of [
+    'upload_group_file',
+    'upload_private_file',
+    'create_group_file_folder',
+    'move_group_file',
+    'trans_group_file',
+    'rename_group_file',
+    'delete_group_file',
+    'go-cqhttp_upload',
+    '_set_group_notice',
+  ]) {
+    assert.equal(tierOf(action), 'write', `${action} 是写操作，不能掉进 read`);
+  }
+  // 但正当的只读扩展不许被误伤（一刀切"未知即拒绝"会把它们全打死）。
+  for (const action of [
+    'get_group_notice',
+    'get_qq_avatar',
+    'get_stranger_info',
+    'get_group_file_system_info',
+    'fetch_status',
+    'can_send_image',
+    'check_url_safely',
+  ]) {
+    assert.equal(tierOf(action), 'read', `${action} 是只读扩展，不能误判成写`);
+  }
+  // 名字里带执行/重启这类词的，宁可当危险。
+  assert.equal(tierOf('node_exec'), 'danger');
+  assert.equal(tierOf('bot_restart'), 'danger');
+});
+
+t('只读 action 读的是哪个会话：参数里认，也让 id 型交给调用方（m85249 P1-2）', () => {
+  assert.equal(readTargetOfCall({ group_id: '833194406' }), 'group:833194406');
+  assert.equal(readTargetOfCall({ groupId: 123 }), 'group:123');
+  assert.equal(readTargetOfCall({ user_id: '945126014' }), 'private:945126014');
+  assert.equal(readTargetOfCall({ user: ' 10001 ' }), 'private:10001');
+  // 群和人同时给：群优先（读的是这个群的成员/记录）
+  assert.equal(readTargetOfCall({ group_id: '1', user_id: '2' }), 'group:1');
+  assert.equal(readTargetOfCall({}), '', '认不出就空串，由调用方决定怎么办');
+  assert.equal(readTargetOfCall({ group_id: '' }), '', '空串不算目标');
+  // "本来就什么都能读"只认白名单私聊
+  const trusted = new Set(['945126014']);
+  assert.equal(hasFullRead({ current: 'private:945126014', trusted }), true);
+  assert.equal(hasFullRead({ current: 'private:3820113110', trusted }), false);
+  assert.equal(hasFullRead({ current: 'group:833194406', trusted }), false);
+  assert.equal(hasFullRead({ current: 'private:1', trusted: new Set() }), false);
+});
+
+t('按 id 查的接口：归属以索引为准，参数对不上算冲突（复审 F01）', () => {
+  // 索引说这条消息在私聊里，调用方却塞了一个本群 group_id——上游会忽略多余参数，放过去就读到私聊了。
+  const lookup = (id) => (id === 'm1' ? 'private:945126014' : id === 'm2' ? 'group:833194406' : '');
+  assert.deepEqual(resolveReadTarget({ message_id: 'm1', group_id: '833194406' }, lookup), {
+    target: '?',
+    conflict: true,
+    ids: ['m1'],
+  }, '参数与归属对不上就得拒，不能按参数算');
+  // 对得上就照走。
+  assert.equal(resolveReadTarget({ message_id: 'm2', group_id: '833194406' }, lookup).target, 'group:833194406');
+  // 只给 id：按归属算。
+  assert.equal(resolveReadTarget({ message_id: 'm1' }, lookup).target, 'private:945126014');
+  // 转发消息的 id 藏在 file 里（纯数字才认），路径不算 id。
+  assert.equal(resolveReadTarget({ file: '1234567' }, lookup).target, '?', '索引里没有就记成认不出');
+  assert.equal(resolveReadTarget({ file: 'D:/tmp/a.png' }, lookup).target, '', '路径不是 id，不当目标算');
+  // 两个 id 指向不同会话：不知道该按谁算。
+  assert.equal(resolveReadTarget({ message_id: 'm1', id: 'm2' }, lookup).conflict, true);
+  // 一个都认不出、也没有直接参数：交给调用方按身份决定（`'?'` 不是空串）。
+  assert.deepEqual(resolveReadTarget({ message_id: 'nope' }, lookup), { target: '?', conflict: false, ids: ['nope'] });
+  // 没有 id 时按参数里的会话走（历史消息这类）。
+  assert.deepEqual(resolveReadTarget({ group_id: '833194406' }, lookup), {
+    target: 'group:833194406',
+    conflict: false,
+    ids: [],
+  });
+  assert.deepEqual(resolveReadTarget({}, lookup), { target: '', conflict: false, ids: [] });
+  // 索引里没有的 id + 附加群号：附加参数不再能授权（第三轮 T01）。
+  assert.equal(
+    resolveReadTarget({ message_id: '90002', group_id: '833194406' }, lookup).target,
+    '?',
+    '查不到归属时，附加的 group_id 不能把这条请求认成"本群的"',
+  );
+  // 白名单私聊（本来就能读一切）照旧按参数走。
+  assert.equal(
+    resolveReadTarget({ message_id: '90002', group_id: '833194406' }, lookup, { full: true }).target,
+    'group:833194406',
+  );
+  // 非数字的转发 ID 也算 id：认不出归属就是认不出。
+  assert.equal(resolveReadTarget({ file: 'private-forward-id' }, lookup).target, '?');
+  assert.equal(resolveReadTarget({ file: 'https://x/a.png' }, lookup).target, '', 'URL 不是 id');
+});
+
+t('往外递东西时目标是哪：默认只能给自己，代发要白名单（复审 F05）', () => {
+  // 正常：参数没给或给的就是自己。
+  assert.deepEqual(resolveSendTarget({ trusted: 'group:1' }), { sessionKey: 'group:1', ignored: false });
+  assert.deepEqual(resolveSendTarget({ asked: 'group:1', trusted: 'group:1' }), { sessionKey: 'group:1', ignored: false });
+  // 默认档：参数被忽略，回执要能说出这句话。
+  assert.deepEqual(resolveSendTarget({ asked: 'private:945126014', trusted: 'group:1' }), {
+    sessionKey: 'group:1',
+    ignored: true,
+  });
+  // 白名单私聊（本来就什么都能读）可以代发。
+  assert.deepEqual(
+    resolveSendTarget({ asked: 'group:1', trusted: 'private:945126014', canCross: true }),
+    { sessionKey: 'group:1', ignored: false },
+  );
+});
+
+t('媒体带归属：列表能按会话过滤，同一份字节多处出现算"共有"（m85249 P1-3）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-scope-'));
+  const store = new JsonStore({ dir, debounceMs: 0 });
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  // 第二张换成不同字节，否则内容寻址会把它们合成同一条（那属于下面的"共有"用例）。
+  const png2 = Buffer.concat([png, Buffer.from([0])]);
+  const media = new MediaStore({ storage: store, linkId: 'up:test', log: () => {}, fetchImpl: async () => null });
+  const seenBy = (key) => media.list({ allow: (row) => (row.sessionKeys ?? [row.sessionKey]).includes(key) });
+  return Promise.resolve().then(async () => {
+    const a = await media.resolve(
+      { type: 'image', data: { file: `base64://${png.toString('base64')}`, name: '甲群的图.png' } },
+      { messageId: 1, index: 0, sessionKey: 'group:111' },
+    );
+    const b = await media.resolve(
+      { type: 'image', data: { file: `base64://${png2.toString('base64')}`, name: '私聊的图.png' } },
+      { messageId: 2, index: 0, sessionKey: 'private:222' },
+    );
+    assert.equal(a.sessionKey, 'group:111', '落地时要记住它属于哪个会话');
+    assert.equal(b.sessionKey, 'private:222');
+    assert.equal(seenBy('group:111').length, 1, '群会话只该看见自己那条');
+    assert.ok(!seenBy('group:111').some((row) => String(row.name).includes('私聊')), '别人的图名不该出现');
+    assert.equal(seenBy('private:222').length, 1);
+    assert.equal(media.list().length, 2);
+
+    // 同一份字节又在另一个会话出现：归属变成集合，两边都还看得见
+    await media.resolve(
+      { type: 'image', data: { file: `base64://${png.toString('base64')}`, name: '甲群的图.png' } },
+      { messageId: 3, index: 0, sessionKey: 'private:222' },
+    );
+    const shared = media.list().find((row) => row.id === a.id);
+    assert.deepEqual([...shared.sessionKeys].sort(), ['group:111', 'private:222'], '归属是集合，不是最后一个写入者');
+    assert.equal(media.list().length, 2, '同一份字节只记一条，不会因为多出现一次就多一条');
+    assert.equal(seenBy('group:111').length, 1, '另一个会话也发过这张图时，原会话仍然看得见（不会被抢走）');
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+t('复用一份已落地的媒体，不会把它的归属搬到新会话（第三轮 T03）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-reuse-'));
+  const store = new JsonStore({ dir, debounceMs: 0 });
+  const png = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==',
+    'base64',
+  );
+  const media = new MediaStore({ storage: store, linkId: 'up:test', log: () => {}, fetchImpl: async () => null });
+  return Promise.resolve().then(async () => {
+    const first = await media.resolve(
+      { type: 'image', data: { file: `base64://${png.toString('base64')}`, name: '私聊的图.png' } },
+      { messageId: 7, index: 0, sessionKey: 'private:222' },
+    );
+    assert.equal(first.sessionKey, 'private:222');
+    // 群会话拿这张的引用当来源再落一次：字节是同一份，但归属不能跟着搬过去。
+    const again = await media.resolve(
+      { type: 'image', data: { file: first.id, name: '群里的图.png' } },
+      { sessionKey: 'group:111' },
+    );
+    assert.equal(again.id, null, '不可读的引用不能返回文件路径');
+    assert.match(again.error, /归属.*范围/, '不只是不新增归属，还要真的拒绝读取');
+    const owners = media.ownersOf(first.id);
+    assert.deepEqual(owners.sessionKeys, ['private:222'], '归属只由真正收到它的那次决定');
+    assert.equal(
+      media.list({ allow: (row) => (row.sessionKeys ?? [row.sessionKey]).includes('group:111') }).length,
+      0,
+      '群会话不该因为复用过一次就能在列表里看见它',
+    );
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+t('时间线的会话桶也有上界：最冷的先走，桶不会无限攒（m85249 P2-8）', () => {
+  const tl = new Timeline({ limitGlobal: 10000, limitSession: 10, limitSessions: 8 });
+  for (let i = 0; i < 12; i += 1) {
+    tl.record({ direction: 'upstream-in', linkId: 'up:test', text: `第 ${i} 个会话`, event: { post_type: 'message', message_type: 'group', group_id: 900000 + i, user_id: 1, message: [] } });
+  }
+  const stats = tl.stats;
+  assert.equal(stats.sessionLimit, 8, '上界要能看见');
+  assert.ok(stats.sessions <= 8, `会话桶不许超过上界，实际 ${stats.sessions}`);
+  // 最新那个会话一定还在；最早那个已被淘汰
+  assert.ok(tl.bySession('group:900011').length > 0, '最新的会话必须留着');
+  assert.equal(tl.bySession('group:900000').length, 0, '最冷的会话桶该被淘汰');
 });
 
 t('敏感只读：凭证类默认不外露', () => {
@@ -2094,6 +2294,26 @@ t('媒体落地：内联字节写成自己的 blob，同时登记宿主 attachme
     });
 });
 
+t('媒体：把 hub-media 引用再当来源用（resolve 的内部通道），字节要接得上（复审 F15）', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-reuse-'));
+  const store = new JsonStore({ dir, debounceMs: 0 });
+  const media = new MediaStore({ storage: store, linkId: 'up:test', log: () => {} });
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  return Promise.resolve()
+    .then(async () => {
+      const first = await media.resolve({ type: 'image', data: { file: `base64://${png}` } }, { messageId: 1, index: 0 });
+      assert.ok(first?.id?.startsWith('hub-media:'));
+      // `readRef` 回的对外形状是 {bytes}，而 resolve() 的内部通道读 `.data`——两边必须对得上，
+      // 否则这里会炸 "Cannot read properties of undefined (reading 'length')"。
+      const again = await media.resolve({ type: 'image', data: { file: first.id } }, { messageId: 2, index: 0 });
+      assert.equal(again.id, first.id, '同一份字节应当落到同一个 id');
+      assert.equal(again.bytes, first.bytes);
+      assert.equal(again.provenance, 'hub-media');
+      assert.ok(!again.error, `不该有错：${again.error}`);
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+});
+
 t('媒体 readRef：URL/data:/base64:///本地路径/hub-media 都读成字节，且不落盘不登记', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-media-readref-'));
   const store = new JsonStore({ dir, debounceMs: 0 });
@@ -3295,6 +3515,38 @@ t('聊天记录不展开也不解析：合并转发与多消息卡片只留标�
     describeSegments([{ type: 'xml', data: { data: '<msg serviceID="1" brief="新闻"><item><title>标题</title></item></msg>' } }]),
     /卡片：标题/,
   );
+});
+
+t('审批只认枢纽自己的会话（复审 F04）：别的会话的 agent 要原样交给后手', () => {
+  assert.equal(isHubOwnedAgent({ session: { id: 'onebot-hub:group%3A1.abc' } }), true);
+  assert.equal(isHubOwnedAgent({ sessionId: 'onebot-hub:tasks' }), true);
+  assert.equal(isHubOwnedAgent({ session: { id: 'session-abc' } }), false);
+  assert.equal(isHubOwnedAgent({}), false, '认不出来也不能当自己家');
+  assert.equal(isHubOwnedAgent(null), false);
+});
+
+t('检索的授权身份不许由参数决定（复审 F02）：伪造 actorId 拿不到别人的私聊事实', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-recall-auth-'));
+  const recall = new RecallStore({ dir, linkId: 'up:test', log: () => {} });
+  recall.append({
+    id: 'tpriv1',
+    ts: Date.now() - 60000,
+    sessionKey: 'private:90001',
+    direction: 'in',
+    actor: { user_id: '90001', nickname: '小张' },
+    text: '我在私聊里说的家里事',
+  });
+  const isolation = resolveIsolation({ level: 'balanced', privateFacts: 'sameActor' });
+  return recall.ensure().then(async () => {
+    // 模型自己填 actorId=90001（冒充本人）：只当过滤条件，不能当门禁
+    const forged = await recall.search({ query: '家里事', sessionKey: 'group:100', actorId: '90001', authorizeAs: '', isolation });
+    assert.equal((forged?.items ?? []).length, 0, `伪造 actorId 不该看见：${JSON.stringify(forged?.items ?? [])}`);
+    // 可信批次里说话的人就是他：照规则可见
+    const real = await recall.search({ query: '家里事', sessionKey: 'group:100', actorId: '90001', authorizeAs: '90001', isolation });
+    assert.equal((real?.items ?? []).length, 1, '本人正在说话时应当看得到');
+    recall.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 t('保留期清理：超期的日文件、内存行与媒体 blob 一起清（m03091）', () => {
@@ -4546,6 +4798,24 @@ t('档案里记着的群，和朌里的群对得上就要认得（m79112 自查�
   assert.ok(ids.has('10011'), '档案里记着这个群，就应该认得');
   const roster = renderPeopleRoster(people, { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10012', selfId: '999', restrict: ids });
   assert.match(roster, /10011/, '两段要用同一份名单，否则摘要段会把他当成“不认识”再念一遍');
+});
+
+t('会话身份在注册时就绑死：并发 flush 也串不了（m85249 P1-1）', () => {
+  // 真机事故的形状：`scanDue()` 用 Promise.all 并发跑多个会话，`mind.activeSessionKey`
+  // 是进程级共享变量——A 群的长回合跑到一半，B 私聊被叫醒把它改了，A 剩下的工具调用
+  // 就会拿着 B 的身份去写记忆、判读权限、记任务归属。
+  const mind = { activeSessionKey: 'private:222', stats: { lastTurn: { sessionKey: 'private:222' } } };
+  const bound = makeSessionKeyResolver({ bound: 'group:111', mind });
+  assert.equal(bound(), 'group:111', '绑定了就用绑定值，不看共享变量');
+  mind.activeSessionKey = 'group:333';
+  assert.equal(bound(), 'group:111', '别的会话改了共享变量也不影响');
+  // 没有绑定值（老调用点 / 测试环境）才退回原来的推断链。
+  const loose = makeSessionKeyResolver({ mind });
+  assert.equal(loose(), 'group:333', '没绑定时仍按 activeSessionKey 推');
+  mind.activeSessionKey = null;
+  assert.equal(loose(), 'private:222', '再退回上一轮回合的会话键');
+  assert.equal(makeSessionKeyResolver({}).call(null), '', '什么都没有就空串，不抛');
+  assert.equal(makeSessionKeyResolver({ bound: '  group:9  ' })(), 'group:9', '绑定值要去空白');
 });
 
 await Promise.all(pending);

@@ -26,6 +26,7 @@ import { MODEL_LIST_PATH, installModelListRoute } from '../lib/llm-models.js';
 import { PERSONA_PATH, installPersonaRoute } from '../lib/persona/route.js';
 import { LOG_RECENT_PATH, LOG_STREAM_PATH } from '../lib/log/route.js';
 import { OFFICIAL_QR_PATH, installOfficialQrRoute } from '../lib/official/route.js';
+import { OPS_PATH } from '../lib/ops/route.js';
 import { describePolicy, resolvePolicy } from '../lib/router.js';
 import { COMMAND_SPECS } from '../lib/chat-commands.js';
 import { filterForScope, resolveIsolation, setGroupMembershipProvider } from '../lib/memory/isolation.js';
@@ -395,8 +396,12 @@ function probeHub(who, opts = {}) {
     },
   };
   const before = who?.mind?.stats?.lastSetup;
+  // `m85379`：工具在真机上绑死的是"激活它的那个会话"，不再读 `mind.activeSessionKey`。
+  // 探针默认**不绑**（传空串，退回那条老回退路），这样"靠 activeSessionKey 指路"的老用例照旧能跑；
+  // 要验绑定语义的用例显式传 `sessionKey`（探针只负责收定义，绑定本身另有 smoke-core 用例守）。
+  const probeKey = String(opts.sessionKey ?? '');
   try {
-    who.mind.setup?.(fakeAgentCtx(rec, opts), { reply: () => null, sessionKey: 'group:10000', agentKey: 'agent:group:10000', agent: { session } });
+    who.mind.setup?.(fakeAgentCtx(rec, opts), { reply: () => null, sessionKey: probeKey, agentKey: `agent:${probeKey}`, agent: { session } });
   } catch (err) {
     console.error(`[probe] 枢纽 setup 探针失败：${String(err?.message ?? err)}`);
   }
@@ -1054,6 +1059,10 @@ await checkAsync('上下文预算：只算这个插件塞进去的部分，段�
 // 守门测两件事：①这个约定本身不许退化（withNotes/addNotes 的返回形状）；
 // ②凡是"会藏东西"的工具，回执里必须带 notes 这个键（少写就是模型以为全做完了）。
 await checkAsync('回执纪律：丢弃/忽略/降级统一写进 notes，工具回执不许少这个键', async () => {
+  // 读范围闸（`m85249` P1-2）要求"当前会话"认得出来；这个用例一直在 group:55555 的角度说话。
+  const prevKey = hub.mind.activeSessionKey;
+  hub.mind.activeSessionKey = 'group:55555';
+  try {
   // ① 共用件的形状：withNotes 返回**同一个 body**（不是那个数组——这里踩过一次，
   // 返回数组会让人手写成 JSON.stringify(notes) 得到 []，而测试还以为自己拿到的是回执）。
   const body = withNotes({ ok: true, notes: [] });
@@ -1099,6 +1108,9 @@ await checkAsync('回执纪律：丢弃/忽略/降级统一写进 notes，工具
     pluginGuidance: '指导',
   });
   assert.equal(/\bm\d{5}\b/.test(JSON.stringify(budget)), false, '预算账也不许出现内部编号');
+  } finally {
+    hub.mind.activeSessionKey = prevKey;
+  }
 });
 
 check('会话版回复工具挂不上时，直发版 onebot_reply 顶位（m11162 让位规则不能把能力让没）', () => {
@@ -1234,9 +1246,10 @@ check('下游接入端不再挂宿主 webServer：改由目标自己的地址监
 
 check('浏览器自诊断通道：上报路由 + head 注入', () => {
   // 路由：精确路径、每条各一份（重复 (kind,path) 在真宿主会抛错，这里防回归）。
-  // 六条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）；
-  // ④ 设置页的官方通道扫码（m34313）；⑤⑥ 「OneBot 日志」面板的 recent + SSE 两条。
-  assert.equal(recorded.routes.length, 6);
+  // 七条：① 浏览器自诊断上报；② 设置页的模型清单（m024193）；③ 设置页的人设库（m23678）；
+  // ④ 设置页的官方通道扫码（m34313）；⑤⑥ 「OneBot 日志」面板的 recent + SSE 两条；
+  // ⑦ 设置页的运维一栏（m85685：权限预览 + 按会话盘点/导出/清理）。
+  assert.equal(recorded.routes.length, 7);
   assert.equal(recorded.routes[0].kind, 'exact');
   assert.equal(recorded.routes[0].path, CLIENT_PROBE_PATH);
   assert.equal(typeof recorded.routes[0].handler, 'function');
@@ -1259,6 +1272,11 @@ check('浏览器自诊断通道：上报路由 + head 注入', () => {
   assert.ok(officialRoute, `官方扫码路由没注册：${OFFICIAL_QR_PATH}`);
   assert.equal(officialRoute.kind, 'exact');
   assert.equal(typeof officialRoute.handler, 'function');
+  // 运维一栏（m85685）：数据全在服务端（存储/时间线/档案/任务），所以必须有一条自己的路由。
+  const opsRoute = recorded.routes.find((route) => route.path === OPS_PATH);
+  assert.ok(opsRoute, `运维路由没注册：${OPS_PATH}`);
+  assert.equal(opsRoute.kind, 'exact');
+  assert.equal(typeof opsRoute.handler, 'function');
   // 注入：监听 webserver/index-inject，往表里 push 一条 head 内的内联脚本。
   const injectEvent = recorded.onEvents.find((entry) => entry.name === 'webserver/index-inject');
   assert.ok(injectEvent, '应当监听 webserver/index-inject');
@@ -1545,16 +1563,19 @@ check('ask 档不偷偷改审批策略：有人看着时那一下是真的弹给
   }
 });
 
-check('没人看着时的确认门：枢纽会话被自动答掉，别人的会话照旧等人（m84407）', async () => {
+check('没人看着时的确认门：枢纽会话被自动答掉，别人的会话照旧等人（m84407 / 复审 F04）', async () => {
   const sub = recorded.onEvents.find((e) => e.name === 'approval/request');
   assert.ok(sub, '没有订阅 approval/request —— 云端会挂在一张没人点的审批卡上');
   const mind = hub.mind;
   const saved = mind.activeSessionKey;
+  // 宿主传进来的请求带着自己的 agent；身份是这道闸唯一的依据（复审 F04）。
+  const asHub = (extra = {}) => ({ toolName: 'bash', agent: { session: { id: 'onebot-hub:group%3A55555' } }, ...extra });
+  const asUser = (extra = {}) => ({ toolName: 'bash', agent: { session: { id: 'session-e5655473' } }, ...extra });
   try {
     // 群会话 + 默认策略（agent.unattended=deny）→ 直接 rejected，且不再往下传。
     mind.activeSessionKey = 'group:55555';
     let passed = false;
-    const verdict = await sub.handler({ toolName: 'bash', reason: 'escalate sandbox to danger-full-access: 装依赖' }, () => {
+    const verdict = await sub.handler(asHub({ reason: 'escalate sandbox to danger-full-access: 装依赖' }), () => {
       passed = true;
       return 'allowed-once';
     });
@@ -1562,19 +1583,26 @@ check('没人看着时的确认门：枢纽会话被自动答掉，别人的会�
     assert.equal(passed, false, '拒绝之后不该再把请求交出去（交出去就挂在那里等人）');
     // 策略改成 auto：自动同意，但仍然只答一次。
     mind.policy = { ...mind.policy, unattended: 'auto' };
-    assert.equal(await sub.handler({ toolName: 'bash' }, () => 'unavailable'), 'allowed-once');
+    assert.equal(await sub.handler(asHub(), () => 'unavailable'), 'allowed-once');
     // ask = 老行为：交回给链上的下一个应答者。
     mind.policy = { ...mind.policy, unattended: 'ask' };
-    assert.equal(await sub.handler({ toolName: 'bash' }, () => 'allowed-once'), 'allowed-once');
-    // 用户自己开的会话不归枢纽管（那里屏幕前真的有人）。
+    assert.equal(await sub.handler(asHub(), () => 'allowed-once'), 'allowed-once');
+    // 用户自己开的会话不归枢纽管（那里屏幕前真的有人），哪怕"最近活跃会话"是这个群。
     mind.policy = { ...mind.policy, unattended: 'deny' };
-    mind.activeSessionKey = 'session-7';
     let reached = false;
-    await sub.handler({ toolName: 'bash' }, () => {
+    await sub.handler(asUser(), () => {
       reached = true;
       return 'allowed-once';
     });
     assert.equal(reached, true, '非枢纽会话的审批不该被插件代答');
+    // 认不出身份的请求也不许代答：宁可挂着等人，也不能替别人的会话拍板。
+    mind.policy = { ...mind.policy, unattended: 'deny' };
+    let anonymous = false;
+    await sub.handler({ toolName: 'bash' }, () => {
+      anonymous = true;
+      return 'allowed-once';
+    });
+    assert.equal(anonymous, true, '拿不到 agent 身份时不该代答');
   } finally {
     mind.activeSessionKey = saved;
     mind.policy = { ...mind.policy, unattended: 'deny' };
@@ -2149,6 +2177,56 @@ async function runAsyncChecks() {
     }
   });
 
+  await checkAsync('onebot_context 的授权身份来自调用者，不借用目标会话（第三轮 T02）', async () => {
+    const prev = hub.mind.activeSessionKey;
+    const prevTrusted = hub.config.isolation.trustedPrivates;
+    const origSnapshot = hub.mind.snapshot;
+    let seen = null;
+    // 跨会话读要有一支白名单（`m28425`），这里只验"授权身份是谁"，所以先给一支。
+    hub.config.isolation.trustedPrivates = ['10001'];
+    hub.mind.actorBySession.set('group:55555', '88888');
+    hub.mind.actorBySession.set('group:66666', '99999');
+    hub.mind.snapshot = (key, opts = {}) => {
+      seen = { key, actorId: opts.actorId };
+      return origSnapshot.call(hub.mind, key, opts);
+    };
+    hub.mind.activeSessionKey = 'group:55555';
+    try {
+      const value = JSON.parse(
+        await toolOf('onebot_context').execute({ sessionKey: 'group:66666', actorId: '99999', text: false }),
+      );
+      assert.equal(seen.actorId, '88888', '授权身份要用调用者的说话人，而不是被查群的');
+      assert.equal(value.targetActor, '99999', '被查群的说话人只用于展示');
+      assert.match(String(value.notes?.[0] ?? ''), /没被采信/, '参数里的 actorId 被忽略时要说一声');
+    } finally {
+      hub.mind.snapshot = origSnapshot;
+      hub.mind.activeSessionKey = prev;
+      hub.config.isolation.trustedPrivates = prevTrusted;
+      hub.mind.actorBySession.delete('group:55555');
+      hub.mind.actorBySession.delete('group:66666');
+    }
+  });
+
+  await checkAsync('live 上下文不再回退到全局说话人（第三轮 T02）', async () => {
+    const origSnapshot = hub.mind.snapshot;
+    const prevActor = hub.mind.activeActorId;
+    let seen = null;
+    hub.mind.snapshot = (key, opts = {}) => {
+      seen = { key, actorId: opts.actorId };
+      return { text: '', sections: [], digest: { messageCount: 0, participants: [], downstreamResponded: false }, memoryVisible: 0, memoryTotal: 0, window: '', audit: [] };
+    };
+    hub.mind.actorBySession.delete('group:55555');
+    hub.mind.invalidateLiveContext('group:55555'); // 别拿到上一轮冻住的那份
+    hub.mind.activeActorId = '99999'; // 别的会话刚说完话留下的全局值
+    try {
+      hub.mind.liveContext('group:55555');
+      assert.equal(seen.actorId, '', '没有人绑定时必须是空，不能借全局那个');
+    } finally {
+      hub.mind.snapshot = origSnapshot;
+      hub.mind.activeActorId = prevActor;
+    }
+  });
+
   await checkAsync('跨会话读取：群会话读不到私聊、白名单私聊读一切', async () => {
     const prev = hub.mind.activeSessionKey;
     const prevTrusted = hub.config.isolation.trustedPrivates;
@@ -2230,6 +2308,9 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   });
 
   await checkAsync('onebot_media：两种用法分得清（落地 vs 问实现端），落地模式说得出为什么没落', async () => {
+    const prevKey = hub.mind.activeSessionKey;
+    hub.mind.activeSessionKey = 'group:55555';
+    try {
     const t = toolOf('onebot_media');
     // ① 落地模式：list 给统计；本用例没开存储（persist:false），所以 blob 目录不存在、但功能照旧可用
     const listed = JSON.parse(await t.execute({ list: true }));
@@ -2249,9 +2330,12 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.match(direct.refs[0].sha256, /^[0-9a-f]{64}$/);
 
     // ④ 问实现端这条老路还在（action 模式）：假上游没连，必须回一句人话而不是抛
-    const asked = JSON.parse(await t.execute({ action: 'get_forward_msg', message_id: '1' }));
+    const asked = JSON.parse(await t.execute({ action: 'get_group_msg_history', group_id: '55555' }));
     assert.equal(asked.ok, false);
     assert.equal(typeof asked.note, 'string');
+    } finally {
+      hub.mind.activeSessionKey = prevKey;
+    }
   });
 
   await checkAsync('onebot_reply（直发版）images：hub-media 引用发之前解析成 blob 本地路径（修1，真机 failed -1935986436）', async () => {
@@ -2297,6 +2381,9 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   });
 
   await checkAsync('onebot_media 落地模式在消息里的段找不到时不编造，段数组也从不被改写', async () => {
+    const prevKey = hub.mind.activeSessionKey;
+    hub.mind.activeSessionKey = 'group:55555';
+    try {
     const segs = [
       { type: 'text', data: { text: '看图' } },
       // 内联字节，别让测试去碰网络；这里只关心"段数组不被改写"
@@ -2319,6 +2406,9 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.match(entry.text, /\[图片\]/, '没有 ref 时就给占位，不编造"已存为"');
     const r = JSON.parse(await toolOf('onebot_media').execute({ messageId: '4242' }));
     assert.ok(Array.isArray(r.refs));
+    } finally {
+      hub.mind.activeSessionKey = prevKey;
+    }
   });
 
   await checkAsync('onebot_media：link 落地也走 describe:true（之前只有按消息 id 那条路会看图）', async () => {
@@ -2543,6 +2633,13 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   });
 
   await checkAsync('onebot_person / onebot_sessions 读得到档案，且按隔离过滤', async () => {
+    // 跨群看同一个人的档案属于跨会话读取（`m85249` P1-2 加了闸），所以要站在
+    // 白名单私聊的视角上验隔离过滤这件事本身——群会话现在只能看当前的。
+    const prevKey = hub.mind.activeSessionKey;
+    const prevTrusted = hub.config.isolation.trustedPrivates;
+    hub.mind.activeSessionKey = 'private:10001';
+    hub.config.isolation.trustedPrivates = ['10001'];
+    try {
     const person = JSON.parse(await toolOf('onebot_person').execute({ userId: '10001', sessionKey: 'group:55555' }));
     assert.equal(person.userId, '10001');
     assert.ok(Array.isArray(person.facts));
@@ -2559,6 +2656,10 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.equal(typeof list.count, 'number');
     const unknown = JSON.parse(await toolOf('onebot_person').execute({ userId: '99999999', sessionKey: 'group:55555' }));
     assert.equal(unknown.empty, true, '没观测到的人应明确回 empty，而不是给一个空壳档案');
+    } finally {
+      hub.mind.activeSessionKey = prevKey;
+      hub.config.isolation.trustedPrivates = prevTrusted;
+    }
   });
 
   // `m15264`：长期记忆不该因为"进了长期库"就变成跨群可念的公共知识。
@@ -2997,12 +3098,18 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   await checkAsync('imageGen delivery=direct：直发保留老行为，结果也带 hubMedia 与描述', async () => {
     const igTool = igTools.find((t) => t.name === 'onebot_imagegen');
     igHub.config.imageGen.delivery = 'direct';
+    const savedKey = igHub.mind.activeSessionKey;
+    const savedTurn = igHub.mind.turnSeq;
     try {
       const sentCalls = [];
       igHub.callUpstream = async (action, params) => {
         sentCalls.push({ action, params });
         return { ok: true };
       };
+      // 站在这个群会话里、目标也是它——额度键按"这个会话自己的回合"算（T05），
+      // 所以要开一轮新的（`beginTurn`）才是新的一桶；改全局 `turnSeq` 不再管用。
+      igHub.mind.activeSessionKey = 'group:55555';
+      igHub.mind.beginTurn('group:55555');
       const value = JSON.parse(await igTool.execute({ prompt: '一只狗', session_key: 'group:55555' }));
       assert.equal(value.mode, 'direct');
       assert.equal(sentCalls.length, 1, 'direct 模式要直发一次');
@@ -3010,8 +3117,38 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
       assert.equal(sentCalls[0]?.params?.group_id, '55555');
       assert.equal(value.hubMedia, 'hub-media:ig0001', 'sha256 相同 → 同一 hub-media 引用');
       assert.ok(value.description, 'direct 模式也带描述');
+      // 复审 F05：目标不由参数决定。群会话想往别处发 → 忽略参数，仍发本会话，回执要说清。
+      igHub.mind.beginTurn('group:55555');
+      const elsewhere = JSON.parse(await igTool.execute({ prompt: '一只猫', session_key: 'private:10001' }));
+      assert.equal(elsewhere.mode, 'direct');
+      assert.equal(sentCalls.length, 2);
+      assert.equal(sentCalls[1]?.params?.group_id, '55555', '群会话不许把图发进私聊');
+      assert.match(String(elsewhere.notes ?? []), /没被采信/);
     } finally {
+      igHub.mind.activeSessionKey = savedKey;
+      igHub.mind.turnSeq = savedTurn;
       igHub.config.imageGen.delivery = 'agent';
+    }
+  });
+
+  await checkAsync('生图额度按会话自己的回合划界：别的会话唤醒不会重置这一轮（第三轮 T05）', async () => {
+    const igTool = igTools.find((t) => t.name === 'onebot_imagegen');
+    assert.ok(igTool, '这个实例该有生图工具');
+    const savedKey = igHub.mind.activeSessionKey;
+    const savedTurn = igHub.mind.turnSeq;
+    try {
+      igHub.mind.activeSessionKey = 'group:55555';
+      igHub.mind.beginTurn('group:55555');
+      const mine = igHub.mind.turnOf('group:55555');
+      assert.ok(mine > 0, '开过一轮就该有个号');
+      // 别的会话开一轮、全局计数也变——我这一轮的数不能跟着动。
+      igHub.mind.beginTurn('group:66666');
+      igHub.mind.turnSeq = (Number(savedTurn) || 0) + 9;
+      assert.equal(igHub.mind.turnOf('group:55555'), mine, '别人唤醒不许把我这一轮算成新的一轮');
+      assert.equal(igHub.mind.turnOf('group:66666'), 1, '每个会话各自从 1 数起');
+    } finally {
+      igHub.mind.activeSessionKey = savedKey;
+      igHub.mind.turnSeq = savedTurn;
     }
   });
 
@@ -3023,18 +3160,25 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
         throw new Error('disk full');
       },
     };
+    const savedTurn = igHub.mind.turnSeq;
+    const savedKey = igHub.mind.activeSessionKey;
     try {
       const sentCalls = [];
       igHub.callUpstream = async (action, params) => {
         sentCalls.push({ action, params });
         return { ok: true };
       };
+      // 额度键跟着**当前会话**走（T05），所以要真的站在这个会话里再开一轮。
+      igHub.mind.activeSessionKey = 'private:10001';
+      igHub.mind.beginTurn('private:10001');
       const value = JSON.parse(await igTool.execute({ prompt: '一只鸟', session_key: 'private:10001' }));
       assert.equal(value.mode, 'direct-fallback', '落不了地就没法把图交到 agent 手里');
       assert.equal(sentCalls.length, 1, 'fallback 要真的发出去');
       assert.match(String(value.note), /direct/);
     } finally {
       igHub.media = realMedia;
+      igHub.mind.turnSeq = savedTurn;
+      igHub.mind.activeSessionKey = savedKey;
     }
   });
 
@@ -3061,8 +3205,10 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.equal(pgTools.find((t) => t.name === 'onebot_imagegen'), undefined, 'plugin 引擎不许再挂自带生图');
     const post = pgMake.recorded.onEvents.find((e) => e.name === 'tools/post-execute');
     assert.ok(post, 'plugin 引擎要挂 tools/post-execute');
+    const savedOwners = [];
+    pgHub.mind.activeSessionKey = 'private:99999'; // 模拟另一会话正好开始一轮
     pgHub.media = {
-      saveBytes: async (bytes, opts = {}) => ({ id: 'hub-media:pg0001', kind: opts.kind, attachment: { attachmentId: 'att-pg' } }),
+      saveBytes: async (bytes, opts = {}) => { savedOwners.push(opts.sessionKey); return { id: 'hub-media:pg0001', kind: opts.kind, attachment: { attachmentId: 'att-pg' } }; },
     };
     pgHub.vision = {
       describeEnabled: true,
@@ -3075,7 +3221,7 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
       // ① 命中名单：先透传拿结果，再追加 [hub] 落地/描述/发送指引。
       const nextCalls = [];
       const decision = await post.handler(
-        { name: 'generate_image' },
+        { name: 'generate_image', agent: { id: 'onebot-hub:group%3A55555.a123' } },
         {
           isError: false,
           value: { savedTo: tmpPng },
@@ -3091,6 +3237,9 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
       assert.match(last, /hub-media:pg0001/);
       assert.match(last, /一只像素猫/);
       assert.match(last, /onebot_reply/);
+      assert.deepEqual(savedOwners, ['group:55555'], '落地归属只认本次 exec，不能读全局 activeSessionKey');
+      await post.handler({ name: 'generate_image', agent: { id: 'session-user' } }, { isError: false, value: { savedTo: tmpPng }, content: [] }, async () => ({ kind: 'accept' }));
+      assert.equal(savedOwners.length, 1, '不替 GUI 会话或未知身份捡图');
       // ② 名单外工具：结果原样放行（引用相等）。
       const passthrough = { kind: 'accept', marker: true };
       const untouched = await post.handler({ name: 'read' }, { isError: false, value: 1, content: [] }, async () => passthrough);
@@ -3163,8 +3312,10 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
         entry: { id: 'ot-1', sessionKey: 'private:10001', ts: Date.now(), text: 'hi', actor: { nickname: '下游A' }, live: null, refs: {} },
       });
       await pgHub.mind.flush('private:10001', { reason: 'test-onebot-tools' });
-      pgHub.mind.activeSessionKey = 'private:10001';
-      const def = pgTools.find((t) => t.name === 'onebot_tools');
+      // 工具绑的是"哪个会话激活了这套工具"，所以这个用例按 private:10001 重探一次，
+      // 而不是去改 `activeSessionKey` 那个进程级共享变量（m85379）。
+      const tools = probeHub(pgHub, { sessionKey: 'private:10001' }).agentTools;
+      const def = tools.find((t) => t.name === 'onebot_tools');
       assert.ok(def, 'onebot_tools 要注册');
       // list：可见/被遮分两面报告；第三方生图走 pluginImageTools 不被遮。list:true 时 allowed 换成 canEnable 描述行。
       const listed = JSON.parse(await def.execute({ list: true }));
@@ -3197,7 +3348,8 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   await checkAsync('内置精简预设：默认建会话进它 + 点名 default 本回合后立即重开 + 整段会话保持全量工具面（同段第二条消息不弹回、休眠后的下一次激活才回精简，回程段带开局快照）+ 跨休眠点名与窗口都仍生效', async () => {
     const savedPrivates = pgHub.config.agentPrivates;
     pgHub.config.agentPrivates = { ...savedPrivates, 10001: {} };
-    pgHub.mind.activeSessionKey = 'private:10001';
+    // 同上：按目标会话重探一套绑到 private:10001 的工具。
+    const tools = probeHub(pgHub, { sessionKey: 'private:10001' }).agentTools;
     try {
       pgMake.recorded.agentToolSchemas = [
         { name: 'read', description: '读文件' },
@@ -3227,7 +3379,7 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
         const r = await pgHub.mind.flush('private:10001', { reason: `test-preset-${n}` });
         assert.equal(r.woke, true, `第 ${n} 轮要真的唤醒：${r.reason}`);
       };
-      const def = pgTools.find((t) => t.name === 'onebot_tools');
+      const def = tools.find((t) => t.name === 'onebot_tools');
       assert.ok(def, 'onebot_tools 要注册（前面用例已注册，这里是同一份）');
       // 起手先交还上一组用例留下的活 agent，保证下面每一轮都是"新会话"（能看到 meta.agentPreset）。
       await pgHub.mind.pool.retire('private:10001', 'test-preset-reset');

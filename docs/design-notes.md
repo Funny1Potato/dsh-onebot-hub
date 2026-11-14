@@ -1346,3 +1346,378 @@ Windows 的 workspace-write 下 `_winapi.CreateFile` 建管道直接被拒）；
 - 宿主没传 `agent.session` 或写失败时**退回旧兜底监听**并在 `onebot_hub_status.lastSetup.permission`
   留一行字：诊断面不能因为一条策略没写上去就跟着失灵。
 - `agent.unattended: ask` 什么都不改（有人看着的部署里，审批该照常弹出来）。
+
+## 会话之间那道墙：从"读之前问一句"到"身份跟着会话走"
+
+第二份审查报告（`dsh-onebot-hub-审查报告.md`）有八条，逐条对代码核过——**全都成立**，
+但有两处修法要改（见下）。这一批按"先堵漏、再归位、最后收边界"的顺序做。
+
+### 一、工具不知道自己在替谁办事（P1-1）
+
+29 个 `onebot_*` 工具都不接 `sessionKey`，各自现算：
+
+```
+const inferSessionKey = () => mind.activeSessionKey ?? mind.stats?.lastTurn?.sessionKey ?? '';
+```
+
+`mind.activeSessionKey` 是**进程级**的共享变量，每次装配会话时被覆写一遍；
+而 `scanDue()` 用 `Promise.all` 并发跑多个会话的 flush。两个会话同时醒着的时候，
+后装配的那一个会替另一个说话——不是"读权限漏了"，是**身份本身就串了**：
+`onebot_memory` 会往错的会话里写记忆，`onebot_task` 会把任务记在别人名下。
+
+修法：`lib/tools/shared.js` 新增 `makeSessionKeyResolver({ bound, mind })`——
+`bound` 非空就**永远**返回它，否则才退回那条老回退路。
+`registerHubTools(agentCtx, { ..., sessionKey })` 把装配时**绑死**的那个键传下去；
+`inferSessionKey` 一行改成引用它，16 个调用点不用动。
+
+取舍：绑死之后，"临时切一个会话看别的"就没有后门了。这是对的——身份不该由一次赋值决定；
+真要跨会话看，走 `onebot_session` 或配白名单。
+
+### 二、`onebot_call` 是绕过读隔离的正门（P1-2）
+
+读范围闸（`m28349`）只盖了 4 个只读工具（timeline / capture / context / raw），
+而 `onebot_call` 的只读档直接 `hub.callAction`，什么闸都不过。
+报告说它"需要知道 message_id 才能利用"——**低估了**：`get_group_msg_history`
+只要一个 `group_id` 就能把别的群整段历史读出来。
+
+修法：`lib/read-scope.js` 新增 `readTargetOfCall(params)`（`group_id|userId|user` →
+`group:` / `private:` 目标）与 `hasFullRead({current, trusted})`；
+`capCall` 在**只读档**先过这道闸，写档不归它管（那条路另有 `gateDecision`）。
+`onebot_person` / `onebot_recall` 收 `sessionKey` 参数的那两处一并加 `assertReadable`——
+报告没点它们，但它们和 `onebot_call` 是同一个洞。
+
+### 三、媒体不记归属（P1-3）
+
+`MediaStore.resolve()` 落地时只记 sha256 与大小，不记它来自哪个会话；
+`list()` 返回全局索引，`onebot_media` 的 messageId 路径扫时间线也不看会话。
+于是"拿到一个 id / 把 list 打出来"就能看别处的图。
+
+修法：ref 上记 `sessionKey`，`list({ allow })` 按谓词过滤，messageId 路径先认出
+这条消息归谁再 `assertReadable`（认不出就明说"分不清"而不是放行）。
+
+**一处必须记下的细节**：媒体是**内容寻址**的，同一份字节可能同时出现在好几个会话里，
+而一条索引只能记一份归属——只记"最后一个写入者"，会让另一边的会话连自己发过的图都看不见。
+所以归属是个**集合** `sessionKeys`，`#remember` 合并而不是覆盖；
+读的时候"集合里有一个读得到"就给。
+
+### 四、任务只记了主人，从不比对（P1-4）
+
+`createdBy` 一直写着，`remove(id)` / `run(id)` / `list()` 却只看 id。
+更麻烦的是 `createdBy` 本身由 `inferSessionKey()` 算出来——所以这条必须**排在第一条之后**修。
+
+修法：`owns(task, caller)`——`createdBy` 或 `target` 命中即算主人（老数据的 `createdBy`
+可能落在 `target` 上）；`list({ all, owner })` 按主人过滤，非主人默认看不到别人的任务。
+放行条件是"超管"或"白名单私聊"（`hasFullRead`），与读范围同一把尺子。
+
+### 五、未知 action 一律当只读（P1-5）
+
+`tierOf()` 末尾 `return 'read'`。实测 `upload_group_file` / `move_group_file` /
+`trans_group_file` / `go-cqhttp_upload` / `_set_group_notice` 全被判成 read。
+
+**报告建议的"未知一律拒绝"不能照抄**：扩展端有大量正当的只读动作
+（`get_group_shut_list`、`fetch_custom_face`……），一律拒绝等于把扩展能力整个关掉。
+改法是把分级做细：扩写类前缀、新增只读前缀表、再按动词兜底——
+`get_/list_/fetch_/query_/search_/find_/check_/probe_/inspect_/describe_/count_/can_/is_/has_/read_/view_`
+命中即 read，`upload_/create_/move_/trans_/rename_/remove_/kick_/mute_/recall_/revoke_/approve_/reject_`
+进写档，`exec/eval/shell/restart/shutdown/reboot/credentials/packet` 进 danger。
+兜底仍然是 read（fail-open 在这里是**故意**的：判错档只会少拦一次，判错成写会让整类扩展用不了）。
+
+### 六、另外三处小的
+
+- **ws 监听端停不干净**（P2-1）：endpoint 只是 `#addListenTarget` 里的局部 const，
+  `Listener.stop()` 碰不到已经升级的 ws 连接 → `stop()` 里先关 endpoint
+  （`close(1001, 'hub shutting down')`）再停 listener。
+- **一次性任务永不退场**（P2-2）：`at:` / `after:` 响过一次就 `active = false` + `finishedAt`，
+  不然 50 个名额会被历史任务占满，翻到时每轮复活。
+  只在**真叫醒了**才退场；叫不醒（目标不在）就留着下次再响。
+- **会话桶没有上界**（P2-3）：`capture` 只裁全局环，桶永不淘汰、空桶不删 →
+  `limitSessions`（默认 500）+ 按桶内最后一条时间戳淘汰最冷的。
+
+### 测试
+
+`smoke-core` 117（+13：resolver 优先级、`readTargetOfCall` / `hasFullRead`、
+媒体归属集合、会话桶上界）、`tasks` 26（+8：归属三种视角、一次性退场）、
+`load-check` 101（探针不再靠 `mind.activeSessionKey` 指路——要别的会话就显式传。
+这条差点漏掉：探针默认绑 `group:10000` 之后，十几个老用例变成"工具在替另一个会话办事"，
+红得五花八门。探针现在默认**不绑**，绑定的语义由 `smoke-core` 那条 resolver 用例守）。
+
+## 按会话盘账：一份数据散在六处，删起来得六处都动（`m85685`）
+
+> 审查报告"按会话清理与导出数据"，用户 m85685「做吧」批准。
+
+**为什么要专门做一块**：问"甲群的数据占多少、能不能搬走、能不能删干净"时，答案分散在六个地方，
+各有各的键——
+
+| 存的东西 | 落在哪 | 按什么认 |
+| --- | --- | --- |
+| 原文（消息、动作、决策） | `recall` 的日文件 `recall/<链路>/YYYYMMDD.jsonl` | 行上的 `sessionKey` |
+| 媒体字节 | `media/blobs/<sha256><ext>` + 内存索引 | `sessionKeys`（**一个集合**，内容寻址下同一份字节可能属于好几个会话） |
+| 记忆条目 | `memory/store.json` | 条目自带的 `scope` |
+| 活跃层（进行中的话题） | `memory/active.json` | `originScope` |
+| 定时任务 | `tasks` 文件 + 宿主排期 | `target`（到点叫醒谁）、`createdBy`（在哪儿建的） |
+| 人物/群档案 | `persons/*.json`、`groups/*.json` | 人物的 `groups[<scope>]` 那一格、群档案本身 |
+
+**四条口径**：
+
+1. **先盘后删，删要两道**：`inventory()` 只数不删；`purge()` 的 `confirm` 必须**正好等于**
+   会话键（不是 `true`、不是"确定"）——这一步不可逆，防手滑比防误用重要。
+2. **媒体按"归属集合"处理**：只属于这个会话的，连 blob 一起删；多个会话共用的，
+   只摘掉这个会话的归属（否则另一个会话连自己发过的图都看不见）。审计日志
+   （`media/<链路>/<天>.jsonl`）也重写一遍，不然删掉的图名会一直躺在里面。
+3. **删原文要动三处**：日文件里那些行（真身）、内存环与倒排索引、fts5 的文档行。
+   文件走"读全文 → 过滤 → 写 `.tmp` → 改名"，中途崩了不会留半截；
+   只有**真的删到行**的日文件才重写。坏行不动——删会话不该顺手毁掉一份读不懂的历史。
+4. **导出不带字节**：包里是原文索引行（带 `ref`，全文可以再取）、媒体**元信息 + blob 路径**、
+   记忆/活跃/任务、以及人物档案里的那一格。把 base64 塞进 JSON 会又大又没用；
+   真要搬图就搬 `media/blobs` 目录。产物落 `<storageDir>/exports/`，回执只报路径与条数。
+
+**权限预览**是同一块面板的另一半：它回答"这个会话现在能看多远、能写什么"——
+读范围用的是 `describeReadScope()`（与工具那一侧同一个判定），写面报 `capability.writeAllow` /
+`dangerAllow` 的实际值，再补一行无人值守时的审批口径与上游实现端。**不另存一份判断**，
+否则设置页说"能读"而工具拒了，比不说更糟。
+
+**没做的**：话题（`topics/*.json`）不按会话删——它挂在 `group:` 世界键上，跟着群档案那一格走；
+跨会话的导出/导入（把 A 群的数据灌进 B 群）也不做：那是另一件事（可见性边界会跟着一起搬，很危险）。
+
+### 任务台账上的「暂停」：只拆排期，不拆记录（`m85685`）
+
+设置页里每条任务多了两个按钮（暂停/恢复、删除）。之前只有 `remove`——用户想的是"先别响，
+过阵子再说"，删了就只剩重建一条（prompt 要重写一遍）。
+
+- **暂停 = 删宿主排期 + 本地留记录**：`paused:true`、`scheduleId` 清空、`nextAt` 清空。
+  删不掉宿主排期就**不标暂停**（标了照样会响，等于骗人）。
+- **恢复 = 按原来那份 `when` 重新排一次**：`after:` 从恢复那一刻起算（不是从当初创建时）；
+  `at:` 的定点已经过了就直接拒——"补响一条过期的提醒"没有意义。
+  `encodeWhen()` → `parseWhen()` 走一遍是为了复用同一套校验（最短 60 秒、daily 带时区）。
+- **权限**：设置页里的动作以 `caller:''`（操作者视角）执行——能打开设置页的人本来就能改配置；
+  模型那一侧仍然按会话卡（`onebot_task` 的 `owns` 不变）。
+
+### 投递失败队列：让它有一条能被人看见的痕迹（`m85685`）
+
+以前发送失败的知识只活两处：`#sendFailures`（按会话，下一批开头口头告诉模型一次就清了）与
+`stats.lastTurn`（只留最后一轮）。结果就是——**模型被告知过，用户与运营者什么都没看见**。
+
+- **记什么**：一条失败就是"这一条消息"（不是整批），`action` + `params` + 段数组原样留着，
+  重放才不会变样。文本与错误各截 300 字；**内联的 base64/`data:` 不存**——一条几百 KB，
+  而且存下来也重放不了，所以老实标 `replayable:false` 并在重放时说清原因。
+- **合并**：同目标 + 同动作 + 同 retcode + 同错误，60 秒内只留一条并计数（`×3`）。
+  一个坏掉的通道会在几秒内刷满队列，把真正的第一条挤出去——那样这个队列就没用了。
+- **上限 50 条**，新的在前，落 `ops/failures.json`（走 `storage.schedule` 合并写）。
+- **重放不改内容**：当初是什么就发什么。发送失败大多是系统性的（被踢、禁言、权限、内容违规），
+  改参数重试是另一件事；**也不自动重试**（对照 `m35050` 那次"失败后连醒三轮"）。
+- 重放成功就出队；失败留在队列里，错误原样带回来。
+
+
+## 复审（2026-11-14）：五处"参数说了算"的地方
+
+这一批的共同点不是漏洞有多深，而是**边界靠调用方自觉**：判定读哪个会话、以谁的身份读、
+图表发到哪儿，都先看参数。参数是模型给的，模型可能看错、也可能被对话说服。
+
+- **F01 按 id 查的接口，归属以索引为准**：`resolveReadTarget()` 先查 `message_id`/`id`/
+  纯数字的 `file` 属于哪个会话；调用方另外塞的 `group_id/user_id` 只是"我以为我在查这个"，
+  对不上就按冲突拒（上游会忽略多余参数，放过去等于给"多带一个字段就能读私聊"开后门）。
+  索引里没有的 id 记 `'?'`——**不许当"没有目标"放行**，一条瞎猜的 id 就是别人的私聊。
+- **F02 授权身份跟着批次走**：`mind.actorOf(sessionKey)`（flush 时记、按会话分开）代替
+  进程级的 `activeActorId`；`recall.search` 收 `authorizeAs`，`onebot_context`/`onebot_person`
+  不再拿参数里的 `actorId`/`userId` 当"我是谁"。以前查谁就能看见谁的私聊事实。
+- **F03 谁存的图算谁的**：`saveBytes` 带 `sessionKey`；参考图也要过读范围闸（知道一个私聊的
+  `hub-media:` 就能把字节送进生图器，这条路绕开了 `onebot_media`）；同一份字节多处出现时
+  按**能读的那一次**取文件名/消息号，不再整条覆盖。
+- **F04 审批只答自己家的门**：`isHubOwnedAgent()` 认会话 id 前缀，认不出就 `next()`。
+  监听挂在根上下文上，按全局最近活跃会话决策会替用户自己的会话做主。
+- **F05 往外递东西的目标不由参数决定**：`resolveSendTarget()`，默认只能发本会话，
+  白名单私聊可代发；被忽略时回执里必须说一句——**悄悄改目标比拒绝更糟**。
+  额度键也随会话/轮次算，换个 `session_key` 不再是一桶新额度。
+
+测试：`resolveReadTarget` / `resolveSendTarget` 两个纯函数进 smoke-core（122），
+审批身份、生图目标、参数被忽略的回执各有用例；`load-check` 101/101。
+
+## 复审（2026-11-14）第二批：删除这件事，失败要说得出口
+
+前一批修的是"谁能读"，这一批修"删了到底删没删"。
+
+- **F06 重写原文必须同步**：`append()` 是同步追加，`purgeSession()` 原来是
+  `await readFile → 过滤 → await rename`。读完之后进来的那一行落在旧文件里，
+  改名一覆盖就只活在内存——重启后它自己冒回来（"删过的东西自己长回来"）。
+  现在 `ensure()` 之后整段同步做完，事件循环没有让出点。
+- **F07 内存副本也算这份数据**：时间线环、捕获账本、每会话的批次窗口/唤醒状态/失败队列
+  （`timeline.dropSession` / `capture.dropSession` / `mind.forgetSession`），以及人物档案里
+  **带 `scope` 的结论**（`facts/commitments/corrections/interests`——只摘群名片等于把人在这儿
+  说过的话留着）。盘算时一起数进去（`inventory().live`）。
+- **F08 索引没了不等于数据没了**：媒体索引只在内存里，重启后 `purgeScope()` 数出 0 条、
+  回一句"删了 0 条"，blob 原封不动。现在先 `ensureIndex()` 从审计日志重建。
+  **顺带挖出一个一直没生效的东西**：`JsonlLog` 没有 `dir` getter，`this.#log?.dir` 恒为
+  `undefined`，于是"重写审计日志"那段从上线起就没跑过——补了 getter，两处一起活。
+- **F09 删不动要说**：三家 store 的清理都把异常收进 `failed[]` 并让 `ok:false`
+  （附带"已经删掉多少"）——以前只写日志、回执照样成功，调用方以为干净了。
+
+测试：`test/ops.mjs` 12/12（新增内存副本、重启后清媒体两条真件用例），全量 `npm test` EXIT=0。
+
+## 复审（2026-11-14）第三批：暂停要真的停，试跑不该消费提醒
+
+- **F11 暂停不是一个标记**：`pause()` 只拆了宿主排期，`active` 仍是 `true`——于是
+  `fire()` 照样叫醒、`#rotateIfNeeded()` 还按 `encodeWhen()` 把它重建，等于"先别响"作废。
+  现在 `fire()` 直接拒暂停的任务（回一句"要它继续响就先 resume"），轮换只搬 `active && !paused`。
+- **F12 手动试跑不该消费一次性任务**：`run()` → `fire()` → `#retireIfOneShot()`，
+  点一下"试跑"就把明天的提醒用掉了；`queued` 分支里的轮换还会把 `after:60` 的倒计时重置。
+  `fire()` 新增 `manual`，`run()` 传 true：不退场、不轮换，两条分支都守住。
+- **F13 去重键要带内容摘要**：键是 `scope|action|retcode|error`，注释却写"同一段内容"——
+  同一条通道上"没发出去的两句不同的话"被合成一条，只留下第一句。现在键里加
+  `sha1(正文 + 段 + 参数)` 前 12 位。
+- **F14 截短的不许当原样重放**：展示截 300 字、`paramsOf` 也截 300，而 `replayable` 只看
+  内联媒体——长消息会以"半条"重放出去。现在文字过长/参数过长/段数过多都进 `trimReasons`，
+  `replayable:false`，重放时把原因说清楚（"别发半条出去"）。
+
+测试：`test/tasks.mjs` 30/30（新增暂停不叫醒且不搬、试跑不退场两条）、`test/ops.mjs` 14/14
+（新增同错不同文分开记、长文本不可重放两条），全量 `npm test` EXIT=0。
+
+## 第三轮复审（2026-11-14）第一批：删干净，也不能删哑了
+
+清理这件事上一轮只做到"盘上的原文与记忆没了"，这一轮补的是**另外两份副本**与**清完之后还能不能说话**。
+
+- **T04 缓冲不许被删掉，只能清空**：会话级 `onebot_reply` 工具握着 `ReplyBuffer` 的引用，
+  工具又只在会话建立时注册一次。`forgetSession` 以前 `#replies.delete(key)`，下一轮
+  `#replyFor` 建了个新的，活着的工具继续往旧对象里写——真机现象是"清理完这个会话，
+  它再也说不出话"（发送数不增，回执却是 woke=true）。现在原地 `clear()` 保住对象身份。
+- **T04 在飞产物要丢掉**：清空之后，清理前那一轮还可能在收尾时投递。给每个会话记一个
+  "代数"（`#gen`），回合开始时（`#beginTurn`）记下当时的代数，`deliver` 时对不上就丢弃并记日志。
+  选择作废而不是中断：中断要动宿主的回合生命周期，代价大还容易留半截状态。
+- **T04 活着的 agent 一并退役**：它的提示词里还装着刚被删掉的记忆，留着就是"删了还在嘴边"。
+  退役失败只记日志——删除本身已经完成，不能因为退不动就报失败。
+- **T10 补两份存着原话的副本**：会话卡（`Cards.forgetScope`，内存与落盘文件一起删，否则
+  下次 `load()` 又读回来）与投递失败队列（`FailureStore.forgetScope`，队列里存着没发出去的正文）。
+- **T10 边界**：话题是共用的，只摘掉这个会话贡献的条目（`originScope`），摘空了才整条没了；
+  会话目录是从档案与最近活跃算出来的派生数据，档案清掉它自然消失，不单独维护一份。
+
+测试：`test/m15-e2e.mjs` 新增"清理前能发 → 迟到产物被丢 → 清理后还能发"三问（235→238）；
+`test/ops.mjs` 新增会话卡与失败队列一起清、落盘也删（14→15）。全量 `npm test` EXIT=0。
+
+## 第三轮复审（2026-11-14）第二批：授权身份不许向两边借
+
+两处借来的身份，都是"看起来更聪明"的做法：
+
+1. **查不到归属，就拿请求里别的参数兜底**（T01）。`resolveReadTarget` 原来先看
+   `group_id`/`user_id`，命中就直接认这个目标——于是 `get_msg{message_id:<私聊>,
+   group_id:<本群>}` 里那个 id 的归属根本没被查。更隐蔽的是 `file`：只认"至少五位的
+   纯数字"，`file:"private-forward-id"` 连查都不查。现在：请求里只要出现 id（含非数字的
+   `file`，但路径与 URL 不算），**只认索引里的归属**；查不到就拒，附加参数只能制造冲突
+   （`target:'?'` + `conflict`），不能授权。白名单私聊（本来就能读一切）例外。
+2. **授权用哪个说话人**（T02）。`onebot_context` 以前取**被查会话**的说话人，于是 A 群用
+   `sessionKey:B` 一查，就借到了 B 群说话人的身份，顺手把"跟他同一个人"的私聊事实一起看了。
+   `liveContext` 更直接：`actorId ?? this.activeActorId`，而 `activeActorId` 是进程级共享的
+   ——两个群交替唤醒时它记的是最后那个说话人。现在授权身份**永远来自调用者**（`mind.actorOf`），
+   目标会话的说话人只用于展示（回执里的 `targetActor`），参数里给的 `actorId` 与调用者不符时
+   回执 `notes` 说一句"没被采信"。
+
+`mind.actorOf(sessionKey)` 是这两处的唯一入口：没有绑定就是空串，**不回退**任何全局字段。
+
+测试：`test/smoke-core.mjs` 的 `resolveReadTarget` 追加四条（附加群号不再兜底、`full` 仍按参数、
+非数字转发 ID 也算 id、URL 不算 id）；`test/load-check.mjs` 新增两条——`onebot_context` 拿的是
+调用者身份且回执说明没采信、`liveContext` 在没人绑定时传空串。全量 `npm test` EXIT=0
+（smoke-core 122、load-check 103、m15 238、ops 15）。
+
+## 第三轮复审（2026-11-14）第三批：媒体的归属不能被“用过一次”改写
+
+内容寻址（id 就是 sha256）让"同一份字节"天然只有一条记录，于是一个动作就能顺手改变它：
+
+1. **拿私聊的引用当来源再落一次**（T03）。`onebot_media{link:'hub-media:私聊那张'}` 会走
+   `media.resolve()` 重新登记一遍，并把 `sessionKey` 盖成当前群——归属就这么搬过去了。
+   现在 `resolve()` 认出"来源本身就是已落地的 id"（`reusing`），这次**不新增归属**：
+   字节还是同一份，谁能读只由真正收到它的那次决定。
+2. **第三方生图落地没写归属**。`tools/post-execute` 捡到图后 `saveBytes` 不带 `sessionKey`，
+   等于在索引里造了一条"谁都能读"的全局资源。补上（这一层在 apply 作用域，够不到工具那层的
+   `inferSessionKey`，按同一条链 `mind.activeSessionKey ?? mind.stats.lastTurn.sessionKey` 现算）。
+3. **列表把别人的文件名带出去**。`occurrences` 是为"同一份字节在多个会话出现"记的，命中
+   自己那一次时 `{...item}` 把整份数组也序列化出去了（含别的会话的文件名与消息号）。现在
+   一律不外带，只把命中那次的 `name`/`messageId` 提到顶层。
+
+测试：`test/smoke-core.mjs` 新增一例——私聊落一张、群会话把它的 id 当来源再落一次，断言
+`sessionKey` 为 `null`、`ownersOf` 仍只有私聊、群会话的可见列表里查不到它。全量 `npm test`
+EXIT=0（smoke-core 123、load-check 103、m15 238、ops 15）。
+
+## 第三轮复审（2026-11-14）第四批：删除这件事，只能往后追加
+
+审计日志 `media/<linkId>/<day>.jsonl` 是 append-only 的（每次落地追加一行）。清理时"读全文 →
+写 .tmp → rename"看着干净，实际上和同步 `appendFileSync` 抢同一个文件：重写窗口里新落地的那一行
+会被整份盖掉——落地成功、索引里也没有，等于凭空丢一条。第三轮 T07 就是它。
+
+改成**追加标记、读回时剔除**：
+
+- `{op:'drop', ids:[…]}`：这几条整条不要了；
+- `{op:'detach', id, sessionKey}`：只把某个会话的归属摘掉（内容寻址下别的会话还要看得见）。
+
+`#loadIndex()` 按文件顺序（日期升序，同一天按追加顺序）先合并落地行，再应用标记，于是"重启后
+删掉的自己回来""共用那条归属没了"这两类问题一起消失。
+
+同一条链上还有三处：
+
+1. **`ensureIndex()` 进门就置 `#hydrated`**（T06）。并发的两个清理任务，第二个看到置位就按空索引
+   返回——第一个还在读盘，它已经开始删了。现在共享同一份 Promise，**成功之后**才置位（失败能重试）。
+2. **blob 删失败照样删索引**（T08）。删不掉只记一笔日志，然后 `#index.delete(id)`——归属没了，
+   以后连"这条残留在哪"都定位不到。现在删不掉就 `continue`，记录留着，下次清理还会再试。
+3. **SQLite 删失败不进 `ok`**（T09）。原文删掉了、索引行没删干净，回执还说成功。现在算进
+   `problems`，回执写"索引行没删干净：…"。
+
+测试：`test/ops.mjs` 新增两例（14→17）——清理后日志里落地行还在、只有 `drop` 标记，重启后删掉的
+不回来且共用那条只剩另一边的归属；两个 `ensureIndex()` 并发时都必须看到 1 条（不能有一边回 0）。
+全量 `npm test` EXIT=0（smoke-core 123、load-check 103、m15 238、ops 17）。
+
+## 第三轮复审（2026-11-14）第五批：两个"计数器"放错了地方
+
+1. **额度按进程级的回合号划界**（T05）。`imageGen.maxPerTurn` 的键是
+   `${session}#${mind.turnSeq}`，而 `turnSeq` 是**进程级**的：A 群这一轮画了一张、B 群这时被唤醒，
+   全局号一跳，A 群再画一张就落进了新桶——限额等于不存在。现在 `mind.beginTurn()` 顺手给每个
+   会话自己的回合号计数（`#turnNo`，按 agent 键），额度键改用 `mind.turnOf(sessionKey)`。
+2. **试跑和"到点真的响了"共用一个去重账**（T11）。`#fired` 既记到点也记试跑，`run()` 还会先把它
+   清掉——于是"人让我试一下"顺手把正式那次的占位吃掉（真到点时被当成"已经投过"）。现在两本账：
+   `#fired` 记到点、`#trials` 记试跑，互不相干。另外一次性任务在被叫醒但目标还没空下来时打
+   `inflight` 标记，`#rotateIfNeeded()` 见到就跳过——否则轮换会按 `encodeWhen()` 把它再排一遍。
+
+测试：`test/tasks.mjs` 新增两例（30→32）——试跑紧接着到点还得真响、排队中的一次性任务不被轮换重建；
+`test/load-check.mjs` 新增一例（103→104）——别的会话开轮不许改我这一轮的号，且各会话从 1 数起。
+全量 `npm test` EXIT=0（smoke-core 123、load-check 104、m15 238、tasks 32、ops 17）。
+
+## 第三轮复审（2026-11-14）第六批：队列说"能重放"，就得真能
+
+`sanitizeSegments` 只认 `text/qq/id/file` 四个字段。这在纯文本消息上没问题，可 `json` 段的全部
+内容是 `data`（整张卡片），只给 `data.url` 的图片也一样——它们被清空之后，条目上还挂着
+`replayable: true`，点"重放"发出去的是一条空消息（第三轮 T12）。
+
+改成**按段类型列白名单**（`SEGMENT_FIELDS`）：`json/xml` 留 `data`（上限放宽到 4K 字符，卡片
+本来就长），`image/record/video/file` 留 `file/url/path/name/...`，`at` 留 `qq/name/user_id`，
+`reply/forward` 留 `id`。规则是：
+
+- 白名单内的字段原样保留；字符串超长就截短并记原因，`replayable` 跟着 false；
+- **白名单外还有非空字段** → 记"段里有还原不了的字段：json(extra_blob)"，同样不可重放；
+- 整个段类型都不认识 → 记"不认识的段：xxx"；
+- 展示用的 `text` 截断（300 字）不算载荷损失，仍然可以重放。
+
+顺带把 `paramsFor` 的拒重放文案从"存的是截短版"改成"存得不完整（原因）"——现在不止是截短。
+
+测试：`test/ops.mjs` 新增一例（17→18）——卡片整份留着时 `paramsFor` 拼回原卡片，多一个
+`extra_blob` 就把 `replayable` 打回 false 并写明原因。全量 `npm test` EXIT=0
+（smoke-core 123、load-check 104、m15 238、tasks 32、ops 18）。
+
+## 第三轮修复后的自查：把成功路径换成边界与故障路径
+
+前六批的绿灯不代表边界已经闭合。这次从混合参数、跨会话并发、清理时在飞回复、重启加载、
+写盘失败和任务同时到点入手，另建 `test/audit-boundaries.mjs`，不只验证“方法被调用过”。
+
+- **授权要覆盖每个资源**：同一请求里一个已知 id 不能给另一个未知 id 背书。媒体引用复用先判
+  调用方可读性，不读取或披露私聊 blob，也不添加归属。列表和按会话导出只选可读那次出现的元信息；
+  第三方生图落地由 `tools/post-execute` 的 `exec.agent.id` 绑定，不读全局当前会话。
+- **清理先停稳，再删盘**：加清理锁，先退役旧 agent 并等待旧轮结束；失败或五秒未停稳就拒绝删盘。
+  回复工具与投递都持有不可变代数，跨异步等待重新检查；旧轮在上游等待时清理，已发出的请求无法
+  撤销，但不再写回时间线或发第二条。缓冲原对象保留。定时/跨会话唤醒清空上一轮真人身份。
+- **补齐话题贡献与派生目录**：独占话题退场，共享话题只摘本会话事件/引用和世界键；旧混合总结
+  没有逐句来源，清空而不猜。群档案物理删除，取消待写项，避免 flush 复活派生目录。
+- **失败仍能重试**：媒体索引全部读完才发布，读失败不置成功位。blob 删除、追加标记和内存提交
+  之间不让出事件循环；标记写失败也返回失败、保留索引。重建时 detach 同步去掉对应出现记录。
+  SQLite 删除先于原文和内存删除，事务失败保留原文与 id，使下一次还能找全并重试。
+- **试跑与正式到点串行，不丢正式投递**：同一任务的在飞调用排队；任一任务在飞时不轮换总机。
+  排队后失败退还去重占位，重启清除临时在飞标记；搬迁一次性任务保留绝对 `nextAt`，不重启倒计时。
+- **不完整载荷不能重放**：递归检查转发节点内的内联媒体、限制结构大小；参数中的结构被丢弃也算
+  损失。旧队列没有载荷版本，默认不可重放；加载和重放前再次检查，列表返回深拷贝。
+
+回归共 16 项，包含真实临时目录、重建 store、注入 append/SQLite 错误及挂起唤醒的竞态测试。
+不自动重试消息，不自动重建 SQLite；媒体审计日志仍是逻辑删除，旧行保留到日志保留期清理。
