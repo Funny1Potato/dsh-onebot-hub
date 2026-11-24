@@ -15,6 +15,7 @@ const {
   targetAllowed,
   isTaskSession,
   scheduleReminderOf,
+  scheduleRemindersOf,
   TASK_SESSION_KEY,
   MIN_EVERY_SECONDS,
 } =
@@ -33,6 +34,12 @@ function check(name, fn) {
     failed += 1;
     cases.push({ name, ok: false, error: String(err?.message ?? err) });
   }
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 function asyncCheck(name, fn) {
@@ -281,6 +288,22 @@ check('scheduleReminderOf：认得出宿主注入的 [SCHEDULE REMINDER]', () =>
   assert.equal(scheduleReminderOf({ type: 'user/message', data: { content: [{ type: 'text', text: '普通消息' }] } }), null);
   assert.equal(scheduleReminderOf({ type: 'tool/call', data: {} }), null);
   assert.equal(scheduleReminderOf(null), null);
+});
+
+check('scheduleRemindersOf：读取宿主的周期批次，忽略变更通知与坏载荷', () => {
+  const block = (text) => ({ content: [{ type: 'text', text }] });
+  const prefix = '[SCHEDULE REMINDER BATCH]\nThis is a scheduled message from the user\nreminders_json: ';
+  const event = { type: 'agent/inbox/spliced', data: { inserted: [
+    block('[SCHEDULE CHANGE]\nchange: deleted\nschedule_id_json: "deleted-id"'),
+    block(prefix + JSON.stringify([
+      { schedule_id: 'daily-1', occurrence_at: '2026-10-28T12:00:00Z', reminder_prompt: 'schedule_id_json: "fake-id"' },
+      { schedule_id: 'every-2' }, { schedule_id: 'daily-1' }, { schedule_id: 'invalid id' }, null,
+    ])),
+    block(prefix + '[{"schedule_id":"broken"}'),
+    block('[SCHEDULE REMINDER]\nschedule_id_json: "once-3"'),
+  ] } };
+  assert.deepEqual(scheduleRemindersOf(event), ['daily-1', 'every-2', 'once-3']);
+  assert.deepEqual(scheduleRemindersOf({ type: 'user/message', data: block('schedule_id_json: "not-a-reminder"') }), []);
 });
 
 asyncCheck('fireBySchedule：按 scheduleId 找回任务并投递（枢纽自己走的路）', async () => {
@@ -582,6 +605,242 @@ asyncCheck('排队中的一次性任务不被轮换重建（第三轮 T11）', a
   assert.equal(out.queued, true, JSON.stringify(out));
   assert.equal(calls.created.length, createdBefore, '在飞的一次性任务不该被轮换再排一遍');
   assert.equal(store.list().some((t) => t.id === once.id), true, '它还该在列表里');
+});
+
+asyncCheck('旧 catalog：已结束的 beta.4 任务退出，过期但仍 active 的任务保留，未来时间按宿主原值搬迁', async () => {
+  const { hub, storage, calls } = makeHub();
+  const sessionId = 'onebot-hub:tasks';
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const future = new Date(Date.now() + 3_600_123).toISOString();
+  const base = { active: true, sessionId, prompt: 'p', target: 'group:833194406' };
+  const local = (id, when, nextAt) => ({ ...base, id, title: id, scheduleId: `sch-${id}`, when, nextAt });
+  storage.write('tasks', { sessionId, tasks: [
+    local('ticker', { kind: 'every', seconds: 600 }, future),
+    { ...local('stale', { kind: 'after', seconds: 60 }, past), lastAt: Date.parse(past) + 1_001, lastResult: '静默', fireCount: 2 },
+    local('missing', 'after:60', 'bad-date'),
+    local('due', { kind: 'after', seconds: 60 }, past),
+    local('future', { kind: 'after', seconds: 60 }, 'bad-date'),
+  ] });
+  hub.scheduleSvc.catalog = async () => [
+    { id: 'sch-stale', status: 'inactive', scheduledAt: past, lastDelivery: { scheduledAt: past, deliveredAt: past, messageId: 'msg-old' } },
+    { id: 'sch-due', status: 'active', scheduledAt: past },
+    { id: 'sch-future', status: 'active', scheduledAt: future },
+  ];
+  const archived = [];
+  hub.hostRef.retireSessionId = async (id) => archived.push(id);
+  const store = new TaskStore({ storage, hub, resetEvery: 1 });
+  store.load();
+  await store.ensureSession();
+  assert.deepEqual(store.list().map((t) => t.id), ['ticker', 'due', 'future']);
+  const stale = storage.peek().tasks.find((t) => t.id === 'stale');
+  assert.equal(stale.active, false);
+  assert.equal(stale.finishedAt, Date.parse(past));
+  assert.equal(stale.nextAt, '');
+  assert.equal(stale.lastResult, '静默');
+  assert.equal(store.list().find((t) => t.id === 'future').nextAt, future);
+
+  assert.equal((await store.fireBySchedule('sch-ticker')).ok, true);
+  assert.equal(store.sessionId, sessionId, '仍有已到期的真实宿主排期，不得提前退役总机');
+  assert.deepEqual(calls.deleted, []);
+  assert.deepEqual(archived, []);
+  assert.equal((await store.fireBySchedule('sch-due')).finished, true);
+  assert.match(store.sessionId, /\.r/);
+  assert.deepEqual(calls.created.map(({ req }) => ({ title: req.title, at: req.at })), [
+    { title: 'ticker', at: undefined }, { title: 'future', at: future },
+  ]);
+  assert.deepEqual(calls.deleted.map((d) => d.id), ['sch-ticker', 'sch-future']);
+  assert.deepEqual(archived, [sessionId]);
+  assert.equal(store.list().find((t) => t.id === 'future').nextAt, future);
+});
+
+asyncCheck('新 view：手动投递回执不能结束 active 任务，已入队的 ended 任务仍待本地接管', async () => {
+  const { hub, storage } = makeHub();
+  const sessionId = 'onebot-hub:tasks';
+  const past = new Date(Date.now() - 60_000).toISOString();
+  const future = new Date(Date.now() + 3_600_000).toISOString();
+  const make = (id) => ({ id, title: id, prompt: 'p', target: 'group:833194406', active: true,
+    when: { kind: 'after', seconds: 60 }, nextAt: 'bad-date', scheduleId: id, sessionId });
+  const rows = new Map([
+    ['armed', { id: 'armed', status: 'active', scheduledAt: future, lastDelivery: { scheduledAt: past, deliveredAt: past, messageId: 'manual' } }],
+    ['inbox', { id: 'inbox', status: 'ended', scheduledAt: past, lastDelivery: { scheduledAt: past, deliveredAt: past, messageId: 'queued', targetSessionId: sessionId } }],
+    ['execution', { id: 'execution', status: 'ended', scheduledAt: past, executionActive: true }],
+    ['ended', { id: 'ended', status: 'ended', scheduledAt: past }],
+  ]);
+  storage.write('tasks', { sessionId, tasks: [...rows.keys()].map(make) });
+  let inbox = [{ id: 'queued' }];
+  const writes = [];
+  hub.hostRef.getLive = (id) => id === sessionId ? { inbox: { nextTurn: inbox, nextStep: [] } } : null;
+  hub.scheduleSvc = {
+    async view({ id }) { return rows.get(id) ?? { id, code: 'schedule_not_found' }; },
+    async create(req) {
+      writes.push(req);
+      return { id: 'new', scheduledAt: future };
+    },
+    async edit(req) {
+      writes.push(req);
+      return { id: req.id, deleted: true };
+    },
+  };
+  const store = new TaskStore({ storage, hub });
+  store.load();
+  await store.ensureSession();
+  assert.deepEqual(store.list().map((t) => t.id), ['armed', 'inbox', 'execution']);
+  assert.equal(store.list()[0].nextAt, future);
+  assert.equal((await store.fireBySchedule('inbox')).finished, true);
+  inbox = [];
+  rows.get('execution').executionActive = false;
+  await store.ensureSession();
+  assert.deepEqual(store.list().map((t) => t.id), ['armed']);
+  const made = await store.create({ title: 'new', prompt: 'p', when: 'after:60', createdBy: 'group:833194406' });
+  assert.equal(made.ok, true);
+  assert.equal((await store.remove(made.id)).hostDeleted, true);
+  assert.deepEqual(writes, [
+    { title: 'new', prompt: '[定时提醒]', timing: { kind: 'after', after_seconds: 60 }, target: { kind: 'session', sessionId } },
+    { id: 'new', action: 'delete' },
+  ]);
+});
+
+asyncCheck('并发恢复和删除：等待宿主 create 的结果，删除最终排期且不留孤儿', async () => {
+  const { hub, storage, calls } = makeHub();
+  const store = new TaskStore({ storage, hub });
+  const made = await store.create({ title: 'resume race', prompt: 'p', when: 'every:600', createdBy: 'group:833194406' });
+  assert.equal((await store.pause(made.id)).ok, true);
+  const entered = deferred();
+  const finishCreate = deferred();
+  hub.scheduleSvc.create = async () => {
+    entered.resolve();
+    return finishCreate.promise;
+  };
+  const resumed = store.resume(made.id);
+  await entered.promise;
+  const duplicate = store.resume(made.id);
+  const removed = store.remove(made.id);
+  const settledEarly = await Promise.race([removed.then(() => true), new Promise((r) => setImmediate(() => r(false)))]);
+  finishCreate.resolve({ id: 'sch-resumed', scheduledAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal((await resumed).ok, true);
+  assert.equal((await duplicate).already, true);
+  assert.equal((await removed).hostDeleted, true);
+  assert.equal(settledEarly, false);
+  assert.deepEqual(calls.deleted.map((d) => d.id), ['sch_1', 'sch-resumed']);
+  assert.deepEqual(store.all(), []);
+});
+
+asyncCheck('旧投递结束不能结束重新恢复后的一次性任务', async () => {
+  const { hub, storage } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 1 });
+  const once = await store.create({ title: 'once', prompt: 'p', when: 'after:60', createdBy: 'group:833194406' });
+  const recurring = await store.create({ title: 'tick', prompt: 'p', when: 'every:600', createdBy: 'group:833194406' });
+  const wake = deferred();
+  hub.mind.reawake = (_target, opts) => opts.summary.endsWith('once') ? wake.promise : { woke: true };
+  const old = store.fire(once.id);
+  const del = hub.scheduleSvc.delete;
+  hub.scheduleSvc.delete = async (req) => {
+    assert.equal((await store.fire(recurring.id)).ok, true);
+    return del(req);
+  };
+  assert.equal((await store.pause(once.id)).ok, true);
+  assert.equal((await store.resume(once.id)).ok, true);
+  const restoredId = store.list().find((t) => t.id === once.id).scheduleId;
+  wake.resolve({ woke: true });
+  assert.equal((await old).finished, undefined);
+  assert.equal(store.list().find((t) => t.id === once.id).scheduleId, restoredId);
+});
+
+asyncCheck('已经排在试跑后面的正式提醒，暂停或删除后不再叫醒目标', async () => {
+  for (const action of ['pause', 'remove']) {
+    const { hub, storage } = makeHub();
+    const store = new TaskStore({ storage, hub });
+    const made = await store.create({ title: 'queued', prompt: 'p', when: 'after:60', createdBy: 'group:833194406' });
+    const entered = deferred();
+    const finishTrial = deferred();
+    let wakeCount = 0;
+    hub.mind.reawake = async () => {
+      wakeCount += 1;
+      entered.resolve();
+      await finishTrial.promise;
+      return { woke: true };
+    };
+    const trial = store.run(made.id);
+    await entered.promise;
+    const formal = store.fireBySchedule(store.all()[0].scheduleId);
+    const stopped = await store[action](made.id);
+    finishTrial.resolve();
+    assert.equal(stopped.ok, true);
+    assert.equal((await trial).ok, true);
+    assert.match((await formal).error, /排期已更改或取消/);
+    assert.equal(wakeCount, 1);
+  }
+});
+
+asyncCheck('轮换：等旧句柄释放才建新总机，暂存的新排期可以接住到点，回滚不删原排期', async () => {
+  const { hub, storage, calls } = makeHub();
+  const sessionId = 'onebot-hub:tasks';
+  const future = new Date(Date.now() + 3_600_123).toISOString();
+  const task = (id, when) => ({ id, title: id, when, nextAt: future, active: true, sessionId,
+    scheduleId: `old-${id}`, target: 'group:833194406', prompt: 'p' });
+  storage.write('tasks', { sessionId, tasks: [
+    task('trigger', { kind: 'every', seconds: 600 }),
+    task('once', { kind: 'after', seconds: 600 }),
+    task('tail', { kind: 'every', seconds: 600 }),
+  ] });
+  const enteredDispose = deferred();
+  const disposed = deferred();
+  const alone = deferred();
+  const finishTail = deferred();
+  let quiesced = 0;
+  hub.mind.pool.quiesce = async (_key, _reason, options) => {
+    assert.equal(options.hold, false);
+    if (++quiesced === 1) {
+      enteredDispose.resolve();
+      await disposed.promise;
+    }
+  };
+  hub.scheduleSvc.create = async (targetId, req) => {
+    if (req.title === 'tail') {
+      alone.resolve(targetId);
+      await finishTail.promise;
+    }
+    return { id: `new-${req.title}`, scheduledAt: future };
+  };
+  const archived = [];
+  hub.hostRef.retireSessionId = async (id) => archived.push(id);
+  const store = new TaskStore({ storage, hub, resetEvery: 1 });
+  store.load();
+  const rotate = store.fireBySchedule('old-trigger');
+  await enteredDispose.promise;
+  assert.deepEqual(calls.pins, []);
+  disposed.resolve();
+  const stagingId = await alone.promise;
+  assert.equal(store.acceptsScheduleSession(stagingId, 'new-once'), true);
+  assert.equal(store.acceptsScheduleSession('other-session', 'new-once'), false);
+  assert.equal(store.acceptsScheduleSession(sessionId, 'old-once'), true);
+  // Do not immediately retry after this intentionally interrupted rotation.
+  store.resetEvery = 0;
+  assert.equal((await store.fireBySchedule('new-once')).finished, true);
+  finishTail.resolve();
+  assert.equal((await rotate).ok, true);
+  assert.equal(store.sessionId, sessionId);
+  assert.equal(store.acceptsScheduleSession(stagingId, 'new-once'), false);
+  assert.deepEqual(calls.deleted.map(({ id }) => id), ['new-trigger', 'new-once', 'new-tail']);
+  assert.deepEqual(archived, []);
+});
+
+asyncCheck('宿主的管理写入可等待 fire 回复，轮换不反过来阻塞宿主', async () => {
+  const { hub, storage } = makeHub();
+  const store = new TaskStore({ storage, hub, resetEvery: 1 });
+  const trigger = await store.create({ title: 'fire under delete', prompt: 'p', when: 'every:600', createdBy: 'group:833194406' });
+  const victim = await store.create({ title: 'pause me', prompt: 'p', when: 'every:600', createdBy: 'group:833194406' });
+  const originalDelete = hub.scheduleSvc.delete;
+  hub.scheduleSvc.delete = async (req) => {
+    if (req.id === 'sch_2') assert.equal((await store.fire(trigger.id)).ok, true);
+    return originalDelete(req);
+  };
+  const paused = await store.pause(victim.id);
+  assert.equal(paused.ok, true);
+  // This queued ensure is guaranteed to run after the fire's deferred rotation.
+  await store.ensureSession();
+  assert.match(store.sessionId, /\.r/);
+  assert.equal(store.list().find(({ id }) => id === victim.id).paused, true);
 });
 
 await Promise.all(pending);

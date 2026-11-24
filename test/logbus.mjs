@@ -6,7 +6,7 @@
  */
 import assert from 'node:assert/strict';
 import { LogBus, redact } from '../lib/logbus.js';
-import { createLogRecentHandler, createLogStreamHandler, LOG_RECENT_PATH, LOG_STREAM_PATH } from '../lib/log/route.js';
+import { createLogRecentHandler, createLogStreamHandler, installLogRoute, LOG_RECENT_PATH, LOG_STREAM_PATH } from '../lib/log/route.js';
 
 const cases = [];
 const t = (name, fn) => cases.push({ name, fn });
@@ -176,6 +176,30 @@ t('清屏之后序号不回退，面板按 after 追增量追得上（m78216 自
   assert.ok(fresh > seen, '清屏不重置序号：新条目仍比旧的序号大');
   assert.equal(bus.recent(10, { after: 1e9 }).length, 0, '追一个不存在的未来序号时给空（面板据此从头拉）');
   assert.equal(bus.recent(10, { after: seen }).length, 1, '按真序号追，拿到刚进来的那条');
+});
+
+t('日志 SSE 路由注册冲突时回滚本次 recent，保留已有路由', () => {
+  const routes = new Map();
+  const ctx = { webServer: {
+    register({ path, handler }) {
+      if (routes.has(path)) throw new Error(`duplicate route ${path}`);
+      routes.set(path, handler);
+      return () => routes.delete(path);
+    },
+  } };
+  const existing = () => {};
+  const disposeExisting = ctx.webServer.register({ path: LOG_STREAM_PATH, handler: existing });
+  const failed = installLogRoute(ctx);
+  assert.equal(failed.available, false);
+  assert.match(failed.note, /duplicate route/);
+  assert.deepEqual([...routes], [[LOG_STREAM_PATH, existing]]);
+  disposeExisting();
+
+  const fresh = installLogRoute(ctx);
+  assert.equal(fresh.available, true);
+  assert.deepEqual([...routes.keys()], [LOG_RECENT_PATH, LOG_STREAM_PATH]);
+  fresh.dispose();
+  assert.equal(routes.size, 0);
 });
 
 const failed = [];

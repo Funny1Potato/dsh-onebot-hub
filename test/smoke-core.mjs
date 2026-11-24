@@ -625,17 +625,44 @@ t('复用一份已落地的媒体，不会把它的归属搬到新会话（第�
   });
 });
 
-t('时间线的会话桶也有上界：最冷的先走，桶不会无限攒（m85249 P2-8）', () => {
-  const tl = new Timeline({ limitGlobal: 10000, limitSession: 10, limitSessions: 8 });
-  for (let i = 0; i < 12; i += 1) {
-    tl.record({ direction: 'upstream-in', linkId: 'up:test', text: `第 ${i} 个会话`, event: { post_type: 'message', message_type: 'group', group_id: 900000 + i, user_id: 1, message: [] } });
-  }
-  const stats = tl.stats;
-  assert.equal(stats.sessionLimit, 8, '上界要能看见');
-  assert.ok(stats.sessions <= 8, `会话桶不许超过上界，实际 ${stats.sessions}`);
-  // 最新那个会话一定还在；最早那个已被淘汰
-  assert.ok(tl.bySession('group:900011').length > 0, '最新的会话必须留着');
-  assert.equal(tl.bySession('group:900000').length, 0, '最冷的会话桶该被淘汰');
+t('时间线：冷桶淘汰仍读得到全局环内的记录，重入时也不丢窗口', () => {
+  const tl = new Timeline({ limitGlobal: 12, limitSession: 2, limitSessions: 8 });
+  const add = (i, text) => tl.record({
+    direction: 'upstream-in', linkId: 'up:test', text,
+    event: { post_type: 'message', message_type: 'group', group_id: 900000 + i, user_id: 1, message: [] },
+  });
+  const a = add(0, '一');
+  const b = add(0, '二');
+  const c = add(0, '三');
+  for (let i = 1; i <= 8; i += 1) add(i, '其他群');
+  assert.equal(tl.stats.sessions, 8);
+  assert.equal(tl.stats.sessionLimit, 8);
+  assert.ok(!tl.sessions().some((s) => s.sessionKey === 'group:900000'), '最冷的热桶已淘汰');
+  assert.equal(tl.byId(a.id), a, '全局还保留它');
+  assert.deepEqual(tl.bySession('group:900000'), [b, c], '回退仍受会话上限约束');
+  const d = add(0, '四');
+  assert.deepEqual(tl.bySession('group:900000'), [c, d], '回暖后窗口按原顺序拼齐、不重复');
+  assert.deepEqual(tl.bySession('group:900000', 1), [d]);
+  assert.equal(tl.dropSession('group:900000'), 4);
+  assert.deepEqual(tl.bySession('group:900000'), [], '清理同时摘掉回退索引');
+  assert.equal(tl.byId(c.id), null);
+  assert.equal(tl.bySession('group:900008').length, 1, '回退不会跨会话取记录');
+  tl.clear();
+  assert.deepEqual(tl.bySession('group:900008'), []);
+});
+
+t('时间线：热桶不受全局裁剪截断，冷桶不保留已出全局环的记录', () => {
+  const tl = new Timeline({ limitGlobal: 3, limitSession: 2, limitSessions: 8 });
+  const add = (i) => tl.record({ direction: 'hub-out', linkId: 'test', refs: { sessionKey: `group:${i}` } });
+  const a = add(1);
+  add(2); add(3); add(4);
+  assert.equal(tl.byId(a.id), null);
+  const b = add(1);
+  assert.deepEqual(tl.bySession('group:1'), [a, b], '常驻热桶保留超过全局环的历史');
+  for (let i = 5; i <= 11; i += 1) add(i);
+  assert.ok(tl.sessions().some((s) => s.sessionKey === 'group:1'), '最近写入的旧桶不应先被淘汰');
+  add(12);
+  assert.deepEqual(tl.bySession('group:1'), [], '历史出全局环且热桶淘汰后不存在幽灵索引');
 });
 
 t('敏感只读：凭证类默认不外露', () => {
@@ -1053,9 +1080,9 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   assert.deepEqual(linked.topics, ['显卡选购'], `facts 要挂上同批写的话题，实际 ${JSON.stringify(linked.topics)}`);
 
   // 排序（`m03601`）：命中当前活跃话题的事实排在最前，哪怕它更旧。
-  const older = { text: '很久以前说过的一句无关的话', at: 1000, actor: { user_id: '10001' } };
-  const hitFact = { text: '正在聊的这件事', at: 1000, topics: ['显卡选购'], actor: { user_id: '10001' } };
-  const newer = { text: '昨天说的另一句', at: 9000, actor: { user_id: '10001' } };
+  const older = { scope: 'group:55555', text: '很久以前说过的一句无关的话', at: 1000, actor: { user_id: '10001' } };
+  const hitFact = { scope: 'group:55555', text: '正在聊的这件事', at: 1000, topics: ['显卡选购'], actor: { user_id: '10001' } };
+  const newer = { scope: 'group:55555', text: '昨天说的另一句', at: 9000, actor: { user_id: '10001' } };
   // 两个说话人才走精简卡（单人走完整卡、事实全列）——这里要验的是"排在前面的两条是哪些"。
   const card = renderPersonCards(['10001', '10002'], {
     personOf: (id) => (id === '10001'
@@ -1192,7 +1219,7 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   assert.equal(ws2.all()[0].sensitive, true);
   const badIdx = applyMemoryOps({ long_term: { sensitive: [9] } }, { ...wbase, store: ws2 });
   assert.equal(badIdx.blocks.long_term.sensitive, 0);
-  assert.ok(badIdx.rejected.some((x) => /序号越界/.test(x.reason)), JSON.stringify(badIdx.rejected));
+  assert.ok(badIdx.rejected.some((x) => /原上下文序号不可用/.test(x.reason)), JSON.stringify(badIdx.rejected));
 
   // 渲染形状（`m08663` 用户指出）：短期与长期**必须各成一块**——长期标题前空一行，
   // 否则它紧贴在短期最后一条下面，看着像同一段里的下一行；每块的序号也都从 0 起。
@@ -1216,17 +1243,7 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   assert.equal(renderMemoryBlocks({}), '', '没有记忆时渲染为空串，不留孤零零的标题');
   // 档案指针（`m20216`）：长期记忆是索引，细节在档案里——没有指针，模型只知道发生过，
   // 不知道去哪儿看细节。指针只跟**真的落成**的目标走（写入侧只 push 成功的）。
-  assert.equal(
-    renderMemoryBlocks({ longTerm: [{ text: '换显卡定了 850W', archive: [{ target: 'topic', id: '显卡选购' }] }] }),
-    '【长期记忆（跨会话；序号可用于 modify/delete）】\n0. 换显卡定了 850W〔详见 话题：显卡选购〕',
-    '长期索引行要带档案指针，否则模型找不到细节',
-  );
-  assert.equal(
-    renderMemoryBlocks({ longTerm: [{ text: '两处都落了', archive: [{ target: 'topic', id: 'T1' }, { target: 'person', id: '10001' }] }] }),
-    '【长期记忆（跨会话；序号可用于 modify/delete）】\n0. 两处都落了〔详见 话题：T1、人物：10001〕',
-    '一次结算落两处时，两条指针都要写出来',
-  );
-  assert.equal(renderMemoryBlocks({ longTerm: [{ text: '没有档案' }] }).includes('〔'), false, '没有档案就不加方括号');
+  assert.match(renderMemoryBlocks({ longTerm: [{ id: 'm1', text: '独立记忆' }] }), /0\. 〔m1〕独立记忆/);
   // 出处／日期／相关人（`m20892`）：以前一行只有正文——模型分不清"这是哪个群的事、什么时候的事、
   // 跟谁有关"。出处用与活跃层同一套记号，日期取**天粒度**（取时分会让快照每回合重注一次）。
   assert.equal(
@@ -1279,8 +1296,7 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   assert.match(selfText, /我在这里叫：小助/, '只渲染本会话那个昵称');
   assert.equal(selfText.includes('阿助'), false, '别的群的昵称不该串进来');
   assert.match(selfText, /我的偏好：少用感叹号/);
-  assert.match(selfText, /我说过的话（别自相矛盾）：\n- 二\n- 三\n- 四/, '说过的话只留最后 3 条');
-  assert.equal(selfText.includes('- 一'), false, '更早的说过的话不占上下文');
+  assert.doesNotMatch(selfText, /我说过的话|^- [一二三四]$/m);
   assert.match(selfText, /我犯过的错（别再犯）：\n- 把 A 当成了 B/);
   assert.equal(renderSelf(null), '', '没有档案就整段不渲染');
   assert.equal(renderSelf({}), '', '空档案也整段不渲染');
@@ -1331,48 +1347,25 @@ t('记忆去重：同一条只留一条、读回折掉历史重复、索引不�
   }
 });
 
-t('记忆写入：modify 优先于 add、越界与未知字段不静默、可见性由代码判定', () => {
+t('记忆写入：用稳定 ID 或本轮实际见到的原序号，不接受 null 和冲突字段', () => {
   const store = new MemoryStore({});
-  const profiles = new Profiles({ storage: null });
-  const active = new ActiveStore({ storage: null });
-  const base = { store, profiles, active, sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'scoped' }), now: 1_700_000_000_000 };
-
-  // 短期记忆的职能搬到了活跃层（`m17909`）：进行中的话题 / 正在做的事。
-  const r1 = applyMemoryOps(
-    { active: { add: [{ kind: 'topic', text: '第一件事' }, { kind: 'task', text: '第二件事' }] } },
-    base,
-  );
-  assert.equal(r1.blocks ? r1.applied.active.add : 0, 2);
-  assert.equal(active.all().length, 2);
-  assert.ok(active.all().every((e) => e.originScope === 'group:55555'));
-
-  // `short_term.add` 退役：明说"用 active"，而不是静默忽略。
-  const r1b = applyMemoryOps({ short_term: { add: [{ text: '旧的短期' }] } }, base);
-  assert.equal(r1b.blocks.short_term.add, 0);
-  assert.ok(r1b.rejected.some((x) => /活跃层/.test(x.reason)), JSON.stringify(r1b.rejected));
-
-  // 模型给 visibility：记一条 rejection，但条目仍按代码推断落盘（不能静默采纳，也不能静默丢弃）。
-  const r2 = applyMemoryOps({ long_term: { add: [{ text: '私事', visibility: 'shareable' }] } }, base);
-  assert.equal(r2.applied.long_term.add, 1);
-  assert.ok(r2.rejected.some((x) => x.path.endsWith('visibility')), JSON.stringify(r2.rejected));
-  assert.equal(store.all().find((e) => e.text === '私事').visibility, 'shareable', '没点名的长期事实按 shareable 落');
-
-  // 活跃层的 update 序号指向**改之前**那份列表；同批 add 不会让序号错位。
-  const snapshot = { entries: filterActive(active.all(), { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: resolveIsolation({ level: 'scoped' }), now: base.now }).visible };
-  assert.equal(snapshot.entries.length, 2, '本会话自己写的两条都该看得见');
-  const r3 = applyMemoryOps(
-    { active: { update: [{ index: 0, text: '第一件事（已更正）' }], add: [{ kind: 'topic', text: '新加的' }] } },
-    { ...base, activeBlocks: snapshot },
-  );
-  assert.equal(r3.applied.active.update, 1);
-  assert.ok(active.all().some((e) => e.text === '第一件事（已更正）'));
-  assert.ok(!active.all().some((e) => e.text === '第一件事'));
-
-  const r4 = applyMemoryOps({ active: { update: [{ index: 99, text: 'x' }], 未知操作: [] }, 未知顶层: {} }, { ...base, activeBlocks: snapshot });
-  assert.ok(r4.rejected.some((x) => /序号越界/.test(x.reason)));
-  assert.ok(r4.rejected.some((x) => /未知操作/.test(x.reason)));
-  assert.ok(r4.rejected.some((x) => /未知字段/.test(x.reason)));
-  assert.equal(applyMemoryOps('不是对象', base).ok, false);
+  const base = { store, sessionKey: 'group:55555', worldKey: 'group:55555', currentSessionKey: 'group:55555', now: 1_700_000_000_000 };
+  const add = (text) => applyMemoryOps({ long_term: { add: [text] } }, base);
+  add('先写 A'); add('再写 B');
+  const [a, b] = store.all();
+  const displayedBlocks = { longTerm: [b, a] };
+  const out = applyMemoryOps({ long_term: { modify: [{ index: 0, content: '改 B' }, { id: a.id, content: '改 A' }] } }, { ...base, displayedBlocks });
+  assert.equal(out.applied.long_term.modify, 2);
+  assert.equal(store.byId(a.id).text, '改 A');
+  assert.equal(store.byId(b.id).text, '改 B');
+  const invalid = applyMemoryOps({ long_term: { delete: [null, { id: a.id, index: 0 }, 99] } }, { ...base, displayedBlocks });
+  assert.equal(invalid.applied.long_term.delete, 0);
+  assert.equal(invalid.rejected.length, 3);
+  const archive = applyMemoryOps({ long_term: { add: [{ text: '冗余索引', archive: [{ target: 'topic', id: 'x' }] }] } }, base);
+  assert.equal(archive.applied.long_term.add, 0);
+  const next = applyMemoryOps({ long_term: { delete: [{ id: a.id }] } }, base);
+  assert.equal(next.applied.long_term.delete, 1);
+  assert.equal(store.byId(a.id), null);
 });
 
 t('活跃层：跨群共享要同时过白名单与"共同活跃群友"两关，私聊来源另按 privateFacts', () => {
@@ -1475,89 +1468,7 @@ t('活跃层：序号不漂移、过期条目说得出原因、没露过面的�
   });
   assert.equal(alive.commonActive('group:55555', 'group:77777'), true);
 
-  // 写入层的硬边界：非法的 kind 拒掉**而且不落盘**；空正文不认；不替别的会话写。
-  const base = {
-    store: new MemoryStore({}),
-    profiles: new Profiles({ storage: null }),
-    active: a,
-    sessionKey: 'group:55555',
-    worldKey: 'group:55555',
-    actorId: '10001',
-    isolation: iso,
-    now,
-  };
-  const before = a.all().length;
-  const rk = applyMemoryOps({ active: { add: [{ kind: 'note', text: '不合法的类目' }] } }, base);
-  assert.equal(rk.applied.active.add, 0);
-  assert.equal(a.all().length, before, '非法的 kind 不能落盘');
-  assert.ok(rk.rejected.some((x) => /只认/.test(x.reason)), JSON.stringify(rk.rejected));
 
-  const ru = applyMemoryOps({ active: { update: [{ index: 0, text: '' }] } }, { ...base, activeBlocks: { entries: view(now).visible } });
-  assert.equal(ru.applied.active.update, 0);
-  assert.ok(ru.rejected.some((x) => /text 为空/.test(x.reason)), JSON.stringify(ru.rejected));
-
-  const rx = applyMemoryOps(
-    { active: { add: [{ kind: 'topic', text: '替别的群开的' }] } },
-    { ...base, sessionKey: 'group:66666', currentSessionKey: 'group:55555' },
-  );
-  assert.equal(rx.applied.active.add, 0);
-  assert.ok(rx.rejected.some((x) => /不能替别的会话写/.test(x.reason)), JSON.stringify(rx.rejected));
-  assert.ok(!a.all().some((e) => e.text === '替别的群开的'));
-
-  // 参与者只认 QQ 号（`m21098` 自审）：写名字会被丢掉，而"没参与者"意味着结算出的索引行
-  // 是不点名的 `shareable`，会被念到别的群去——这是 fail-open，必须当面说出来。
-  const rp = applyMemoryOps(
-    { active: { add: [{ kind: 'task', text: '替小张整理清单', participants: ['小张', '10001'] }] } },
-    base,
-  );
-  assert.equal(rp.applied.active.add, 1, '名字被忽略，但这条照写');
-  assert.ok(rp.rejected.some((x) => /participants 只认 QQ 号/.test(x.reason) && /小张/.test(x.reason)), JSON.stringify(rp.rejected));
-  const added = a.all().find((e) => e.text === '替小张整理清单');
-  assert.deepEqual(added.participants, ['10001'], '只留纯数字的');
-
-  // 同一批里同一个序号只能结算一次：`visible` 是快照，不挡就会重复写索引行、重复计数。
-  const dupSnap = { entries: view(now).visible };
-  const dupSettle = applyMemoryOps(
-    {
-      active: {
-        settle: [
-          { index: 0, outcome: 'keep', summary: '第一次结算写的索引' },
-          { index: 0, outcome: 'keep', summary: '第二次又写一行' },
-        ],
-      },
-    },
-    { ...base, activeBlocks: dupSnap },
-  );
-  assert.equal(dupSettle.applied.active.settle.keep, 1, '只该结算成功一次');
-  assert.ok(dupSettle.rejected.some((x) => /已经结算过了/.test(x.reason)), JSON.stringify(dupSettle.rejected));
-  assert.equal(base.store.all().filter((e) => e.text === '第二次又写一行').length, 0, '重复那条不能落库');
-
-  // 摸一下不续命：`update` 只改参与者（正文没变）时不刷新 `updatedAt`。
-  const touchView = view(now).visible;
-  const touchIdx = touchView.findIndex((e) => e.text === '再列一份');
-  assert.ok(touchIdx >= 0, '要有一条还没被结算掉的条目');
-  const touchTarget = touchView[touchIdx];
-  const touchedAt = touchTarget.updatedAt;
-  // ① 原样重写一遍：什么都没变，就不该续命（否则模型每轮"顺手摸一下"就能让 30 天窗口永不过期）。
-  const noop = applyMemoryOps(
-    { active: { update: [{ index: touchIdx, text: '再列一份' }] } },
-    { ...base, now: now + 5000, activeBlocks: { entries: touchView } },
-  );
-  assert.equal(noop.applied.active.update, 1);
-  assert.equal(a.byId(touchTarget.id).updatedAt, touchedAt, '正文没变就不该刷新 updatedAt');
-  // ② 真的改了点东西（参与者变了）：这才算"又被提起"，刷新 updatedAt。
-  applyMemoryOps(
-    { active: { update: [{ index: touchIdx, text: '再列一份', participants: ['10003'] }] } },
-    { ...base, now: now + 9000, activeBlocks: { entries: touchView } },
-  );
-  assert.equal(a.byId(touchTarget.id).updatedAt, now + 9000, '内容真变了才刷新');
-  assert.deepEqual(a.byId(touchTarget.id).participants, ['10003'], '参与者变了还是要落');
-  // 活跃条目也能自己标敏感（跟长期记忆一个口径）：标了就永远不出本会话，哪怕白名单里的另一个群也拿不到。
-  applyMemoryOps({ active: { add: [{ kind: 'topic', text: '小张私下跟我说的事', sensitive: true }] } }, base);
-  const secret = a.all().find((e) => e.text === '小张私下跟我说的事');
-  assert.equal(secret.sensitive, true, '敏感标记要落盘');
-  assert.ok(!isActiveVisible(secret, { sessionKey: 'group:99999', worldKey: 'group:99999', isolation: iso }).ok, '标了敏感就不出本会话');
-  assert.ok(isActiveVisible(secret, { sessionKey: 'group:55555', worldKey: 'group:55555', isolation: iso }).ok, '本会话自己还是看得见的');
 });
 
 t('曾用名与话题关联：改名之后还认得出人，引用关系才接线（§24.11/§24.4）', () => {
@@ -1589,7 +1500,7 @@ t('曾用名与话题关联：改名之后还认得出人，引用关系才接�
   assert.match(card, /也曾叫过：小明/);
   // `interests` 以前只写不读（`m20216`）：能写、能落盘、`onebot_person` 读得到，
   // 但装配层从来没渲染过——模型写了等于只写进了文件。
-  profiles.upsertPerson('10001', { interests: [{ text: '显卡' }, { text: '机械键盘' }, { text: '显卡' }] }, at + 10);
+  profiles.upsertPerson('10001', { interests: [{ scope: 'group:55555', text: '显卡' }, { scope: 'group:55555', text: '机械键盘' }, { scope: 'group:55555', text: '显卡' }] }, at + 10);
   const cardWithInterests = renderPerson(profiles.person('10001'), { sessionKey: 'group:55555', worldKey: 'group:55555', actorId: '10001', isolation: resolveIsolation({ level: 'balanced' }) });
   assert.match(cardWithInterests, /爱聊：显卡、机械键盘/, '兴趣要进人物卡，且同一条不重复');
 
@@ -1763,7 +1674,7 @@ t('本群认识的人：一行一人、只列本群、排除当前对话者与 b
   profiles.noteGroupCard('10001', 'group:55555', { card: '群主小明', role: 'owner' }, at);
   profiles.noteGroupCard('10002', 'group:55555', { card: '老张', lastSentAt: at - 1000 }, at);
   profiles.noteGroupCard('10003', 'group:55555', {}, at);
-  profiles.upsertPerson('10002', { facts: [{ text: '做后端，爱问细节' }, { text: '喝奶茶只喝三分糖' }], impression: '话不多但靠谱' }, at);
+  profiles.upsertPerson('10002', { facts: [{ scope: 'group:55555', text: '做后端，爱问细节' }, { scope: 'group:55555', text: '喝奶茶只喝三分糖' }], localNotes: { scope: 'group:55555', impression: '话不多但靠谱' } }, at);
   profiles.upsertPerson('10002', { commitments: [{ what: '帮他看一个 bug', status: 'open' }] }, at);
   // 别的群认识的人：不该出现在这个群的名单里
   profiles.noteGroupCard('20002', 'group:77777', { card: '张工' }, at);
@@ -1780,7 +1691,7 @@ t('本群认识的人：一行一人、只列本群、排除当前对话者与 b
   });
   assert.match(text, /【本群认识的人】/);
   assert.match(text, /onebot_person/, '得告诉模型细节去哪儿查');
-  assert.match(text, /- 老张\(10002\)｜印象：话不多但靠谱｜知道 2 件事｜有 1 件没兑现的承诺/, '名片与名字相同时不重复写（真机上一半人名片＝昵称）');
+  assert.match(text, /- 老张\(10002\)｜印象：话不多但靠谱｜知道 2 件事/, '名片与名字相同时不重复写（真机上一半人名片＝昵称）');
   assert.match(text, /^- 10003$/m, '没内容的人也列，只是信息少——这是"我认识他"的事实（只有 QQ 号时不重复包一层括号）');
   assert.ok(!text.includes('10001'), '当前对话对象有自己的完整卡片，不重复列');
   assert.ok(!text.includes('30001'), 'bot 自己不是"认识的人"');
@@ -2107,7 +2018,7 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
     log: () => {},
   });
   const withNote = full.sessionDirectory('group:111');
-  assert.match(withNote.rows.find((r) => r.text.startsWith('群 111')).note, /^印象：聊显卡装机/);
+  assert.ok(withNote.rows.every((row) => row.note === null));
   assert.equal(withNote.rows.find((r) => r.text.startsWith('群 222')).note, null);
 
   // 印象只给"本来就能看到那边"的人：白名单私聊给，普通私聊不给（`m32493`）。
@@ -2122,7 +2033,7 @@ t('会话目录（`m32112`）：列群、按最近有人说话排序、私聊只
     log: () => {},
   });
   const trustedPrivate = fullTrusted.sessionDirectory('private:10001');
-  assert.match(trustedPrivate.rows.find((r) => r.text.startsWith('群 111')).note, /^印象：/);
+  assert.ok(trustedPrivate.rows.every((row) => row.note === null));
 
   // 私聊视角先给私聊留位：条数不够时宁可少列群，也要让私聊知道还有哪几个私聊（`m32493`）。
   const tight = new Mind({
@@ -4640,7 +4551,7 @@ t('白名单解析：裸号 / private: 前缀 / JSON 数组 / 逗号串都认，
   assert.deepEqual([...parseTrustedPrivates('')], []);
 });
 
-t('记忆召回：话题档也是一路来源，能按标题/结论/事件命中（m03568）', async () => {
+t('记忆召回：话题档也是一路来源，能按标题/别名/当前结论命中，不借用别处话题', async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-topic-'));
   const recall = new RecallStore({ dir, linkId: 'up:test', log: () => {} });
   const topics = [
@@ -4649,8 +4560,9 @@ t('记忆召回：话题档也是一路来源，能按标题/结论/事件命中
       title: '显卡选购',
       conclusion: '最后买了 4090，电源没换所以降压跑',
       status: 'closed',
-      worldKeys: ['group:55555'],
-      events: [{ text: '问了一圈价格' }, { text: '电源瓦数不够' }],
+      scope: 'group:55555',
+      aliases: ['装机配件'],
+      stages: [{ kind: 'explicit', previousConclusion: '考虑了二手价格' }],
       lastAt: 1700000000000,
     },
     {
@@ -4658,32 +4570,38 @@ t('记忆召回：话题档也是一路来源，能按标题/结论/事件命中
       title: '猫粮团购',
       conclusion: '三个人的猫都吃同一个牌子',
       status: 'closed',
-      worldKeys: ['group:55555'],
-      events: [],
+      scope: 'group:55555',
+      aliases: [],
       lastAt: 1700000001000,
     },
   ];
-  const hit = await recall.search({ query: '电源', sources: ['topic'], topics, limit: 10 });
+  const hit = await recall.search({ query: '电源', sources: ['topic'], topics, sessionKey: 'group:55555', limit: 10 });
   assert.ok(hit.items.length >= 1, '结论里那句提到电源，应该命中');
   const row = hit.items[0];
   assert.equal(row.source, 'topic', '来源要标成话题');
   assert.equal(row.id, '显卡选购');
   assert.match(String(row.text), /4090/, '正文要给标题与结论，模型才知道是什么事');
 
-  const byEvent = await recall.search({ query: '价格', sources: ['topic'], topics, limit: 10 });
-  assert.ok(byEvent.items.length >= 1, 'events 里的话也要能搜到');
+  const byAlias = await recall.search({ query: '装机配件', sources: ['topic'], topics, sessionKey: 'group:55555' });
+  assert.equal(byAlias.items[0]?.id, '显卡选购');
+  const history = await recall.search({ query: '价格', sources: ['topic'], topics, sessionKey: 'group:55555' });
+  assert.equal(history.items.length, 0, '历史阶段只在话题详情里看，不冒充当前结论');
+  const other = await recall.search({ query: '显卡', sources: ['topic'], topics, sessionKey: 'group:66666', scope: 'all', confirm: true });
+  assert.equal(other.items.length, 0, '越界检索不能放开话题记录');
 
   // 话题档要跟着 since/until/person/kinds 走（`m03930` 自查）：不然明明按人搜，也会混进话题。
-  const forPerson = await recall.search({ query: '电源', sources: ['topic'], topics, person: '10001', limit: 10 });
+  const forPerson = await recall.search({ query: '电源', sources: ['topic'], topics, sessionKey: 'group:55555', person: '10001', limit: 10 });
   assert.equal(forPerson.items.length, 0, '按人搜时不该出现话题');
-  const forMessage = await recall.search({ query: '电源', sources: ['topic'], topics, kinds: ['message'], limit: 10 });
+  const forMessage = await recall.search({ query: '电源', sources: ['topic'], topics, sessionKey: 'group:55555', kinds: ['message'], limit: 10 });
   assert.equal(forMessage.items.length, 0, 'kinds 里没有 topic 就不该出现话题');
-  const windowed = await recall.search({ query: '电源', sources: ['topic'], topics, since: 1800000000000, limit: 10 });
+  const windowed = await recall.search({ query: '电源', sources: ['topic'], topics, sessionKey: 'group:55555', since: 1800000000000, limit: 10 });
   assert.equal(windowed.items.length, 0, '时间窗之外的话题不该被翻出来');
-  const inWindow = await recall.search({ query: '电源', sources: ['topic'], topics, since: 1600000000000, limit: 10 });
+  const inWindow = await recall.search({ query: '电源', sources: ['topic'], topics, sessionKey: 'group:55555', since: 1600000000000, limit: 10 });
   assert.ok(inWindow.items.length >= 1, '窗口内的照常命中');
   const miss = await recall.search({ query: '显卡', sources: ['timeline'], topics, limit: 10 });
   assert.equal(miss.items.length, 0, '只要 timeline 时不许把话题塞进来');
+  recall.close();
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 t('当前说话人排第一：卡片上限截掉别人也不能截掉他（m78216 自查）', () => {
@@ -4748,7 +4666,7 @@ t('卡片上限外的人也给一句话，但不和已认识的人重复（m7904
       facts: [{ text: `${id} 最近说的事`, at, scope: 'group:55555' }],
     };
   }
-  people['10004'].impression = '一个爱说话的人';
+  people['10004'].notesByScope = { 'group:55555': { impression: '一个爱说话的人' } };
   const personOf = (id) => people[id] ?? null;
   const opts = {
     personOf,

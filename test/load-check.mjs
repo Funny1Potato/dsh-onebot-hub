@@ -441,10 +441,8 @@ check('Config schema 能填默认值', () => {
   assert.equal(plainConfig(filled.memory.isolation.privateFacts), 'sameActor');
   // 活跃层（`m17909`）默认开着，「待结算」每天提一次。
   assert.equal(plainConfig(filled.memory.active.enabled), true);
-  assert.equal(plainConfig(filled.memory.active.activeWindowDays), 30);
   assert.equal(plainConfig(filled.memory.active.injectLimit), 8);
-  assert.equal(plainConfig(filled.memory.active.maxPerOrigin), 20);
-  assert.equal(plainConfig(filled.memory.active.dailySettleReminder), true);
+  assert.equal(plainConfig(filled.memory.topicTranscripts.retentionDays), 0);
   // `m24484`：回合开始前默认等识图 4 秒（0＝不等）。用户定案"默认 4 秒、可配置"。
   assert.equal(plainConfig(filled.vision.waitBeforeTurnMs), 4000);
   // `m25983`：会话间转达**默认关**——它会把一个群里的东西带到另一个群，必须人显式打开。
@@ -1531,6 +1529,38 @@ check('订阅 session/event：只把 hub 自己的会话记进账本', () => {
   assert.equal(hub.mind.feedOf('session-7'), null, '非 hub 会话不该进账本');
 });
 
+check('定时提醒按实际总机 id 接管，不认群会话与轮换前的旧 id', () => {
+  const sub = recorded.onEvents.find((e) => e.name === 'session/event');
+  const actual = hub.tasks;
+  const seen = [];
+  const old = 'onebot-hub:tasks';
+  const rotated = 'onebot-hub:tasks.r1';
+  const reminder = (scheduleId) => ({
+    type: 'user/message',
+    data: { message: { content: [{ type: 'text', text: `[SCHEDULE REMINDER]\nschedule_id_json: "${scheduleId}"` }] } },
+  });
+  const batch = (...ids) => ({
+    type: 'user/message',
+    data: { message: { content: [{ type: 'text', text: `[SCHEDULE REMINDER BATCH]\nreminders_json: ${JSON.stringify(ids.map((schedule_id) => ({ schedule_id })))}` }] } },
+  });
+  try {
+    hub.tasks = {
+      sessionId: old,
+      acceptsScheduleSession(id, scheduleId) {
+        return id === this.sessionId || (id === rotated && scheduleId === 'schedule-staged');
+      },
+      async fireBySchedule(id, opts) { seen.push([id, opts.source]); return { ok: true }; },
+    };
+    sub.handler({ id: old }, reminder('schedule-first'));
+    sub.handler({ id: 'onebot-hub:group%3A55555' }, batch('schedule-first', 'schedule-other'));
+    sub.handler({ id: rotated }, batch('schedule-staged', 'schedule-not-staged'));
+    hub.tasks.sessionId = rotated;
+    sub.handler({ id: old }, reminder('schedule-old'));
+    sub.handler({ id: rotated }, batch('schedule-new', 'schedule-new-2', 'schedule-new'));
+    assert.deepEqual(seen, [['schedule-first', 'hub'], ['schedule-staged', 'hub'], ['schedule-new', 'hub'], ['schedule-new-2', 'hub']]);
+  } finally { hub.tasks = actual; }
+});
+
 check('建会话时就把审批策略写成 never：提权入口从工具面上拆掉（m84994）', () => {
   // 旧做法是"等宿主问到我们、再答一声拒绝"——真机 105 分钟的事故证明它兜不住：
   // 审批挂在宿主的链路上，答话只能等轮到。现在改成在建会话那一刻写 `approval/policy: never`，
@@ -1733,9 +1763,30 @@ check('onebot_media 取聊天记录：三个参数名都收，别让 agent 挨�
   assert.ok(/get_forward_msg/.test(desc) && /60s|60 秒/.test(desc), '说明里要写清合并转发的默认超时（实测 30s 会 1200 超时）');
 });
 
+check('按需二次元引导只在可用的纯直投模式下注入', () => {
+  const guidance = (mode, extra = {}) => buildHubGuidance(resolveConfig({
+    vision: { mode }, anime: { backend: 'animetrace' }, ...extra,
+  }));
+  const on = guidance('segment');
+  assert.match(on, /二次元识别按需用/);
+  assert.match(on, /onebot_media.*messageId.*describe: false.*anime: true/);
+  assert.match(on, /公共识别可能上传图片/);
+  for (const mode of ['describe', 'both', 'off']) assert.doesNotMatch(guidance(mode), /二次元识别按需用/);
+  for (const extra of [{ anime: { backend: 'off' } }, { anime: { backend: 'anime-recognize' } },
+    { persist: false }, { media: { enabled: false } }, { media: { keepBytes: false } }]) {
+    assert.doesNotMatch(guidance('segment', extra), /二次元识别按需用/);
+  }
+  assert.match(guidance('segment', { anime: { backend: 'anime-recognize', recognizeUrl: 'http://127.0.0.1:8899' } }), /二次元识别按需用/);
+});
+
 // ---- 异步项：真执行工具（走真 mind / store / timeline） ----
 async function runAsyncChecks() {
   const toolOf = (n) => hubTools().find((t) => t.name === n);
+  const byScope = new Map();
+  const boundTool = (sessionKey, name) => {
+    if (!byScope.has(sessionKey)) byScope.set(sessionKey, probeHub(hub, { sessionKey }).agentTools);
+    return byScope.get(sessionKey).find((t) => t.name === name);
+  };
 
   await checkAsync('唤醒一次 agent：setup 走通 installModelSelection（假 agentCtx）', async () => {
     const reply = { candidate: null, capture() { return null; }, take() { return null; }, clear() {} };
@@ -1784,6 +1835,42 @@ async function runAsyncChecks() {
     assert.equal(archived.stopActivity, true, '归档时要让宿主停掉它的活动（stopActivity）');
     assert.equal(hub.pool.host.lastRetire?.archived, true);
     assert.equal(hub.pool.host.lastTitle?.ok, true);
+  });
+
+  await checkAsync('重启恢复任务时等 agents 就绪，并用盘上的总机 id 建会话', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doh-task-boot-'));
+    const fresh = makeCtx();
+    const sessionId = 'onebot-hub:tasks.r2';
+    try {
+      fs.writeFileSync(path.join(dir, 'tasks'), JSON.stringify({ v: 1, sessionId, tasks: [
+        { id: 'tsk_boot', scheduleId: 'schedule-boot', active: true, when: 'every:600', target: 'group:55555' },
+      ] }));
+      const live = apply(fresh.ctx, {
+        upstreamUrl: '', upstreamSelfId: '30001000', downstreamTargets: '[]',
+        storageDir: dir, retention: { days: 0 },
+      });
+      const hasSwitchboard = () => live.pool.list().some(({ agentKey }) => agentKey === 'task:hub');
+      for (let i = 0; i < 100 && !hasSwitchboard(); i += 1) await sleep(10);
+      assert.deepEqual(fresh.recorded.created.map((one) => one.sessionId), [sessionId]);
+      assert.equal(live.pool.host.sessionIdOf('task:hub'), sessionId);
+      assert.ok(hasSwitchboard());
+      assert.deepEqual(fresh.recorded.followups, [], '恢复总机不应该发送消息或跑模型轮');
+    } finally {
+      for (const { dispose } of fresh.recorded.effects.reverse()) dispose?.();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await checkAsync('总机会话轮换按旧 id 归档，不清掉新绑定', async () => {
+    const host = hub.pool.host;
+    const key = 'task:hub';
+    const oldId = 'onebot-hub:tasks-old';
+    const newId = 'onebot-hub:tasks-new';
+    host.pinSessionId(key, newId);
+    const retired = await host.retireSessionId(oldId);
+    assert.equal(retired.archived, true);
+    assert.deepEqual(recorded.archives.at(-1), { sessionId: oldId, stopActivity: true });
+    assert.equal(host.sessionIdOf(key), newId);
   });
 
   await checkAsync('会话归属（issue #1）：两个开关默认都不动，配了才挂工作区 / 才不归档', async () => {
@@ -2297,7 +2384,7 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.ok(Array.isArray(value.unsupported));
     assert.equal(typeof value.gates, 'object');
     assert.equal(typeof value.cache.hits, 'number');
-    assert.equal(value.reminders.windowHours, 24, 'M18 的防骚扰窗口默认 24 小时');
+    assert.equal(value.reminders, undefined, '独立承诺提醒不再运行');
     assert.equal(value.media.enabled, true, 'M14 的媒体落地默认开着');
     assert.equal(value.media.cached, 0);
     assert.equal(value.media.attachments, false, '没接宿主 attachments 时如实说没有');
@@ -2411,6 +2498,57 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     }
   });
 
+  await checkAsync('直投工具：按同群图片消息 ID 识番、不触发描述，图片等待不能读另一个群', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'onebot-anime-segment-'));
+    const png = path.join(dir, 'want.png');
+    const sample = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001', 'hex');
+    fs.writeFileSync(png, sample);
+    const saved = { media: hub.media, vision: hub.vision, anime: hub.anime };
+    const prevMode = hub.config.vision.mode;
+    const visionPending = Promise.withResolvers();
+    let calls = 0;
+    try {
+      hub.config.vision.mode = 'segment';
+      hub.media = { enabled: true, stats: {}, async resolve(seg, opts) {
+        assert.equal(seg.type, 'image');
+        assert.equal(seg.data.file, 'fixture.png');
+        assert.equal(opts.sessionKey, 'group:55555');
+        return { kind: 'image', id: 'hub-media:fixture', index: opts.index, blob: png, mediaType: 'image/png' };
+      } };
+      hub.vision = { describeEnabled: false, async describeImage() { assert.fail('纯直投不能调描述模型'); } };
+      hub.anime = { enabled: true, async recognize({ bytes }) {
+        calls += 1;
+        assert.deepEqual(bytes, sample);
+        return { text: '角色 A', source: 'fixture' };
+      } };
+      for (const [message_id, group_id] of [[48801, 55555], [48802, 66666]]) {
+        hub.timeline.record({ direction: 'upstream-in', linkId: 'fixture', event: {
+          post_type: 'message', message_type: 'group', message_id, group_id, user_id: 10001,
+          message: '有图[CQ:image,file=fixture.png]',
+        } });
+        hub.trackVision('group:' + group_id, message_id, visionPending.promise);
+      }
+      const tools = probeHub(hub, { sessionKey: 'group:55555' }).agentTools;
+      const media = tools.find((tool) => tool.name === 'onebot_media');
+      assert.equal(media.parameters.anime.type, 'boolean');
+      assert.equal(toolOf('onebot_media').parameters.anime, undefined, '其它模式不新增识别提示');
+      const request = { messageId: '48801', type: 'image', describe: false };
+      assert.equal(JSON.parse(await media.execute(request)).descriptions, null);
+      assert.equal(calls, 0, '只取媒体不调用二次元后端');
+      const read = await media.execute({ ...request, anime: true });
+      assert.equal(JSON.parse(read).descriptions[0].anime, '角色 A');
+      await assert.rejects(() => media.execute({ ...request, messageId: '48802', anime: true }));
+      assert.equal(calls, 1);
+      const wait = tools.find((tool) => tool.name === 'onebot_image_wait');
+      await assert.rejects(() => wait.execute({ sessionKey: 'group:66666', timeoutMs: 5 }));
+    } finally {
+      visionPending.resolve();
+      hub.config.vision.mode = prevMode;
+      Object.assign(hub, saved);
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   await checkAsync('onebot_media：link 落地也走 describe:true（之前只有按消息 id 那条路会看图）', async () => {
     const png = path.join(os.tmpdir(), `hub-ig-describe-${Date.now()}.png`);
     fs.writeFileSync(png, Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6300010000050001', 'hex'));
@@ -2462,21 +2600,20 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   });
 
   await checkAsync('onebot_memory：写入落库、modify 优先于 add、可见性由代码判定', async () => {
-    const t = toolOf('onebot_memory');
+    const t = boundTool('group:55555', 'onebot_memory');
     const ctxArg = { sessionKey: 'group:55555', actorId: '10001' };
 
-    // 活跃层（`m17909`）：短期记忆的职能搬到这里，写入只认当前会话。
-    const r1 = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { add: [{ kind: 'topic', text: '在讨论喝什么' }] } } }));
-    assert.equal(r1.applied.active.add, 1, JSON.stringify(r1));
-    assert.equal(hub.active.all().length, 1);
-    const activeRec = hub.active.all()[0];
-    assert.equal(activeRec.originScope, 'group:55555', '来源会话必须落盘，跨会话可见性靠它算');
-    assert.equal(activeRec.status, 'open');
-
-    // `short_term.add` 退役：不是静默忽略，而是明说"用 active"。
-    const retired = JSON.parse(await t.execute({ ...ctxArg, ops: { short_term: { add: [{ text: '他喜欢喝美式' }] } } }));
-    assert.equal(retired.applied.short_term.add, 0);
-    assert.ok(retired.rejected.some((x) => /active/.test(x.reason) && /短期记忆已改为/.test(x.reason)), JSON.stringify(retired.rejected));
+    const retired = JSON.parse(await t.execute({ ...ctxArg, ops: {
+      active: { add: [{ kind: 'task', text: '不要写入的旧待办' }] },
+      short_term: { add: ['不要写入的旧短记忆'] },
+      persons: { 10001: { commitments: [{ what: '不要写入的旧承诺' }] } },
+      self: { myStatements: ['不要写入的旧自述'] },
+    } }));
+    assert.equal(retired.applied.active.add, 0);
+    assert.equal(hub.active.all().length, 0);
+    for (const path of ['active', 'short_term.add', 'commitments', 'myStatements']) {
+      assert.ok(retired.notes.some((line) => line.includes(path)), JSON.stringify(retired));
+    }
 
     // 模型自己声明可见性 → 记一条 rejection，但**仍按代码推断落盘**（硬边界，不是报错退出）。
     const r2 = JSON.parse(
@@ -2487,83 +2624,25 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     const stored = hub.store.all().find((e) => e.text === '他今天心情不好');
     assert.equal(stored.visibility, 'group:55555', '模型给的 private 不该被采纳，代码按"点了名"收敛回本群');
 
-    // 活跃层的 update 按"看得见的那份列表"的序号走；同批 add 不会让序号错位。
-    const r3 = JSON.parse(
-      await t.execute({ ...ctxArg, ops: { active: { update: [{ index: 0, text: '在讨论买哪款咖啡机' }], add: [{ kind: 'task', text: '正在整理型号对比' }] } } }),
-    );
-    assert.equal(r3.applied.active.update, 1, JSON.stringify(r3));
-    assert.equal(r3.applied.active.add, 1);
-    assert.ok(hub.active.all().some((e) => e.text === '在讨论买哪款咖啡机'));
-    assert.ok(hub.active.all().some((e) => e.kind === 'task'));
-
-    // 越界序号不静默：报"当前 N 条"让人照着改。
-    const r4 = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { update: [{ index: 99, text: 'x' }] } } }));
-    assert.ok(r4.rejected.some((x) => /序号越界/.test(x.reason)));
-
-    // 非法的 kind：拒掉**而且不落盘**（不能一边说"只认 topic/task"，一边按 topic 存进去）。
-    const rBadKind = JSON.parse(await t.execute({ ...ctxArg, ops: { active: { add: [{ kind: 'note', text: '不合法的类目' }] } } }));
-    assert.equal(rBadKind.applied.active.add, 0, JSON.stringify(rBadKind));
-    assert.ok(rBadKind.rejected.some((x) => /只认/.test(x.reason)), JSON.stringify(rBadKind.rejected));
-    assert.ok(!hub.active.all().some((e) => e.text === '不合法的类目'), '非法的 kind 不能落盘');
-
-    // 活跃层只准写当前会话：模型不能替别的群开话题。
-    const prevKey = hub.mind.activeSessionKey;
-    hub.mind.activeSessionKey = 'group:55555';
-    const rOther = JSON.parse(
-      await t.execute({ sessionKey: 'group:66666', actorId: '10001', ops: { active: { add: [{ kind: 'topic', text: '替别的群开的' }] } } }),
-    );
-    hub.mind.activeSessionKey = prevKey;
-    assert.equal(rOther.applied.active.add, 0, JSON.stringify(rOther));
-    assert.ok(rOther.rejected.some((x) => /不能替别的会话写/.test(x.reason)), JSON.stringify(rOther.rejected));
-    assert.ok(!hub.active.all().some((e) => e.text === '替别的群开的'), '不能替别的会话写活跃条目');
-
-    // 结算（`m17909`）：keep 必须给 summary——那一行才是"以后还记得发生过这件事"的唯一证据；
-    // 细节按 keep_as 落档案（这里落到话题归档）。结算完这条就从活跃层消失。
-    const rk = JSON.parse(
-      await t.execute({
-        ...ctxArg,
-        ops: {
-          active: {
-            settle: [
-              { index: 0, outcome: 'keep', summary: '群里最后定了磨豆机买哪款', keep_as: { target: 'topic', title: '咖啡机选购', conclusion: '选了磨豆机 A' } },
-            ],
-          },
-        },
-      }),
-    );
-    assert.equal(rk.applied.active.settle.keep, 1, JSON.stringify(rk));
-    const indexLine = hub.store.all().find((e) => e.text === '群里最后定了磨豆机买哪款');
-    assert.ok(indexLine, 'keep 必须写一行长期记忆索引');
-    assert.equal(indexLine.term, 'long');
-    // 档案指针（`m20216`）：索引行只给一句话，模型得知道细节在哪儿。话题归档的 id 是模型给的
-    // 标题（`咖啡机选购`），指针就指它——没有这一条，模型只记得"发生过"，查不到详情。
-    assert.deepEqual(indexLine.archive, [{ target: 'topic', id: '咖啡机选购' }], JSON.stringify(indexLine));
-    assert.ok(
-      hub.mind.snapshot('group:55555', { actorId: '10001', audit: false }).blocks.longTerm.some((e) => Array.isArray(e.archive) && e.archive.length),
-      '长期块里的条目要带着指针（渲染层靠它出〔详见 …〕）',
-    );
-    // 回执里也要带一份最新的长期记忆序号表（`m20216`）：长期块的号同样会漂，
-    // 只回活跃层不够——模型照样会照着旧号 `long_term.modify`。
-    assert.ok(Array.isArray(rk.long_term_list), '回执里要有长期记忆的最新序号表');
-    assert.ok(rk.long_term_list.every((x, i) => x.index === i), '长期记忆序号也要连着编');
-    assert.ok(
-      rk.long_term_list.some((x) => x.text === '群里最后定了磨豆机买哪款'),
-      '刚写进去的那一行要在表里',
-    );
-    assert.ok(!hub.active.all().some((e) => e.text === '在讨论买哪款咖啡机'), '结算后活跃层不留"已完成"条目');
-    assert.equal(hub.profiles.topic('咖啡机选购').status, 'closed');
-    // 回执带一份**最新序号**：结算掉一条，后面的号会前移，模型得知道现在几号对应哪一条。
-    assert.ok(Array.isArray(rk.active?.list), '回执里要有最新序号表');
-    assert.ok(rk.active.list.every((x, i) => x.index === i), '序号必须连着编');
-    assert.ok(!rk.active.list.some((x) => x.text === '在讨论买哪款咖啡机'), '结算掉的不该还在表里');
-
-    // drop 就是直接删，不留痕。
-    const dropIdx = hub.mind.snapshot('group:55555', { actorId: '10001', audit: false }).active;
-    const rd = JSON.parse(
-      await t.execute({ ...ctxArg, ops: { active: { settle: [{ index: 0, outcome: 'drop' }] } } }),
-    );
-    assert.equal(rd.applied.active.settle.drop, 1, JSON.stringify(rd));
-    assert.ok(!hub.active.all().some((e) => e.id === dropIdx.entries[0].id));
+    const draft = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: {
+      'coffee-choice': { title: '咖啡机选购', conclusion: '选了磨豆机 A', unresolved: ['取货时间待定'] },
+    } } }));
+    assert.equal(draft.applied.topics, 1);
+    assert.ok(draft.active.list.some((x) => x.id === 'coffee-choice'));
+    const rk = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: { 'coffee-choice': { status: 'closed' } } } }));
+    assert.equal(rk.applied.topics, 1);
+    assert.ok(!rk.active.list.some((x) => x.id === 'coffee-choice'));
+    assert.ok(rk.long_term_list.every((x) => x.id && !x.archive));
+    const settled = hub.profiles.topicCard('group:55555', 'coffee-choice');
+    assert.equal(settled.status, 'closed');
+    assert.equal(settled.conclusion, '选了磨豆机 A');
+    assert.deepEqual(settled.unresolved, ['取货时间待定']);
+    assert.equal(hub.store.all().filter((x) => /磨豆机/.test(x.text)).length, 0);
+    const update = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: { 'coffee-choice': { conclusion: '取货仍待定' } } } }));
+    assert.equal(update.applied.topics, 1);
+    assert.equal(hub.profiles.topicCard('group:55555', 'coffee-choice').status, 'closed');
+    const reopened = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: { 'coffee-choice': { status: 'open' } } } }));
+    assert.ok(reopened.active.list.some((x) => x.id === 'coffee-choice'));
 
     // 人物档案：facts 与 corrections 分开落，`impression` 更新。
     const r5 = JSON.parse(
@@ -2584,7 +2663,7 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     const person = hub.profiles.person('10001');
     assert.equal(person.facts.length, 1);
     assert.equal(person.corrections[0].right, '他其实已经工作了');
-    assert.match(person.impression, /技术问题问得准/);
+    assert.match(person.notesByScope['group:55555'].impression, /技术问题问得准/);
 
     // 群档案与话题：模型只能写"提炼"字段（群名/人数/群主是观测所得，不给模型改）。
     const r6 = JSON.parse(
@@ -2592,8 +2671,8 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
         ...ctxArg,
         ops: {
           // `highlights` 在 `m17909` 删掉了：写它现在会被当成未知字段拒绝。
-          groups: { 'group:55555': { culture: '爱聊硬件，不喜欢刷屏', memberCount: 999, highlights: [{ text: '上次抽奖取消了' }] } },
-          topics: { '散热改装': { title: '散热改装', worldKeys: ['group:55555'], events: [{ text: '讨论到风扇型号' }] } },
+          groups: { 'group:55555': { style: '爱聊硬件，不喜欢刷屏', agreements: ['发大图先打个招呼'], memberCount: 999, highlights: [{ text: '上次抽奖取消了' }] } },
+          topics: { '散热改装': { title: '散热改装', aliases: ['换风扇'], events: [{ text: '讨论到风扇型号' }] } },
         },
       }),
     );
@@ -2602,7 +2681,10 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.ok(r6.rejected.some((x) => /memberCount/.test(x.path) && /未知字段/.test(x.reason)), JSON.stringify(r6.rejected));
     assert.ok(r6.rejected.some((x) => /highlights/.test(x.path) && /未知字段/.test(x.reason)), JSON.stringify(r6.rejected));
     const group = hub.profiles.group('group:55555');
-    assert.match(group.culture, /爱聊硬件/);
+    assert.match(group.style, /爱聊硬件/);
+    assert.deepEqual(group.agreements, ['发大图先打个招呼']);
+    const foreignGroup = JSON.parse(await t.execute({ ...ctxArg, ops: { groups: { 'group:66666': { style: '越界内容' } } } }));
+    assert.equal(foreignGroup.applied.groups, 0);
     assert.equal(group.memberCount, null, '人数是观测字段，模型写不进来');
     assert.equal(group.highlights, undefined, 'highlights 已删除，不该再落盘');
 
@@ -2621,15 +2703,80 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.equal(promotedRec.term, 'long');
   });
 
-  await checkAsync('onebot_topic：单条读得到，列表按最近活动倒序', async () => {
-    const one = JSON.parse(await toolOf('onebot_topic').execute({ id: '散热改装' }));
+  await checkAsync('onebot_topic：只认实际绑定，可看本会话详情与最近列表', async () => {
+    const local = boundTool('group:55555', 'onebot_topic');
+    const one = JSON.parse(await local.execute({ id: '散热改装' }));
     assert.equal(one.title, '散热改装');
     assert.equal(one.status, 'open');
-    assert.equal(one.events[0].text, '讨论到风扇型号');
-    const list = JSON.parse(await toolOf('onebot_topic').execute({}));
+    assert.equal(one.scope, 'group:55555');
+    assert.deepEqual(one.stages.flatMap((stage) => stage.notes ?? []), ['讨论到风扇型号']);
+    const list = JSON.parse(await local.execute({}));
     assert.ok(list.items.some((x) => x.id === '散热改装'));
-    assert.equal(list.items.find((x) => x.id === '散热改装').events, 1);
-    await assert.rejects(() => toolOf('onebot_topic').execute({ id: '没这个话题' }), /没有「没这个话题」这个话题/);
+    assert.deepEqual(list.items.find((x) => x.id === '散热改装').aliases, ['换风扇']);
+    await assert.rejects(() => local.execute({ id: '没这个话题' }), /没有「没这个话题」这个话题/);
+    await assert.rejects(() => toolOf('onebot_topic').execute({ id: '散热改装' }), /已绑定/);
+    const elsewhere = boundTool('group:66666', 'onebot_topic');
+    await assert.rejects(() => elsewhere.execute({ id: '散热改装', sessionKey: 'group:55555' }), /没有「散热改装」这个话题/);
+    const forged = JSON.parse(await boundTool('group:66666', 'onebot_memory').execute({
+      sessionKey: 'group:55555', ops: { topics: { 散热改装: { conclusion: '这条不该写入' } } },
+    }));
+    assert.equal(forged.applied.topics, 0);
+    assert.ok(forged.rejected.length);
+    assert.notEqual(JSON.parse(await local.execute({ id: '散热改装' })).conclusion, '这条不该写入');
+  });
+
+  await checkAsync('onebot_topic：保存原文独立于保留期，详情只见附件，其他会话不可读', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'doh-transcript-tool-'));
+    let runtime;
+    try {
+      const mount = () => {
+        runtime = makeCtx();
+        return apply(runtime.ctx, { upstreamUrl: '', upstreamSelfId: '30001000', downstreamTargets: '[]',
+          storageDir: dir, retention: { days: 1 }, agent: { mode: 'off' } });
+      };
+      const close = () => {
+        for (const { dispose } of runtime.recorded.effects.reverse()) dispose?.();
+        runtime = null;
+      };
+      const home = 'group:55555';
+      const other = 'group:66666';
+      const topic = 'arrival';
+      const find = (live, sessionKey) => probeHub(live, { sessionKey }).agentTools.find((tool) => tool.name === 'onebot_topic');
+      const frame = (group_id, line) => ({ post_type: 'message', message_type: 'group', group_id, user_id: 10001, self_id: 30001000,
+        message_id: 55, message: [{ type: 'text', data: { text: line } }] });
+      let live = mount();
+      for (const scope of [home, other]) live.profiles.upsertScopedTopic(scope, topic, { title: '到达签到' }, Date.now(), { allowUncited: true });
+      const oldTs = Date.now() - 12 * 3600000;
+      const add = (groupId, ref, text) => {
+        const groupKey = 'group:' + groupId;
+        const payload = frame(groupId, text);
+        live.recall.append({ id: ref, ts: oldTs, direction: 'upstream-in', kind: 'group_message', sessionKey: groupKey,
+          refs: { message_id: 55 }, actor: { user_id: 10001 }, payload, text });
+      };
+      add(55555, 't_transcript_home', '  附件逐字原文\n保留空格  ');
+      add(66666, 't_transcript_other', '另一群私有内容');
+      const here = find(live, home);
+      assert.equal(JSON.parse(await here.execute({ op: 'save_transcript', id: topic, refs: ['t_transcript_other'] })).ok, false);
+      const saved = JSON.parse(await here.execute({ op: 'save_transcript', id: topic, refs: ['t_transcript_home'] }));
+      assert.equal(saved.ok, true, JSON.stringify(saved));
+      const get = { op: 'read_transcript', id: topic, attachment: saved.attachment.id };
+      const foreign = find(live, other);
+      assert.equal(JSON.parse(await foreign.execute({ ...get, sessionKey: home })).ok, false);
+      const detail = await here.execute({ id: topic });
+      assert.ok(detail.includes(saved.attachment.id));
+      assert.doesNotMatch(detail, /附件逐字原文|另一群私有内容/);
+      assert.ok((await live.recall.prune({ days: 0.25 })).removedRows > 0);
+      close();
+      live = mount();
+      const again = find(live, home);
+      assert.equal(JSON.parse(await again.execute(get)).items[0].text, '  附件逐字原文\n保留空格  ');
+      assert.doesNotMatch(live.mind.snapshot(home).text, /附件逐字原文/);
+      assert.equal(JSON.parse(await again.execute({ ...get, op: 'delete_transcript' })).ok, true);
+      assert.equal(JSON.parse(await again.execute(get)).ok, false);
+    } finally {
+      if (runtime) for (const { dispose } of runtime.recorded.effects.reverse()) dispose?.();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   await checkAsync('onebot_person / onebot_sessions 读得到档案，且按隔离过滤', async () => {
@@ -2647,8 +2794,10 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.deepEqual(person.corrections.map((c) => c.right), ['他其实已经工作了']);
 
     // 换个群看同一个人：`scoped` 级别下这一条事实不该出现（可见性由代码判定，不是模型声明）。
-    const elsewhere = JSON.parse(await toolOf('onebot_person').execute({ userId: '10001', sessionKey: 'group:66666' }));
+    const elsewhere = JSON.parse(await toolOf('onebot_person').execute({ userId: '10001', sessionKey: 'group:66666', raw: true }));
     assert.deepEqual(elsewhere.facts.map((f) => f.text), []);
+    assert.deepEqual(elsewhere.corrections, []);
+    assert.equal(elsewhere.impression, null);
     assert.equal(elsewhere.denied >= 1, true, '被挡下的条数必须报出来，而不是静默变空');
 
     const list = JSON.parse(await toolOf('onebot_sessions').execute({}));
@@ -3532,6 +3681,64 @@ if (agentSetupErrored) {
 }
 
 await runAsyncChecks();
+
+// 热重载保留宿主的 route table，只替换插件 fiber。每次 apply 用新的 ctx，服务仍是同一个。
+function makeReloadHost() {
+  const routes = new Map();
+  const webServer = {
+    register(route) {
+      const key = `${route.kind}:${route.path}`;
+      if (routes.has(key)) throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`);
+      routes.set(key, route.handler);
+      return () => routes.delete(key);
+    },
+  };
+  const load = (verify) => {
+    const { ctx: nextCtx, recorded: next } = makeCtx();
+    nextCtx.webServer = webServer;
+    try {
+      apply(nextCtx, {
+        persist: false, upstreamUrl: '', upstreamSelfId: '30001000', upstreamNickname: 'test',
+        downstreamTargets: '[]', agent: { enabled: false },
+      });
+      assert.ok(next.effects.some(({ label }) => label === 'dsh-onebot-hub: links'), '必须走到上、下游启动');
+      verify();
+    } finally {
+      for (const { dispose } of next.effects.reverse()) dispose?.();
+    }
+  };
+  return { routes, webServer, load };
+}
+
+check('同一宿主连续重载：每次卸载都注销全部路由，运维 handler 不复用旧实例', () => {
+  const { routes, load } = makeReloadHost();
+  let previous;
+  for (let i = 0; i < 3; i += 1) {
+    load(() => {
+      assert.equal(routes.size, 7);
+      const current = routes.get(`exact:${OPS_PATH}`);
+      assert.equal(typeof current, 'function');
+      assert.notEqual(current, previous);
+      previous = current;
+    });
+    assert.deepEqual([...routes.keys()], [], '卸载后不应再有旧路由');
+  }
+});
+
+check('运维路由注册冲突只关闭面板，不挡消息链路，也不注销已有路由', () => {
+  const { routes, webServer, load } = makeReloadHost();
+  const existing = () => {};
+  const disposeExisting = webServer.register({ kind: 'exact', path: OPS_PATH, handler: existing });
+  try {
+    load(() => assert.equal(routes.get(`exact:${OPS_PATH}`), existing));
+    assert.deepEqual([...routes.keys()], [`exact:${OPS_PATH}`]);
+  } finally {
+    disposeExisting();
+  }
+  load(() => assert.notEqual(routes.get(`exact:${OPS_PATH}`), existing));
+  assert.equal(routes.size, 0);
+});
+
 await sleep(10);
 const failed = results.filter((r) => !r.ok);
 for (const r of results) {

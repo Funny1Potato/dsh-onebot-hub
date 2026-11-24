@@ -55,6 +55,8 @@ async function makeWorld() {
   profiles.noteGroupCard('20002', 'private:222', { card: '小张' });
   profiles.upsertGroup('group:111', { name: '甲群', memberCount: 12 });
   profiles.upsertGroup('private:222', { name: '小张私聊' });
+  profiles.upsertScopedTopic('group:111', 'renovation', { title: '甲群在聊装修', evidence: [{ scope: 'group:111', id: 't_a1', messageId: '1', ts: now, text: '甲群的话' }] });
+  profiles.upsertScopedTopic('private:222', 'renovation', { title: '私聊话题不外流', evidence: [{ scope: 'private:222', id: 't_b1', messageId: '1', ts: now, text: '私聊的话' }] });
 
   const removedTasks = [];
   const taskCalls = [];
@@ -93,6 +95,7 @@ t('盘点：五处各数各的，另一个会话的不算进来', async () => {
   assert.equal(inv.tasks, 1, '任务一条');
   assert.equal(inv.persons, 1, '人物档案里有一格');
   assert.equal(inv.group, 1, '群档案在');
+  assert.equal(inv.topics, 1, '只计所选会话的话题');
   const other = await ops.inventory('private:222');
   assert.equal(other.recall, 1);
   assert.equal(other.memory, 1);
@@ -126,6 +129,10 @@ t('导出：一份包落在 exports/ 里，条数逐项对得上，且不写 bas
   assert.equal(bundle.counts.tasks, 1);
   assert.equal(bundle.profiles.persons.length, 1);
   assert.equal(bundle.profiles.group.name, '甲群');
+  assert.equal(bundle.counts.topics, 1);
+  assert.equal(bundle.profiles.topics[0].title, '甲群在聊装修');
+  assert.equal(bundle.profiles.topics[0].pendingEvidence[0].excerpt, '甲群的话');
+  assert.doesNotMatch(JSON.stringify(bundle.profiles.topics), /私聊话题不外流|私聊的话/);
   assert.equal(JSON.stringify(bundle).includes(PNG.toString('base64').slice(0, 40)), false, '包里不该塞整张图的 base64');
   w.recall.close();
   fs.rmSync(w.dir, { recursive: true, force: true });

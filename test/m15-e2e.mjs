@@ -23,8 +23,10 @@ import { makeReplyTool } from '../lib/index.js';
 import { AgentPool } from '../lib/agent/pool.js';
 import { resolveAgentPolicy, shouldWake } from '../lib/agent/policy.js';
 import { MemoryStore } from '../lib/memory/store.js';
+import { ActiveStore } from '../lib/memory/active.js';
 import { IsolationAudit, describeIsolation, resolveIsolation } from '../lib/memory/isolation.js';
 import { applyMemoryOps } from '../lib/memory/writer.js';
+import { resolveTopicEvidence } from '../lib/memory/topic-input.js';
 import { PersonaStore } from '../lib/persona/store.js';
 import { MemeStore } from '../lib/memes/store.js';
 import { ChatCommands } from '../lib/chat-commands.js';
@@ -356,7 +358,7 @@ async function scenarioReply() {
    */
   const rosterAt = Date.now();
   hub.profiles.noteGroupCard('10002', 'group:55555', { card: '老张', lastSentAt: rosterAt - 1000 }, rosterAt);
-  hub.profiles.upsertPerson('10002', { impression: '话不多但靠谱', facts: [{ text: '做后端，爱问细节' }] }, rosterAt);
+  hub.profiles.upsertPerson('10002', { localNotes: { scope: 'group:55555', impression: '话不多但靠谱' }, facts: [{ scope: 'group:55555', text: '做后端，爱问细节' }] }, rosterAt);
   hub.profiles.noteGroupCard('20002', 'group:77777', { card: '张工' }, rosterAt);
   mind.invalidateLiveContext('group:55555');
   const withRoster = mind.liveContext('group:55555');
@@ -2866,6 +2868,13 @@ async function scenarioProfiles() {
     assert.equal(hub.profiles.person('10010').groups['group:55555'].card, '话痨本人', '成员表里的名片也该记进人物档案');
   });
 
+  check('成功返回空公告列表会清掉旧公告', () => {
+    hub.observeActionResult('get_group_notice', { group_id: 55555 }, null);
+    assert.equal(hub.profiles.group('group:55555').notice, '禁止刷屏');
+    hub.observeActionResult('get_group_notice', { group_id: 55555 }, []);
+    assert.equal(hub.profiles.group('group:55555').notice, null);
+  });
+
   // 2) 模型决策写记忆（短期/长期/人物档案各一条）。
   const writeCtx = (sessionKey) => ({
     store,
@@ -2903,7 +2912,7 @@ async function scenarioProfiles() {
     // `m20892`：每行都带出处与日期。原来只有正文，模型分不清"这是哪个群的事、什么时候的事"。
     assert.match(
       snap.text,
-      /0\. \[群 55555\] 他说过在写机器人（\d{4}-\d{2}-\d{2}）/,
+      /0\. 〔m[^〕]+〕\[群 55555\] 他说过在写机器人（\d{4}-\d{2}-\d{2}）/,
       '序号要从 0 开始，且行首带出处、行尾带日期',
     );
     assert.equal(snap.blocks.shortTerm.length, 1);
@@ -2952,7 +2961,10 @@ async function scenarioProfiles() {
   });
 
   // 2.5) 话题关联（§24.4）：**"在聊同一件事"是语义判断，代码不做**；代码只接明写的引用关系。
-  hub.profiles.upsertTopic('t_bug', { title: '那个 bug', refs: [{ messageId: '11' }], members: ['10001'] }, Date.now());
+  const firstBug = hub.timeline.bySession('group:55555').find((e) => String(e.refs?.message_id) === '11');
+  hub.profiles.upsertScopedTopic('group:55555', 't_bug', { title: '那个 bug', evidence: [{
+    scope: 'group:55555', id: firstBug.id, messageId: '11', ts: firstBug.ts, text: '在吗', actorId: '10001',
+  }] });
   hub.handleUpstreamEvent(
     groupMessage({
       groupId: 55555,
@@ -2967,15 +2979,15 @@ async function scenarioProfiles() {
     }),
   );
   check('M16 话题关联：引用了话题里的消息就接进同一条线，不猜关键词', () => {
-    const t = hub.profiles.topic('t_bug');
-    assert.equal(t.events.length, 1, '新消息的时间线 id 应被接进去');
+    const t = hub.profiles.topicCard('group:55555', 't_bug');
+    assert.deepEqual(t.refs.map((r) => r.messageId), ['11', '12']);
     assert.ok(t.members.includes('10009'), '说话人补进 members');
     assert.equal(t.title, '那个 bug', '接进来不能把已有内容冲掉');
   });
 
   check('M16 话题关联：只是"话题像"不算证据（宁可没记住，也不记错）', () => {
     hub.handleUpstreamEvent(groupMessage({ groupId: 55555, userId: 10009, messageId: 13, text: '还是那个 bug 啊' }));
-    assert.equal(hub.profiles.topic('t_bug').events.length, 1, '没引用就没证据，不接');
+    assert.deepEqual(hub.profiles.topicCard('group:55555', 't_bug').refs.map((r) => r.messageId), ['11', '12'], '不把词面相似当成证据');
   });
 
   // 3) 落盘恢复：档案是文件，重启后还在（否则"我记得"就只是进程内存的幻觉）。
@@ -2986,7 +2998,7 @@ async function scenarioProfiles() {
     assert.ok(fs.existsSync(rawFile), `应写盘：${rawFile}`);
     const raw = JSON.parse(fs.readFileSync(rawFile, 'utf8'));
     assert.equal(raw.names[0].name, '小明');
-    assert.equal(hub2.profiles.person('10001').impression, '话不多，技术问题问得准');
+    assert.equal(hub2.profiles.person('10001').notesByScope['group:55555'].impression, '话不多，技术问题问得准');
     assert.equal(hub2.profiles.snapshot().enabled, true);
   });
 
@@ -3000,106 +3012,121 @@ async function scenarioProfiles() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
-// ------------------------------------------------------------------ 场景：M18 主动回忆
+async function scenarioTopicRecall() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-topic-restart-'));
+  const scope = 'group:55555';
+  const foreign = 'group:66666';
+  const active = [];
+  const send = (hub, groupId, messageId, text, quoteId) => hub.handleUpstreamEvent(groupMessage({
+    groupId, messageId, text, segments: quoteId == null ? undefined : [
+      { type: 'reply', data: { id: String(quoteId) } }, { type: 'text', data: { text } },
+    ],
+  }));
+  try {
+    const { hub: old } = makeHub({ storageDir: dir });
+    active.push(old);
+    send(old, 55555, 61000, '滨海活动原定周五');
+    const write = (patch) => applyMemoryOps({ topics: { trip: patch } }, {
+      profiles: old.profiles, sessionKey: scope, worldKey: scope, currentSessionKey: scope, topicSessionKey: scope,
+      topicEvidenceOf: (ids) => resolveTopicEvidence(old.timeline.bySession(scope, 200), scope, ids, SELF_ID),
+    });
+    const seeded = write({ title: '滨海活动', aliases: ['海边见面'], conclusion: '原来约在周五', evidenceIds: ['61000'], unresolved: ['集合地点待定'] });
+    check('话题卡由现有记忆写入工具保存，保留真实私域证据', () => assert.equal(seeded?.applied?.topics, 1, JSON.stringify(seeded)));
+    // No Mind is attached yet: the quote chain keeps advancing even when no model runs.
+    for (let n = 1; n <= 270; n++) send(old, 55555, 61000 + n, '沿引用补充细节', 60999 + n);
+    send(old, 55555, 62000, '同一个人插入毫不相关的话');
+    send(old, 66666, 63000, '另一个群碰巧引用同号', 61270);
+    const checkpoint = old.profiles.topicCard(scope, 'trip');
+    check('不唤醒也增量折叠；分段上限不使第 257 条引用链中断', () => {
+      assert.ok(checkpoint.checkpoint.folded > 200, JSON.stringify(checkpoint.checkpoint));
+      assert.ok(checkpoint.refs.some((r) => r.messageId === '61270'));
+      assert.ok(!checkpoint.refs.some((r) => ['62000', '63000'].includes(r.messageId)));
+    });
+    const corrected = write({ status: 'closed', conclusion: '最后定在周六', unresolved: ['集合地点待定'] });
+    check('改期更新同一个话题，旧结论留在历史阶段', () => {
+      assert.equal(corrected.applied.topics, 1);
+      const card = old.profiles.topicCard(scope, 'trip');
+      assert.equal(card.conclusion, '最后定在周六');
+      assert.ok(card.stages.some((stage) => stage.previousConclusion === '原来约在周五'));
+    });
+    old.stop();
+    active.pop();
+    const { hub } = makeHub({ storageDir: dir });
+    active.push(hub);
+    hub.profiles.upsertScopedTopic(scope, 'second', { title: '另一个打开的话题' }, Date.now(), { allowUncited: true });
+    const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 100, batchMs: 8000 });
+    const views = [];
+    const { host } = makeFakeHost({ script: async (agent) => {
+      const ctx = agent.prompts.find((p) => p.name === 'test:runtime-context');
+      views.push({ scope: agent.agentKey, prompt: ctx.text() });
+    } });
+    const pool = new AgentPool({ policy, host, log: () => {} });
+    const mind = new Mind({ hub, timeline: hub.timeline, store: new MemoryStore({}), policy, pool,
+      setup: (ctx, { sessionKey }) => ctx.systemPrompt.context({ name: 'test:runtime-context', order: 110, text: () => mind.liveContext(sessionKey) }),
+    });
+    hub.mind = mind;
+    hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+    send(hub, 55555, 71000, '海边见面后来改到什么时候？');
+    const first = await mind.flush(scope, { reason: 'test:manual' });
+    check('重启后的第一个模型回合：别名直接找回最新结论和未决事项', () => {
+      assert.equal(first.woke, true, JSON.stringify(first));
+      assert.match(views[0].prompt, /同会话话题回忆/);
+      assert.match(views[0].prompt, /最后定在周六[\s\S]*集合地点待定/);
+      assert.doesNotMatch(views[0].prompt, /原来约在周五|沿引用补充细节/);
+      assert.ok(!hub.profiles.topicCard(scope, 'trip').refs.some((r) => r.messageId === '71000'), '别名回忆不自动归档');
+    });
+    send(hub, 66666, 72000, '海边见面后来改到什么时候？', 61270);
+    await mind.flush(foreign, { reason: 'test:manual' });
+    check('同样的别名和引用号在其它群不会找回原群话题', () => {
+      const view = views.find((x) => x.scope === foreign);
+      assert.ok(view);
+      assert.doesNotMatch(view.prompt, /同会话话题回忆|最后定在周六|集合地点待定/);
+    });
+    hub.profiles.upsertScopedTopic(scope, 'trip', { status: 'open' }, Date.now(), { allowUncited: true });
+    send(hub, 55555, 71001, '海边见面什么时候？');
+    await mind.flush(scope, { reason: 'test:manual' });
+    check('已匹配的打开话题不重复列；其他未结话题仍在本会话', () => {
+      const { prompt } = views.filter((x) => x.scope === scope).at(-1);
+      assert.match(prompt, /同会话话题回忆/);
+      assert.match(prompt, /进行中的话题[\s\S]*另一个打开的话题/);
+      assert.doesNotMatch(prompt, /^- 〔trip〕滨海活动$/m);
+    });
+    send(hub, 55555, 71002, '还想聊另一件不相干的事');
+    await mind.flush(scope, { reason: 'test:manual' });
+    check('最后一个无关批次不会重复注入上轮的话题回忆', () => {
+      const view = views.filter((x) => x.scope === scope).at(-1);
+      assert.doesNotMatch(view.prompt, /同会话话题回忆|最后定在周六/);
+      assert.match(view.prompt, /- 〔trip〕滨海活动/);
+    });
+  } finally {
+    for (const hub of active) hub.stop();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
 
-async function scenarioReminders() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-cues-'));
+async function scenarioLegacyMemoryRetired() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hub-old-memory-'));
   const { hub } = makeHub({ storageDir: dir });
-  const isolation = resolveIsolation({ level: 'scoped' });
-  const store = new MemoryStore({});
-  const mind = new Mind({ hub, timeline: hub.timeline, store, isolation, policy: resolveAgentPolicy({}), log: () => {} });
-  hub.reminders.clear();
-
-  // 小明在群里露过面（这样"他上次露面是什么时候"是有据可查的），模型随后记下一条还没兑现的承诺。
-  hub.handleUpstreamEvent(groupMessage({ groupId: 55555, userId: 10001, messageId: 21, text: '在', nickname: '小明' }));
-  const writeCtx = {
-    store,
-    profiles: hub.profiles,
-    sessionKey: 'group:55555',
-    worldKey: 'group:55555',
-    actorId: '10001',
-    isolation,
-    now: Date.now(),
-    source: 'test',
-  };
-  applyMemoryOps({ persons: { 10001: { commitments: [{ what: '帮他看一个 bug', due: Date.now() - 3 * 86400000 }] } } }, writeCtx);
-
-  const snap = mind.snapshot('group:55555', { actorId: '10001' });
-  check('M18 主动回忆：把"还没兑现的事"当事实交出去，不下命令', () => {
-    assert.equal(snap.cues.length, 1);
-    assert.match(snap.text, /【还没兑现的事】/);
-    assert.match(snap.text, /你答应过「小明」：帮他看一个 bug/);
-    assert.match(snap.text, /已经过了 3 天/);
-    assert.match(snap.text, /他上次露面是/);
-    assert.ok(!/(该提醒|必须提醒|现在就提|别忘了去)/.test(snap.text), '只报事实：措辞里不能有命令');
-    assert.ok(snap.sections.some((s) => s.name === 'cues' && s.chars > 0), '装配段里要有 cues 一段');
-  });
-
-  const key = snap.cues[0].key;
-  const t0 = Date.now();
-  hub.reminders.note(snap.cues, t0);
-  const again = mind.snapshot('group:55555', { actorId: '10001' });
-  check('M18 安全阀：同一条承诺 24 小时内不再进 prompt，24 小时后可以再来', () => {
-    assert.equal(again.cues.length, 0, '刚提过就不该原样再提一遍');
-    // 注意判据是 cues 段，不是整段文本：人物卡里"答应过还没做的"是**档案事实**（常驻、不冷却），
-    // 「还没兑现的事」才是带时间与冷却的提醒段。两者都出现不算重复注入。
-    assert.equal(again.sections.find((s) => s.name === 'cues')?.chars ?? 0, 0, '冷却期内 cues 段应为空');
-    assert.equal(hub.reminders.canAsk(key, t0 + 60_000), false);
-    assert.equal(hub.reminders.canAsk(key, t0 + 24 * 3600 * 1000), true);
-    assert.equal(hub.reminders.stats.windowHours, 24);
-  });
-
-  check('M18 隔离再生效一次：别的群/私聊里的承诺不会跑到这个群里', () => {
-    applyMemoryOps(
-      { persons: { 10002: { commitments: [{ what: '帮他带一份午饭' }] } } },
-      { ...writeCtx, sessionKey: 'private:10002', worldKey: 'private:10002', actorId: '10002' },
-    );
-    const inGroup = mind.snapshot('group:55555', { actorId: '10001' });
-    assert.ok(!inGroup.text.includes('带一份午饭'), '私聊里的承诺不该在群里出现');
-    const inPrivate = mind.snapshot('private:10002', { actorId: '10002' });
-    assert.ok(inPrivate.text.includes('带一份午饭'), '私聊视角下应当记得');
-  });
-
-  // 唤醒失败不算"提过"：否则一次宿主抖动就能让这条承诺沉默一整天。
-  hub.reminders.clear();
-  const failing = new Mind({
-    hub,
-    timeline: hub.timeline,
-    store: new MemoryStore({}),
-    isolation,
-    policy: resolveAgentPolicy({}),
-    pool: { wake: async () => ({ ok: false }) },
-    log: () => {},
-  });
-  const entry = hub.timeline.bySession('group:55555').at(-1);
-  failing.observe(entry);
-  const failedTurn = await failing.flush('group:55555', { actorId: '10001' });
-  check('M18 唤醒失败不算提过（不会因为一次抖动就沉默一整天）', () => {
-    assert.equal(failedTurn.result?.ok, false, '假宿主的 wake 回 ok:false');
-    assert.equal(failing.stats.lastTurn.ok, false);
-    assert.equal(hub.reminders.canAsk(key, Date.now()), true);
-    assert.equal(hub.reminders.stats.injected, 0);
-  });
-
-  // 落盘：冷却账本跟着 storage 走，重启后不会立刻再提一遍。
-  hub.reminders.note([{ key }], Date.now());
-  hub.flushStorage();
-  const { hub: hub2 } = makeHub({ storageDir: dir });
-  check('M18 冷却账本落盘：重启后仍然记得"这条刚提过"', () => {
-    assert.ok(fs.existsSync(path.join(dir, 'reminders.json')), '应写盘：reminders.json');
-    assert.equal(hub2.reminders.canAsk(key, Date.now()), false);
-    assert.equal(hub2.reminders.canAsk(key, Date.now() + 24 * 3600 * 1000), true);
-  });
-
-  check('M18 关掉安全阀（windowHours=0）就是"每次都提"，不是"永远不提"', () => {
-    const { hub: off } = makeHub({ storageDir: '', reminders: { enabled: false } });
-    off.reminders.note([{ key }], Date.now());
-    assert.equal(off.reminders.canAsk(key, Date.now() + 1000), true);
-    off.reminders.note([{ key }], Date.now());
-    assert.equal(off.reminders.canAsk(key, Date.now() + 1000), true);
-  });
-
-  fs.rmSync(dir, { recursive: true, force: true });
+  try {
+    const scope = 'group:55555';
+    hub.active = new ActiveStore({ storage: hub.storage });
+    hub.active.add({ kind: 'task', text: '旧待办不注入', originScope: scope });
+    hub.profiles.upsertPerson('10001', { commitments: [{ what: '旧承诺不注入', scope }] });
+    hub.profiles.upsertSelf({ myStatements: [{ what: '旧自述不注入' }] });
+    hub.profiles.upsertGroup(scope, { style: '正式一点', agreements: ['先读群公告'] });
+    const mind = new Mind({ hub, timeline: hub.timeline, store: new MemoryStore({}), policy: resolveAgentPolicy({}) });
+    check('旧待办与承诺不再注入或清盘；群约定只在本群快照', () => {
+      const local = mind.snapshot(scope, { actorId: '10001' }).text;
+      assert.doesNotMatch(local, /旧待办不注入|旧承诺不注入|旧自述不注入/);
+      assert.match(local, /先读群公告/);
+      assert.doesNotMatch(mind.snapshot(scope, { includeGroupNotes: false }).text, /先读群公告|正式一点/);
+      assert.equal(hub.active.all().length, 1);
+      assert.equal(hub.profiles.person('10001').commitments.length, 1);
+    });
+  } finally {
+    hub.stop();
+    fs.rmSync(dir, { force: true, recursive: true });
+  }
 }
 
 // ------------------------------------------------------------------ 场景：M17 聊天记录检索
@@ -4068,6 +4095,144 @@ async function scenarioMembers() {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+async function scenarioNativeVision() {
+  const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 99, batchMs: 600000 });
+  const { hub } = makeHub({ vision: { mode: 'segment', segmentWaitMs: 2000, waitBeforeTurnMs: 2000 } });
+  const scope = 'group:55555';
+  const pictures = (message) => message.content.filter((part) => part.type === 'image').map((part) => part.attachment.attachmentId);
+  const text = (message) => message.content.find((part) => part.type === 'text')?.text ?? '';
+  const idOf = (id) => 'sha256:' + String(id);
+  const put = (id, { picture = true } = {}) => hub.handleUpstreamEvent(groupMessage({
+    groupId: 55555, messageId: id, text: 'line ' + id,
+    segments: [{ type: 'text', data: { text: 'line ' + id } },
+      ...(picture ? [{ type: 'image', data: { file: 'fixture:' + id } }] : [])],
+  }));
+  const gates = new Map();
+  const gate = () => Promise.withResolvers();
+  const active = gate();
+  const entered = gate();
+  const description = gate();
+  const firstWait = gate();
+  const waits = [];
+  const originalMedia = hub.awaitMediaPending.bind(hub);
+  const originalDescription = hub.awaitVisionPending.bind(hub);
+  hub.awaitMediaPending = (options) => {
+    waits.push(['media', options]);
+    if (options.messageIds.includes('88005')) firstWait.resolve();
+    return originalMedia(options);
+  };
+  hub.awaitVisionPending = (options) => {
+    waits.push(['description', options]);
+    return originalDescription(options);
+  };
+  hub.media.resolveEvent = async (segments, { messageId }) => {
+    await gates.get(messageId)?.promise;
+    const index = segments.findIndex((s) => s.type === 'image');
+    if (index < 0) return { refs: new Map(), records: [] };
+    const ref = { kind: 'image', index, id: 'hub-media:' + messageId, mediaType: 'image/png', attachmentId: idOf(messageId) };
+    return { refs: new Map([[index, ref]]), records: [ref] };
+  };
+  const caps = [];
+  let route = { provider: 'chat', model: 'vision' };
+  hub.chatModelFor = () => route;
+  hub.vision.provider = 'descriptor';
+  hub.vision.model = 'text';
+  hub.vision.attach({ llm: { async resolveModelInfo(provider, model) {
+    caps.push([provider, model]);
+    return { inputModalities: model === 'vision' ? ['text', 'image'] : ['text'] };
+  } } });
+  hub.vision.describeImage = () => description.promise;
+  let animeCalls = 0;
+  hub.anime = { enabled: true, recognize: async () => { animeCalls += 1; return { text: 'fixture anime' }; } };
+  const { host, created } = makeFakeHost({ script: async (agent) => {
+    if (agent.lastInput?.kind === 'turn' && text(agent.lastInput.message).includes('line 88004')) {
+      entered.resolve();
+      await active.promise;
+    }
+  } });
+  const pool = new AgentPool({ policy, host, log: () => {} });
+  const mind = new Mind({ hub, timeline: hub.timeline, policy, pool, log: () => {} });
+  hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
+  const agent = () => created.get(scope);
+  put(88001); put(88002);
+  const first = await mind.flush(scope);
+  const opening = agent()?.followups.at(-1);
+  put(88003, { picture: false });
+  await mind.flush(scope);
+  const plain = agent()?.followups.at(-1);
+  check('直投：只发当前批附件，跨消息按顺序对齐，能力查聊天路由', () => {
+    assert.equal(first.woke, true);
+    assert.deepEqual(pictures(opening), [idOf(88001), idOf(88002)]);
+    assert.match(text(opening), /line 88001[^\n]*原图 1[^\n]*messageId=88001/);
+    assert.match(text(opening), /line 88002[^\n]*原图 2[^\n]*messageId=88002/);
+    assert.deepEqual(pictures(plain), []);
+    assert.deepEqual(caps, [['chat', 'vision']]);
+    assert.equal(animeCalls, 0, '纯直投不能自动触发角色识别');
+  });
+
+  put(88004, { picture: false });
+  const main = mind.flush(scope);
+  await entered.promise;
+  const held = gate();
+  gates.set(88005, held);
+  put(88005);
+  const injecting = mind.flush(scope);
+  await firstWait.promise;
+  put(88006, { picture: false });
+  assert.equal((await mind.flush(scope)).reason, 'steer:preparing');
+  held.resolve();
+  for (let i = 0; i < 20 && !agent()?.steered.length; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  const steered = agent()?.steered.at(-1);
+  // 让正在飞的第一步退出；否则 steer 的 whenIdle() 还不能收尾。
+  active.resolve();
+  await injecting;
+  await main;
+  await mind.flush(scope);
+  const remainder = agent()?.followups.at(-1);
+  check('直投：插话等附件不吞同期新消息，也不把原图再带进下一批', () => {
+    assert.deepEqual(pictures(steered), [idOf(88005)]);
+    assert.match(text(steered), /line 88005[^\n]*原图 1/);
+    assert.doesNotMatch(text(steered), /line 88006/);
+    assert.match(text(remainder), /line 88006/);
+    assert.deepEqual(pictures(remainder), []);
+  });
+
+  route = { provider: 'chat', model: 'text' };
+  put(88007);
+  await mind.flush(scope);
+  const degraded = agent()?.followups.at(-1);
+  check('直投：仅聊天模型明确不支持时才降级，并标明没有送图', () => {
+    assert.deepEqual(caps.at(-1), ['chat', 'text']);
+    assert.deepEqual(pictures(degraded), []);
+    assert.match(text(degraded), /line 88007[^\n]*当前聊天模型不支持图片输入/);
+  });
+
+  hub.vision.mode = 'both';
+  route = { provider: 'chat', model: 'vision' };
+  waits.length = 0;
+  const bothLanding = gate();
+  gates.set(88008, bothLanding);
+  put(88008);
+  const mixed = mind.flush(scope);
+  await new Promise((resolve) => setImmediate(resolve));
+  const startedTogether = waits.map(([kind, options]) => [kind, options.messageIds, options.timeoutMs]);
+  bothLanding.resolve();
+  const landed = await originalMedia({ key: scope, messageIds: ['88008'], timeoutMs: 100 });
+  const pending = hub.pendingVisionIds(scope);
+  description.resolve({ text: 'fixture description', anime: false });
+  await mixed;
+  const combined = agent()?.followups.at(-1);
+  check('混合看图：两个预算同时开始，附件就绪不等描述', () => {
+    assert.deepEqual(startedTogether, [['media', ['88008'], 2000], ['description', ['88008'], 2000]]);
+    assert.equal(landed.settled, 1);
+    assert.ok(pending.includes('88008'), '图已落地时描述仍未完成');
+    assert.deepEqual(pictures(combined), [idOf(88008)]);
+    assert.match(text(combined), /fixture description/);
+  });
+  await pool.disposeAll();
+  hub.stop();
+}
+
 async function scenarioVision() {
   // M14-V：图片有两种处理手段——① 交给看得见图的会话代理（内容段）；② 自己用视觉模型看一次，
   // 把描述写进 L1 文本（任何模型都读得到）。这一格验的是第②条真的落到了文本与会话卡上，
@@ -4858,7 +5023,8 @@ const main = async () => {
   await scenarioAdminGate();
   await scenarioCapabilityPersistence();
   await scenarioProfiles();
-  await scenarioReminders();
+  await scenarioTopicRecall();
+  await scenarioLegacyMemoryRetired();
   await scenarioRecall();
   await scenarioMedia();
   await scenarioTurns();
@@ -4866,6 +5032,7 @@ const main = async () => {
   await scenarioCards();
   await scenarioMembers();
   await scenarioVision();
+  await scenarioNativeVision();
   await scenarioChatFeatures();
   await scenarioQuotaGate();
 
