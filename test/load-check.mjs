@@ -181,6 +181,7 @@ function makeCtx(extraServices = {}) {
     wsCreates: [],
     /** 喂给 agent 的用户消息（`followup` 的实参）——批量渲染/补描的断言都看这里。 */
     followups: [],
+    sessionAppends: [],
     /** 假 agent 作用域的全局工具清单（用例自己塞）与 restrict(filter) 的调用记录。 */
     agentToolSchemas: null,
     agentRestricts: [],
@@ -324,6 +325,7 @@ function makeCtx(extraServices = {}) {
           id: sessionId,
           agent: {
             id: sessionId,
+            session: { id: sessionId, append(type, data) { recorded.sessionAppends.push({ id: sessionId, type, data }); } },
             followup(msg) {
               // 无 createUserMessage 的假宿主收到的是 `{role:'user', content:[…]}`，首段是文本。
               recorded.followups.push(msg);
@@ -335,16 +337,22 @@ function makeCtx(extraServices = {}) {
         cb({
           ...sctxBase,
           agents: {
-            create(input) {
+            async create(input) {
               recorded.created.push(input);
-              input.setup?.(fakeAgentCtx(recorded));
-              return handle(input.sessionId);
+              const h = handle(input.sessionId);
+              if (extras.initialApproval) h.agent.session.append('approval/policy', { policy: extras.initialApproval });
+              const commit = await input.setup?.(fakeAgentCtx(recorded), h.agent);
+              commit?.commit();
+              return h;
             },
-            resume(input) {
+            async resume(input) {
               recorded.resumed.push(input);
               if (recorded.resumeError) return Promise.reject(new Error(recorded.resumeError));
-              input.setup?.(fakeAgentCtx(recorded));
-              return handle(input.resumeSessionId);
+              const h = handle(input.resumeSessionId);
+              if (extras.initialApproval) h.agent.session.append('approval/policy', { policy: extras.initialApproval });
+              const commit = await input.setup?.(fakeAgentCtx(recorded), h.agent);
+              commit?.commit();
+              return h;
             },
           },
           agentDefaultModel: {
@@ -1565,7 +1573,8 @@ check('建会话时就把审批策略写成 never：提权入口从工具面上�
   // 旧做法是"等宿主问到我们、再答一声拒绝"——真机 105 分钟的事故证明它兜不住：
   // 审批挂在宿主的链路上，答话只能等轮到。现在改成在建会话那一刻写 `approval/policy: never`，
   // 宿主的 `ApprovalService.decide()` 在分发之前就确定性拒绝，沙箱那句"可以重试提权"的提示也不再出现。
-  const appends = hubProbe.appends.filter((e) => e.type === 'approval/policy');
+  const probe = probeHub(hub, { sessionKey: 'group:55555' });
+  const appends = probe.appends.filter((e) => e.type === 'approval/policy');
   assert.equal(appends.length, 1, `应该恰好写一次 approval/policy，实际 ${appends.length} 次`);
   assert.equal(appends[0].data?.policy, 'never', `策略应为 never，实际 ${JSON.stringify(appends[0].data)}`);
   // 沙箱档不在这里放宽：要用 danger-full-access 是超管改预设的事，不是插件自作主张。
@@ -1582,7 +1591,7 @@ check('ask 档不偷偷改审批策略：有人看着时那一下是真的弹给
   const saved = cfg.agentPolicy;
   try {
     cfg.agentPolicy = { ...saved, unattended: 'ask' };
-    const rec = probeHub(hub);
+    const rec = probeHub(hub, { sessionKey: 'group:55555' });
     assert.equal(
       rec.appends.filter((e) => e.type === 'approval/policy').length,
       0,
@@ -1646,6 +1655,29 @@ check('agent 通道把宿主 API 接进了 pool.host', () => {
   assert.equal(typeof hub.pool.host.hasSession, 'function');
 });
 
+await checkAsync('宿主 create 包装层转交真实 agent：默认权限和显式预设都先于 never；ask 仍保留', async () => {
+  for (const unattended of ['deny', 'auto', 'ask']) {
+    const stub = makeCtx({ initialApproval: 'ask', permissionPresets: {
+      set(session, name) {
+        assert.equal(name, 'workspace-write');
+        session.append('sandbox/mode', { mode: name });
+        session.append('approval/policy', { policy: 'ask' });
+      },
+    } });
+    const instance = apply(stub.ctx, { persist: false, upstreamUrl: '', downstreamTargets: '[]', agent: { unattended, permissionPreset: 'workspace-write' } });
+    try {
+      await sleep(60);
+      const res = await instance.mind.ensureAgent('group:55313');
+      assert.notEqual(res?.ok, false);
+      const events = stub.recorded.sessionAppends;
+      assert.deepEqual(events.map(({ type, data }) => [type, data.policy ?? data.mode]), [
+        ['approval/policy', 'ask'], ['sandbox/mode', 'workspace-write'], ['approval/policy', 'ask'],
+        ...(unattended === 'ask' ? [] : [['approval/policy', 'never']]),
+      ]);
+    } finally { instance.stop?.(); }
+  }
+});
+
 check('onebot_hub_status 返回编排/记忆/隔离', () => {
   const tool = hubTools().find((t) => t.name === 'onebot_hub_status');
   assert.equal(typeof tool.execute, 'function');
@@ -1684,7 +1716,53 @@ await checkAsync('onebot_reply（会话缓冲版）：新排队先把上一条�
   });
   await failTool.execute({ text: '甲' });
   const r4 = await failTool.execute({ text: '乙' });
-  assert.match(r4, /发送失败（第 1\/2 条没发出去，retcode -1935986436）/, `失败回执要如实：${r4}`);
+  assert.match(r4, /发送中止（已发 0\/2 条）：retcode -1935986436/, `失败回执要如实：${r4}`);
+});
+
+await checkAsync('撤回预演不扣次数；onebot_admin 与 onebot_call 共用撤回去重和上限', async () => {
+  const stub = makeCtx();
+  const instance = apply(stub.ctx, { persist: false, upstreamUrl: '', downstreamTargets: '[]', capability: { writeAllow: '["delete_msg"]' } });
+  const sessionKey = 'group:55317';
+  try {
+    const { agentTools } = probeHub(instance, { sessionKey });
+    const wire = [];
+    instance.callAction = async ({ action, params }) => {
+      wire.push([action, String(params.message_id)]);
+      return { ok: true, retcode: 0 };
+    };
+    const admin = async (id, confirm) => JSON.parse(await agentTools.find((x) => x.name === 'onebot_admin').execute({ op: 'recall', confirm, params: JSON.stringify({ message_id: id }) }));
+    const call = async (id) => JSON.parse(await agentTools.find((x) => x.name === 'onebot_call').execute({ action: 'delete_msg', params: JSON.stringify({ message_id: id }) }));
+    instance.mind.beginTurn(sessionKey);
+    assert.equal((await admin('1', false)).dryRun, true);
+    assert.equal((await admin('1', true)).result.ok, true);
+    assert.equal((await call(1)).status, 'blocked');
+    assert.equal((await call(null)).retcode, 1400);
+    for (let id = 2; id <= 6; id++) assert.equal((await call(id)).ok, true);
+    assert.equal((await admin('7', true)).result.status, 'blocked');
+    assert.deepEqual(wire, Array.from({ length: 6 }, (_, i) => ['delete_msg', String(i + 1)]));
+    instance.mind.beginTurn(sessionKey);
+    assert.equal((await call('7')).ok, true);
+  } finally { instance.stop?.(); }
+});
+
+await checkAsync('onebot_reply：沉默和取消都不冲刷待发队列，正常括号不被当成控制词', async () => {
+  const buffer = new ReplyBuffer();
+  const sent = [];
+  const tool = makeReplyTool(buffer, {}, () => {}, { deliverNow: async (batch) => { sent.push(batch.text); return { status: 'ok', total: 1 }; } });
+  for (const args of [{ text: '（不接话）' }, { parts: [{ type: 'text', text: '（这条是 @ 共总的，不接话）' }] }]) {
+    assert.equal(JSON.parse(await tool.execute(args)).queued, false);
+  }
+  await tool.execute({ text: '要取消的草稿' });
+  assert.equal(JSON.parse(await tool.execute({ text: '（不接话）' })).queued, true);
+  assert.equal(buffer.candidate.text, '要取消的草稿');
+  await assert.rejects(() => tool.execute({ parts: [{ type: 'break' }] }), /全是空/);
+  assert.equal(buffer.candidate.text, '要取消的草稿');
+  assert.equal(JSON.parse(await tool.execute({ cancel_pending: true })).cancelled, true);
+  assert.equal(buffer.active, false);
+  assert.deepEqual(sent, []);
+  await tool.execute({ text: '（笑）' });
+  await tool.execute({ text: '下一批' });
+  assert.deepEqual(sent, ['（笑）']);
 });
 
 check('onebot_invoke 能在工具层指定说话人 user_id，并明说换账号可能换结果', () => {
@@ -2171,11 +2249,12 @@ async function runAsyncChecks() {
     // 这里把宿主的会话库做成"只认带后缀的 id"，谁去问无后缀 id 一律 null——修好之后还能成功，
     // 就说明它要的根本不是那个 id。
     const permCalls = [];
+    const permsAppends = [];
     const asked = [];
     const sessionsSvc = {
       get: (id) => {
         asked.push(String(id));
-        return String(id).includes('.a') ? { id } : null;
+        return String(id).includes('.a') ? { id, append(type, data) { permsAppends.push({ type, data }); } } : null;
       },
       rename: async () => ({ ok: true, value: { title: 'x', seq: 1 } }),
     };
@@ -2225,6 +2304,7 @@ async function runAsyncChecks() {
     assert.equal(permCalls.length, 1, '应当只调了一次 presets.set');
     assert.equal(permCalls[0].id, liveId, `.perm 必须改到本次激活的会话，实际改到了 ${permCalls[0].id}`);
     assert.equal(permCalls[0].value, 'workspace-write');
+    assert.deepEqual(permsAppends, [{ type: 'approval/policy', data: { policy: 'never' } }]);
     assert.ok(asked.length > 0, '没有去问 sessions.get');
     assert.equal(
       asked.includes('onebot-hub:group%3A88991'),
@@ -2623,16 +2703,24 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.ok(r2.rejected.some((x) => /visibility/.test(x.path) && x.reason.includes('由代码')), JSON.stringify(r2.rejected));
     const stored = hub.store.all().find((e) => e.text === '他今天心情不好');
     assert.equal(stored.visibility, 'group:55555', '模型给的 private 不该被采纳，代码按"点了名"收敛回本群');
+    assert.deepEqual(r2.changes, [{ block: 'long_term', op: 'add', id: stored.id }]);
+    const previous = { modifiedAt: stored.modifiedAt, refs: stored.refs, source: stored.source };
+    const same = JSON.parse(await t.execute({ ...ctxArg, ops: { long_term: { modify: [{ id: stored.id, content: stored.text }] } } }));
+    assert.equal(same.applied.long_term.modify, 0);
+    assert.equal(same.applied.long_term.unchanged, 1);
+    assert.deepEqual(same.changes, [{ block: 'long_term', op: 'unchanged', id: stored.id }]);
+    assert.deepEqual({ modifiedAt: stored.modifiedAt, refs: stored.refs, source: stored.source }, previous);
+    assert.equal(same.long_term_list, undefined);
+    assert.ok(JSON.stringify(same).length < 900, '单条改写不用再回整张记忆表');
 
     const draft = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: {
       'coffee-choice': { title: '咖啡机选购', conclusion: '选了磨豆机 A', unresolved: ['取货时间待定'] },
     } } }));
     assert.equal(draft.applied.topics, 1);
-    assert.ok(draft.active.list.some((x) => x.id === 'coffee-choice'));
+    assert.equal(hub.profiles.topicCard('group:55555', 'coffee-choice').status, 'open');
     const rk = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: { 'coffee-choice': { status: 'closed' } } } }));
     assert.equal(rk.applied.topics, 1);
-    assert.ok(!rk.active.list.some((x) => x.id === 'coffee-choice'));
-    assert.ok(rk.long_term_list.every((x) => x.id && !x.archive));
+    assert.equal(rk.long_term_list, undefined, '写一张卡不应返回完整长期记忆');
     const settled = hub.profiles.topicCard('group:55555', 'coffee-choice');
     assert.equal(settled.status, 'closed');
     assert.equal(settled.conclusion, '选了磨豆机 A');
@@ -2642,7 +2730,7 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
     assert.equal(update.applied.topics, 1);
     assert.equal(hub.profiles.topicCard('group:55555', 'coffee-choice').status, 'closed');
     const reopened = JSON.parse(await t.execute({ ...ctxArg, ops: { topics: { 'coffee-choice': { status: 'open' } } } }));
-    assert.ok(reopened.active.list.some((x) => x.id === 'coffee-choice'));
+    assert.equal(hub.profiles.topicCard('group:55555', 'coffee-choice').status, 'open');
 
     // 人物档案：facts 与 corrections 分开落，`impression` 更新。
     const r5 = JSON.parse(

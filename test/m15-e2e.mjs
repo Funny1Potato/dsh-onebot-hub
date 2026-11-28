@@ -2206,13 +2206,75 @@ async function scenarioPurgeKeepsTalking() {
   });
 }
 
+async function scenarioRecallFeedbackBounds() {
+  const { hub, sent } = makeHub({ replyGapMs: 0 });
+  const policy = resolveAgentPolicy({ wakeOnNotice: true, mode: 'active' });
+  const mind = new Mind({ hub, timeline: hub.timeline, policy, log: () => {} });
+  const heard = [];
+  hub.hooks.onUpstreamEvent = (entry, info) => heard.push({ info, verdict: mind.observe(entry, info) });
+  const event = { time: Math.floor(Date.now() / 1000), post_type: 'notice', notice_type: 'group_recall', self_id: SELF_ID, group_id: 88888, user_id: 10001, message_id: -99 };
+  hub.handleUpstreamEvent({ ...event, operator_id: SELF_ID });
+  hub.handleUpstreamEvent({ ...event, user_id: SELF_ID, operator_id: 10001 });
+  check('自己操作的撤回仍记时间线，但不唤醒；别人撤回 bot 的消息仍可按配置入批', () => {
+    assert.deepEqual(heard.map((row) => row.info.isSelf), [true, false]);
+    assert.equal(heard[0].verdict?.wake, false);
+    assert.equal(hub.timeline.bySession('group:88888', 10).length, 2);
+  });
+  const key = 'group:88888';
+  mind.beginTurn(key);
+  for (let i = 0; i < 17; i++) await mind.deliver(key, { text: 'hello', segments: [{ type: 'text', data: { text: 'hello' } }] });
+  check('单轮发送和撤回有物理上限，重复撤回只尝试一次，另一个会话不共享预算', () => {
+    assert.equal(sent.length, 16);
+    assert.equal(mind.reserveTurnEffect(key, 'recall', '-1').ok, true);
+    assert.equal(mind.reserveTurnEffect(key, 'recall', '-1').ok, false);
+    for (let j = 2; j <= 6; j++) assert.equal(mind.reserveTurnEffect(key, 'recall', String(-j)).ok, true);
+    assert.equal(mind.reserveTurnEffect(key, 'recall', '-7').ok, false);
+    mind.beginTurn('group:88889');
+    assert.equal(mind.reserveTurnEffect('group:88889', 'send').ok, true);
+    assert.equal(mind.reserveTurnEffect(key, 'send').ok, false);
+    mind.beginTurn(key);
+    assert.equal(mind.reserveTurnEffect(key, 'recall', '-1').ok, true);
+  });
+}
+
+async function scenarioTurnResultFromSession() {
+  const policy = resolveAgentPolicy({ mode: 'assist' });
+  let nextResult = { kind: 'error', error: { message: 'model failed' } };
+  const events = [{ type: 'turn/end', data: { reason: { kind: 'completed' } } }];
+  const agent = {
+    session: { get seq() { return events.length; }, snapshotEvents(from) { return events.slice(from); } },
+    followup() {
+      events.push({ type: 'turn/start' });
+      if (nextResult) events.push({ type: 'turn/end', data: { reason: nextResult } });
+    },
+    async whenIdle() {},
+  };
+  const pool = new AgentPool({ policy, host: { async hasSession() { return false; }, async create() { return { agent, dispose() {} }; } } });
+  const run = () => pool.wake('group:50001', { text: '消息' });
+  const failed = await run();
+  nextResult = { kind: 'completed' };
+  const success = await run();
+  nextResult = null;
+  const unconfirmed = await run();
+  check('宿主 whenIdle 不代表成功：无事件订阅时也只认这次写入的回合结果', () => {
+    assert.equal(failed.ok, false);
+    assert.equal(failed.error, 'model failed');
+    assert.equal(success.ok, true);
+    assert.equal(success.turnEnd, 'completed');
+    assert.equal(unconfirmed.ok, false);
+    assert.equal(unconfirmed.turnEnd, 'unconfirmed');
+  });
+}
+
 async function scenarioTurnErrorRecorded() {
+  await scenarioTurnResultFromSession();
   // 真宿主里 `whenIdle()` 会把回合内的错误吞掉：账本必须把 `turn/end` 的原因留下来。
   const { hub, sent } = makeHub();
   const policy = resolveAgentPolicy({ mode: 'assist', batchSize: 99, batchMs: 600000 });
   const ref = {};
   const { host } = makeFakeHost({
-    script: async () => {
+    script: async (agent) => {
+      await agent.tools.get('onebot_reply').execute({ text: '这一条不应在错误后发出' });
       ref.mind.noteSessionEvent('group:88888', {
         type: 'turn/end',
         data: { turn: 1, reason: { kind: 'error', error: { message: 'model quota exceeded', code: 'quota' } } },
@@ -2220,7 +2282,9 @@ async function scenarioTurnErrorRecorded() {
     },
   });
   const pool = new AgentPool({ policy, host, log: () => {} });
-  const mind = new Mind({ hub, timeline: hub.timeline, store: new MemoryStore({}), policy, pool, log: () => {} });
+  const mind = new Mind({ hub, timeline: hub.timeline, store: new MemoryStore({}), policy, pool, log: () => {},
+    setup: (ctx, { reply }) => ctx.tools.register({ name: 'onebot_reply', execute: (args) => reply.capture(args) }),
+  });
   ref.mind = mind;
   hub.hooks.onUpstreamEvent = (entry, info) => mind.observe(entry, info);
   hub.handleUpstreamEvent(groupMessage({ groupId: 88888, messageId: 50003, text: '喂' }));
@@ -2228,6 +2292,8 @@ async function scenarioTurnErrorRecorded() {
 
   check('回合以 error 结束时，原因留在账本里而不是伪装成"沉默"', () => {
     assert.equal(sent.length, 0, '这一轮不该有发言');
+    assert.equal(mind.stats.lastTurn.diag.discardedReply, true);
+    assert.equal(mind.stats.lastTurn.ok, false);
     assert.equal(mind.stats.lastTurn.diag.turnEnd, 'error');
     assert.equal(mind.stats.lastTurn.diag.turnError, 'model quota exceeded');
     assert.equal(mind.stats.lastTurn.spokeFrom, 'none');
@@ -5016,6 +5082,7 @@ const main = async () => {
   await scenarioMultiSteerInterject();
   await scenarioReplyBufferSurvivesSecondWake();
   await scenarioPurgeKeepsTalking();
+  await scenarioRecallFeedbackBounds();
   await scenarioTurnErrorRecorded();
   await scenarioArchivedSessionGate();
   await scenarioCapability();
