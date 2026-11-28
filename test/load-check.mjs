@@ -2506,21 +2506,22 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
   });
 
   await checkAsync('onebot_reply（直发版）images：hub-media 引用发之前解析成 blob 本地路径（修1，真机 failed -1935986436）', async () => {
-    const originalMedia = hub.media;
-    const originalUpstream = hub.upstream;
+    // 共享 Hub 的批次扫描可能在两次 send 间隔内唤醒，污染上游调用账本。
+    const stub = makeCtx();
+    const isolated = apply(stub.ctx, { persist: false, upstreamUrl: '', downstreamTargets: '[]', agent: { mode: 'observer' } });
     const calls = [];
     try {
-      // 换一个"媒体库"：find 一问就有 blob——真实例里这是 #resolveMedia 落地后的产物；
-      // 再换一个"上游"：直发版会真的 request，正好拿它验收出站的段长什么样。
-      hub.media = { find: (id) => (id === 'hub-media:abc123' ? { id, blob: 'D:\\fake\\blobs\\abc123.png', mediaType: 'image/png' } : null) };
-      hub.upstream = {
+      isolated.media = { find: (id) => (id === 'hub-media:abc123' ? { id, blob: 'D:\\fake\\blobs\\abc123.png', mediaType: 'image/png' } : null) };
+      isolated.upstream = {
         isConnected: true,
+        stop() {},
         request: async (action, params) => {
           calls.push({ action, params });
           return { status: 'ok', retcode: 0, data: null, echo: null };
         },
       };
-      const t = hubDirectReply();
+      const { agentTools } = probeHub(isolated, { failFirstRegister: true, sessionKey: 'group:55555' });
+      const t = agentTools.find((tool) => tool.name === 'onebot_reply');
       // m32420 起「一次调用发多条」：文字一条 + 图各一条 = 2 次 send_msg。
       await t.execute({ text: '看这个', images: ['hub-media:abc123'], group_id: '55555' });
       const segs = calls.at(-1)?.params?.message ?? [];
@@ -2542,8 +2543,7 @@ await checkAsync('onebot_memory_audit 能执行', async () => {
       );
       assert.equal(calls.length, 3, '报错的这一次不能真的发出去');
     } finally {
-      hub.media = originalMedia;
-      hub.upstream = originalUpstream;
+      isolated.stop?.();
     }
   });
 
